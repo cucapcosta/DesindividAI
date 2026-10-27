@@ -88,7 +88,7 @@
 
 ### Sub-Tarefa 1 — Fluxo de Consentimento e Gateway REST
 **Responsável:** M1
-**Status:** [ ] pending
+**Status:** [x] done
 
 #### Intent
 Definir como o cliente autoriza o acesso aos seus dados financeiros via Open Finance e como esse consentimento é validado em cada chamada ao gateway.
@@ -100,12 +100,18 @@ Definir como o cliente autoriza o acesso aos seus dados financeiros via Open Fin
 - Decisão documentada sobre ciclo de vida do token de consentimento (expiração, revogação)
 
 #### Todo List
-- [ ] Estudar especificação Open Finance Brasil (fase 2 — dados de crédito)
-- [ ] Mapear endpoints necessários: `/consent`, `/debts`, `/simulation`, `/recommendation`
-- [ ] Desenhar diagrama de sequência do fluxo de consentimento OAuth2
-- [ ] Definir contrato OpenAPI 3.0 com schemas de request/response para cada endpoint
-- [ ] Especificar política de rate limiting, autenticação e CORS no IBM API Connect
-- [ ] Documentar ciclo de vida do consentimento (TTL, revogação, re-autorização)
+- [x] Estudar especificação Open Finance Brasil (fase 2 — dados de crédito)
+- [x] Mapear endpoints necessários: `/consent`, `/debts`, `/simulation`, `/recommendation`
+- [x] Desenhar diagrama de sequência do fluxo de consentimento OAuth2
+- [x] Definir contrato OpenAPI 3.0 com schemas de request/response para cada endpoint
+- [x] Especificar política de rate limiting, autenticação e CORS no IBM API Connect
+- [x] Documentar ciclo de vida do consentimento (TTL, revogação, re-autorização)
+
+#### Entregáveis
+- [`openapi/openapi.yaml`](openapi/openapi.yaml) — Contrato OpenAPI 3.0 completo
+- [`docs/m1-consent-flow.md`](docs/m1-consent-flow.md) — Diagrama de sequência OAuth2 FAPI
+- [`docs/m1-api-connect-policies.md`](docs/m1-api-connect-policies.md) — Políticas API Connect
+- [`docs/m1-consent-lifecycle.md`](docs/m1-consent-lifecycle.md) — Ciclo de vida do consentimento
 
 #### Relevant Context
 - Regulação: Open Finance Brasil — [openfinancebrasil.org.br](https://openfinancebrasil.org.br)

@@ -1,0 +1,513 @@
+openapi: "3.0.3"
+
+info:
+  title: DesendividAÍ API
+  version: "1.0.0"
+  description: |
+    API REST do agente DesendividAÍ — consolida dívidas via Open Finance e Serasa,
+    prioriza por CET e entrega plano personalizado de quitação.
+
+    **Autenticação:** OAuth2 Authorization Code Flow com PKCE (FAPI 1.0 Advanced Profile).
+    Todos os endpoints exigem um Bearer token emitido pelo IBM API Connect Native OAuth Provider.
+
+    **Escopo de consentimento obrigatório por recurso:**
+
+    | Endpoint | Scope |
+    |---|---|
+    | POST /consent | `openid consent:write` |
+    | DELETE /consent/{consentId} | `consent:write` |
+    | GET /debts | `debts:read` |
+    | POST /simulation | `simulation:read` |
+    | POST /recommendation | `recommendation:read` |
+  contact:
+    name: Os Guri da IBM
+  license:
+    name: Privado — uso interno
+
+servers:
+  - url: https://api.bb.com.br/desendividai/v1
+    description: Produção (IBM API Connect)
+  - url: https://api-sandbox.bb.com.br/desendividai/v1
+    description: Sandbox / homologação
+
+# ---------------------------------------------------------------------------
+# Security schemes
+# ---------------------------------------------------------------------------
+components:
+  securitySchemes:
+    openfinance_oauth2:
+      type: oauth2
+      description: |
+        OAuth2 Authorization Code com PKCE — Financial-grade API (FAPI) 1.0 Advanced Profile.
+        O Authorization Server é o IBM API Connect Native OAuth Provider.
+      flows:
+        authorizationCode:
+          authorizationUrl: https://auth.bb.com.br/oauth/authorize
+          tokenUrl: https://api.bb.com.br/desendividai/v1/oauth/token
+          refreshUrl: https://api.bb.com.br/desendividai/v1/oauth/token
+          scopes:
+            openid:             Identidade do cliente (obrigatório)
+            "consent:write":    Criar e revogar consentimentos
+            "debts:read":       Listar dívidas consolidadas
+            "simulation:read":  Solicitar simulação de cenários
+            "recommendation:read": Obter recomendação de quitação
+
+  # -------------------------------------------------------------------------
+  # Schemas reutilizáveis
+  # -------------------------------------------------------------------------
+  schemas:
+
+    ConsentRequest:
+      type: object
+      required: [cpf, institutions, scopes, expiration_days]
+      properties:
+        cpf:
+          type: string
+          pattern: '^\d{11}$'
+          example: "01234567890"
+          description: CPF do titular (11 dígitos, sem pontuação)
+        institutions:
+          type: array
+          minItems: 1
+          items:
+            type: string
+          example: ["bb", "itau", "bradesco"]
+          description: Códigos das instituições autorizadas (Open Finance Brasil)
+        scopes:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum: ["debts:read", "simulation:read", "recommendation:read"]
+          example: ["debts:read", "simulation:read", "recommendation:read"]
+        expiration_days:
+          type: integer
+          minimum: 1
+          maximum: 365
+          default: 90
+          description: TTL do consentimento em dias (máx. 365 — BCB Resolução 3/2020)
+
+    ConsentResponse:
+      type: object
+      properties:
+        consent_id:
+          type: string
+          format: uuid
+          example: "c7f3a2d1-8b4e-4c6f-9a0b-123456789abc"
+        status:
+          type: string
+          enum: [AWAITING_AUTHORISATION, AUTHORISED, REJECTED, REVOKED]
+          example: AWAITING_AUTHORISATION
+        redirect_url:
+          type: string
+          format: uri
+          description: URL para o cliente autorizar o consentimento no portal Open Finance
+        expires_at:
+          type: string
+          format: date-time
+          example: "2025-10-01T00:00:00Z"
+        created_at:
+          type: string
+          format: date-time
+
+    Debt:
+      type: object
+      properties:
+        debt_id:
+          type: string
+          format: uuid
+        institution:
+          type: string
+          example: "itau"
+        product_type:
+          type: string
+          enum: [CREDIT_CARD, PERSONAL_LOAN, PAYROLL_LOAN, OVERDRAFT, VEHICLE_LOAN, MORTGAGE]
+          example: CREDIT_CARD
+        outstanding_balance:
+          type: number
+          format: double
+          example: 4500.00
+        cet_annual:
+          type: number
+          format: double
+          description: "Custo Efetivo Total anual (% a.a.) — BCB Resolução 3.517/2007"
+          example: 234.5
+        monthly_payment:
+          type: number
+          format: double
+          example: 350.00
+        remaining_installments:
+          type: integer
+          example: 14
+        priority_rank:
+          type: integer
+          description: Posição na fila de prioridade (1 = maior CET, quitação urgente)
+          example: 1
+
+    DebtListResponse:
+      type: object
+      properties:
+        pseudonym_id:
+          type: string
+          description: ID pseudonimizado do cliente (HMAC-SHA256) — não expõe CPF
+          example: "a3f9c1..."
+        snapshot_id:
+          type: string
+          format: uuid
+          description: ID do snapshot financeiro persistido no MongoDB
+        total_outstanding:
+          type: number
+          format: double
+          example: 12350.00
+        debts:
+          type: array
+          items:
+            $ref: '#/components/schemas/Debt'
+        generated_at:
+          type: string
+          format: date-time
+
+    SimulationRequest:
+      type: object
+      required: [snapshot_id, monthly_budget]
+      properties:
+        snapshot_id:
+          type: string
+          format: uuid
+          description: ID do snapshot retornado por GET /debts
+        monthly_budget:
+          type: number
+          format: double
+          minimum: 0
+          example: 1500.00
+          description: Orçamento mensal disponível para quitação (R$)
+
+    SimulationScenario:
+      type: object
+      properties:
+        scenario_id:
+          type: string
+          enum: [aggressive, consolidation, minimum_viable]
+        label:
+          type: string
+          example: "Agressivo"
+        description:
+          type: string
+          example: "Máxima quitação com orçamento disponível, maior CET primeiro"
+        total_months:
+          type: integer
+          example: 18
+        total_interest_paid:
+          type: number
+          format: double
+          example: 2340.00
+        total_savings_vs_minimum:
+          type: number
+          format: double
+          description: Economia total em juros vs. cenário mínimo
+          example: 5200.00
+        monthly_plan:
+          type: array
+          items:
+            type: object
+            properties:
+              month:
+                type: integer
+              payments:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    debt_id:
+                      type: string
+                      format: uuid
+                    amount:
+                      type: number
+                      format: double
+
+    SimulationResponse:
+      type: object
+      properties:
+        simulation_id:
+          type: string
+          format: uuid
+        snapshot_id:
+          type: string
+          format: uuid
+        scenarios:
+          type: array
+          minItems: 3
+          maxItems: 3
+          items:
+            $ref: '#/components/schemas/SimulationScenario'
+        generated_at:
+          type: string
+          format: date-time
+
+    RecommendationRequest:
+      type: object
+      required: [simulation_id]
+      properties:
+        simulation_id:
+          type: string
+          format: uuid
+        language_level:
+          type: string
+          enum: [simple, technical]
+          default: simple
+          description: Nível de linguagem da explicação gerada pelo Granite
+
+    RecommendationResponse:
+      type: object
+      properties:
+        recommendation_id:
+          type: string
+          format: uuid
+        recommended_scenario:
+          type: string
+          enum: [aggressive, consolidation, minimum_viable]
+          example: aggressive
+        explanation:
+          type: string
+          description: Explicação em linguagem simples gerada pelo Granite (LLM)
+          example: "Sua dívida mais cara é o cartão de crédito com 234% a.a. Quitá-la em 6 meses economiza R$ 5.200 em juros."
+        scenarios:
+          type: array
+          items:
+            $ref: '#/components/schemas/SimulationScenario'
+        generated_at:
+          type: string
+          format: date-time
+        trace_id:
+          type: string
+          description: ID de rastreio do watsonx.governance para auditoria LGPD
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: CONSENT_NOT_FOUND
+        message:
+          type: string
+          example: "Consentimento não encontrado ou expirado."
+        request_id:
+          type: string
+          format: uuid
+
+# ---------------------------------------------------------------------------
+# Global security (Bearer token em todos os endpoints)
+# ---------------------------------------------------------------------------
+security:
+  - openfinance_oauth2: [openid]
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+paths:
+
+  # ── Consentimento ──────────────────────────────────────────────────────────
+  /consent:
+    post:
+      operationId: createConsent
+      summary: Criar consentimento Open Finance
+      description: |
+        Inicia o fluxo de consentimento OAuth2/Open Finance.
+        Retorna uma `redirect_url` para o cliente autorizar o acesso no portal
+        da instituição financeira. O status inicial é `AWAITING_AUTHORISATION`.
+      tags: [Consent]
+      security:
+        - openfinance_oauth2: [openid, "consent:write"]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConsentRequest'
+      responses:
+        "201":
+          description: Consentimento criado, aguardando autorização do cliente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConsentResponse'
+        "400":
+          description: Parâmetros inválidos
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: Token ausente ou inválido
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "429":
+          description: Rate limit excedido
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /consent/{consentId}:
+    delete:
+      operationId: revokeConsent
+      summary: Revogar consentimento
+      description: |
+        Revoga o consentimento e marca o status como `REVOKED`.
+        Nenhum dado do cliente poderá ser acessado após a revogação.
+        Conforme LGPD Art. 8º §5 — consentimento pode ser revogado a qualquer tempo.
+      tags: [Consent]
+      security:
+        - openfinance_oauth2: ["consent:write"]
+      parameters:
+        - name: consentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Consentimento revogado com sucesso
+        "404":
+          description: Consentimento não encontrado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: Token ausente ou inválido
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ── Dívidas ────────────────────────────────────────────────────────────────
+  /debts:
+    get:
+      operationId: getDebts
+      summary: Listar dívidas consolidadas e priorizadas por CET
+      description: |
+        Aciona o Agente 1 (LangChain + Granite) que coleta dívidas via Open Finance
+        e Serasa, calcula o CET de cada uma e retorna o retrato financeiro priorizado.
+        Os dados são pseudonimizados antes da persistência no MongoDB.
+      tags: [Debts]
+      security:
+        - openfinance_oauth2: ["debts:read"]
+      parameters:
+        - name: consent_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: ID do consentimento AUTHORISED
+      responses:
+        "200":
+          description: Retrato financeiro priorizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DebtListResponse'
+        "202":
+          description: Processamento em andamento — consulte novamente em alguns segundos
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Consentimento não autorizado ou escopo insuficiente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: Consentimento não encontrado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ── Simulação ──────────────────────────────────────────────────────────────
+  /simulation:
+    post:
+      operationId: runSimulation
+      summary: Simular cenários de quitação
+      description: |
+        Aciona o Motor de Simulação (AI Service Python no watsonx.ai) e retorna
+        3 cenários: **agressivo**, **consolidação** e **mínimo viável**.
+      tags: [Simulation]
+      security:
+        - openfinance_oauth2: ["simulation:read"]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SimulationRequest'
+      responses:
+        "200":
+          description: Três cenários de simulação calculados
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimulationResponse'
+        "400":
+          description: snapshot_id inválido ou orçamento negativo
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Escopo insuficiente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ── Recomendação ───────────────────────────────────────────────────────────
+  /recommendation:
+    post:
+      operationId: getRecommendation
+      summary: Obter recomendação de quitação em linguagem simples
+      description: |
+        Aciona o Agente 2 (LangChain + Granite) que analisa os cenários e
+        gera uma recomendação em linguagem simples. Toda decisão do LLM é
+        registrada no watsonx.governance para auditoria LGPD.
+      tags: [Recommendation]
+      security:
+        - openfinance_oauth2: ["recommendation:read"]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecommendationRequest'
+      responses:
+        "200":
+          description: Recomendação gerada com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecommendationResponse'
+        "400":
+          description: simulation_id inválido
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Escopo insuficiente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: Motor de Simulação ou LLM indisponível
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
