@@ -228,8 +228,11 @@ Projetar a camada de dados garantindo que informações pessoais financeiras sej
 |---|---|---|
 | Orquestração de agentes | LangChain | Flexibilidade, integração nativa com watsonx.ai, sem lock-in em plataforma IBM |
 | LLM backend | watsonx.ai Granite | Modelo IBM, soberania de dados, conformidade com requisitos bancários |
-| Armazenamento | IBM Cloud Databases for MongoDB | NoSQL flexível para snapshots financeiros semi-estruturados |
-| Pseudonimização | HMAC-SHA256 + HSM | Pseudonimização determinística (permite correlação interna) com chave segregada |
+| Armazenamento (produção) | IBM Cloud Databases for MongoDB | NoSQL flexível para snapshots financeiros semi-estruturados |
+| Armazenamento (hackathon) | **Cloudant** (substituto) | MongoDB indisponível na conta do hackathon; Cloudant é document-store compatível |
+| Secrets (produção) | IBM Cloud Secrets Manager + HSM | Pseudonimização determinística com chave segregada em hardware |
+| Secrets (hackathon) | COS + envelope encryption | Secrets Manager indisponível na conta do hackathon |
+| Pseudonimização | HMAC-SHA256 + chave mestra | Pseudonimização determinística (permite correlação interna) |
 | Gateway | IBM API Connect | Padrão IBM, suporte a FAPI (Financial-grade API), políticas OAuth2 nativas |
 | Governança | watsonx.governance | Rastreabilidade de decisões de IA exigida por regulação financeira |
 | Motor de simulação | AI Service Python no watsonx.ai | Lógica financeira pura, sem dependência de LLM, reutilizável como endpoint REST |
