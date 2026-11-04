@@ -14,8 +14,9 @@ from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from api.models import ErrorResponse
-from api.routers import consent, debts, simulation, recommendation
+from src.api.models import ErrorResponse
+from src.core.errors import ServiceError
+from src.api.routers import consent, debts, simulation, recommendation
 
 app = FastAPI(
     title="DesendividAÍ API",
@@ -60,6 +61,14 @@ app.include_router(recommendation.router)  # M3 — POST /recommendation
 # Handler global para NotImplementedError
 # Retorna 501 enquanto os times não implementam os endpoints
 # ---------------------------------------------------------------------------
+@app.exception_handler(ServiceError)
+async def service_error_handler(request: Request, exc: ServiceError):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=ErrorResponse(code=exc.code, message=exc.message).model_dump(mode="json"),
+    )
+
+
 @app.exception_handler(NotImplementedError)
 async def not_implemented_handler(request: Request, exc: NotImplementedError):
     return JSONResponse(
