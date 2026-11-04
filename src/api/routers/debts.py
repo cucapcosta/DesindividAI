@@ -13,7 +13,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, status
 
-from api.models import DebtListResponse, ErrorResponse
+from src.api.models import DebtListResponse, ErrorResponse
 
 router = APIRouter(prefix="/debts", tags=["Debts"])
 

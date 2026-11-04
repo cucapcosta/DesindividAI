@@ -2,6 +2,15 @@ fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
 pydantic>=2.7.0
 python-dotenv>=1.0.0
+httpx>=0.27.0
+
+# Testes
+pytest>=8.0.0
+
+# Agente 2 (LangChain + watsonx.ai)
+langchain-core>=0.3.0
+langchain-ibm>=0.3.0
 
 # Para rodar:
 #   uvicorn src.main:app --reload
+# Testes: pytest
