@@ -154,7 +154,7 @@ Projetar o Agente 1 responsável por coletar dívidas via Open Finance e Serasa,
 
 ### Sub-Tarefa 3 — Agente 2: Simulação de Cenários e Recomendação
 **Responsável:** M3
-**Status:** [ ] pending
+**Status:** [x] done
 
 #### Intent
 Projetar o Agente 2 responsável por simular cenários de quitação e gerar a recomendação final em linguagem simples, usando o Motor de Simulação como AI Service no watsonx.ai.
@@ -167,17 +167,26 @@ Projetar o Agente 2 responsável por simular cenários de quitação e gerar a r
 - Orquestração LangChain entre Agente 1 → Agente 2 especificada
 
 #### Todo List
-- [ ] Definir interface entre Agente 1 e Agente 2 (schema do snapshot como input)
-- [ ] Especificar os 3 cenários do Motor de Simulação:
+- [x] Definir interface entre Agente 1 e Agente 2 (schema do snapshot como input)
+- [x] Especificar os 3 cenários do Motor de Simulação:
   - **Agressivo:** máxima quitação com orçamento disponível, maior CET primeiro
   - **Consolidação:** portabilidade de dívidas caras para linha BB com CET menor
   - **Mínimo viável:** apenas pagamento mínimo + quitação da dívida mais cara
-- [ ] Definir inputs/outputs do Motor de Simulação (API contract do AI Service)
-- [ ] Especificar deploy do Motor como AI Service no watsonx.ai (endpoint REST)
-- [ ] Definir tool `run_simulation` do Agente 2 que chama o AI Service
-- [ ] Projetar prompt template do Agente 2 para geração de recomendação em linguagem simples
-- [ ] Definir schema JSON de resposta final: `scenarios[]`, `recommended_scenario`, `explanation`
-- [ ] Especificar como o Agente 2 é invocado após conclusão do Agente 1 (LangChain chain)
+- [x] Definir inputs/outputs do Motor de Simulação (API contract do AI Service)
+- [x] Especificar deploy do Motor como AI Service no watsonx.ai (endpoint REST)
+- [x] Definir tool `run_simulation` do Agente 2 que chama o AI Service
+- [x] Projetar prompt template do Agente 2 para geração de recomendação em linguagem simples
+- [x] Definir schema JSON de resposta final: `scenarios[]`, `recommended_scenario`, `explanation`
+- [x] Especificar como o Agente 2 é invocado após conclusão do Agente 1 (LangChain chain)
+
+#### Entregáveis
+- [`src/simulation/engine.py`](src/simulation/engine.py) — Motor de Simulação (3 cenários), com [`ai_service.py`](src/simulation/ai_service.py) e [`client.py`](src/simulation/client.py)
+- [`src/agents/recommendation_agent.py`](src/agents/recommendation_agent.py) — Agente 2 (LCEL + Granite) e tool `run_simulation`
+- `POST /simulation` e `POST /recommendation` implementados; testes em `tests/`
+- [`docs/m3-simulation-engine.md`](docs/m3-simulation-engine.md) — contrato, cenários e premissas
+- [`docs/m3-agent2-recommendation.md`](docs/m3-agent2-recommendation.md) — prompt, chain, governança
+
+> Desvios: o cenário recomendado é escolhido por regra determinística (o LLM só explica); o deploy do AI Service no watsonx.ai e o envio do trace ao watsonx.governance ainda não foram executados.
 
 #### Relevant Context
 - AI Services watsonx.ai: [Deploying AI services](https://dataplatform.cloud.ibm.com/docs/content/wsj/analyze-data/ai-services-direct-coding-overview.html)
