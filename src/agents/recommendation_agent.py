@@ -27,7 +27,8 @@ Você recebe cenários de quitação JÁ CALCULADOS e deve explicar ao cliente q
 Regras:
 - Use SOMENTE os números fornecidos em FATOS. Nunca invente valores, taxas ou prazos.
 - Valores em reais no formato R$ 1.234,56; prazos em meses (e anos quando passar de 12 meses).
-- Explique a economia de juros do cenário recomendado em relação a pagar só o mínimo.
+- Explique a economia de juros do cenário recomendado em relação a pagar só o mínimo, usando juros_se_pagar_so_o_minimo,
+  juros_totais e economia_vs_pagar_so_o_minimo do MESMO cenário. Nunca use juros de outro cenário como se fosse o de pagar só o mínimo.
 - Diga quais são os primeiros passos do mês 1 (campo primeiros_passos).
 - Se o cenário envolver consolidação/portabilidade, avise que a taxa é uma estimativa e depende de aprovação de crédito.
 - Não prometa resultados nem dê garantias. Não peça dados pessoais.
@@ -69,6 +70,7 @@ def _facts(inputs: dict[str, Any]) -> str:
                     "descricao": s.description,
                     "prazo_meses": s.total_months,
                     "juros_totais": s.total_interest_paid,
+                    "juros_se_pagar_so_o_minimo": round(s.total_interest_paid + s.total_savings_vs_minimum, 2),
                     "economia_vs_pagar_so_o_minimo": s.total_savings_vs_minimum,
                 }
                 for s in inputs["scenarios"]
@@ -80,13 +82,18 @@ def _facts(inputs: dict[str, Any]) -> str:
 
 
 def build_llm() -> Runnable:
-    """Granite via watsonx.ai. Falha com 503 se as credenciais não estiverem configuradas."""
-    url, apikey, project = env("WATSONX_URL"), env("IBM_CLOUD_API_KEY"), env("WATSONX_PROJECT_ID")
-    if not (url and apikey and project):
+    """
+    Granite via watsonx.ai. Falha com 503 se as credenciais não estiverem configuradas.
+    Usa WATSONX_SPACE_ID (espaço de implementação) se definido; senão WATSONX_PROJECT_ID.
+    """
+    url, apikey = env("WATSONX_URL"), env("IBM_CLOUD_API_KEY")
+    space, project = env("WATSONX_SPACE_ID"), env("WATSONX_PROJECT_ID")
+    if not (url and apikey and (space or project)):
         raise ServiceError(
             503, "SERVICE_UNAVAILABLE",
-            "watsonx.ai não configurado (WATSONX_URL, IBM_CLOUD_API_KEY, WATSONX_PROJECT_ID).",
+            "watsonx.ai não configurado (WATSONX_URL, IBM_CLOUD_API_KEY e WATSONX_PROJECT_ID ou WATSONX_SPACE_ID).",
         )
+    scope = {"space_id": space} if space else {"project_id": project}
     from langchain_ibm import ChatWatsonx
 
     try:
@@ -94,8 +101,8 @@ def build_llm() -> Runnable:
             model_id=env("WATSONX_MODEL_ID", "ibm/granite-4-h-small"),
             url=url,
             apikey=apikey,
-            project_id=project,
-            params={"max_new_tokens": 600, "temperature": 0.2},
+            **scope,
+            params={"max_tokens": 600, "temperature": 0.2},
         )
     except Exception as exc:  # credencial inválida, rede, projeto inexistente
         raise ServiceError(
