@@ -17,7 +17,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import Runnable, RunnableLambda, RunnablePassthrough
 
 from src.api.models import LanguageLevel, ScenarioId, SimulationScenario
-from src.core.config import env
+from src.core.config import WATSONX_VARS, ConfigurationError, env, require_env, watsonx_scope
 from src.core.errors import ServiceError
 from src.simulation.engine import MAX_MONTHS
 
@@ -86,14 +86,12 @@ def build_llm() -> Runnable:
     Granite via watsonx.ai. Falha com 503 se as credenciais não estiverem configuradas.
     Usa WATSONX_SPACE_ID (espaço de implementação) se definido; senão WATSONX_PROJECT_ID.
     """
+    try:
+        require_env(*WATSONX_VARS)
+        scope = watsonx_scope()
+    except ConfigurationError as exc:
+        raise ServiceError(503, "SERVICE_UNAVAILABLE", f"watsonx.ai não configurado. {exc}") from exc
     url, apikey = env("WATSONX_URL"), env("IBM_CLOUD_API_KEY")
-    space, project = env("WATSONX_SPACE_ID"), env("WATSONX_PROJECT_ID")
-    if not (url and apikey and (space or project)):
-        raise ServiceError(
-            503, "SERVICE_UNAVAILABLE",
-            "watsonx.ai não configurado (WATSONX_URL, IBM_CLOUD_API_KEY e WATSONX_PROJECT_ID ou WATSONX_SPACE_ID).",
-        )
-    scope = {"space_id": space} if space else {"project_id": project}
     from langchain_ibm import ChatWatsonx
 
     try:

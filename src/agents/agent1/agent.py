@@ -9,11 +9,11 @@ AgentExecutionError — um snapshot só existe se o agente o gerou.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Optional
 
+from src.core.config import WATSONX_VARS, env, require_env, watsonx_scope
+
 from . import tools
-from .config import WATSONX_VARS, require_env
 from .prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 from .repository import Repository, get_repository
 from .sources import (
@@ -39,10 +39,10 @@ def build_llm():
 
     require_env(*WATSONX_VARS)
     return ChatWatsonx(
-        model_id=os.getenv("WATSONX_MODEL_ID", DEFAULT_MODEL_ID),
-        url=os.environ["WATSONX_URL"],
-        project_id=os.environ["WATSONX_PROJECT_ID"],
-        apikey=os.environ["IBM_CLOUD_API_KEY"],
+        model_id=env("WATSONX_MODEL_ID", DEFAULT_MODEL_ID),
+        url=env("WATSONX_URL"),
+        apikey=env("IBM_CLOUD_API_KEY"),
+        **watsonx_scope(),
         # Temperatura 0: o agente só orquestra tools; queremos a mesma
         # sequência de chamadas para a mesma entrada (auditabilidade).
         params={"temperature": 0, "max_tokens": 512},

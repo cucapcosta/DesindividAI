@@ -1,6 +1,7 @@
 """
-Armazenamento de documentos. Cloudant em produção/hackathon; memória quando
-CLOUDANT_URL não está configurada (desenvolvimento e testes).
+Armazenamento de documentos. Cloudant em produção/hackathon. Sem credenciais, falha
+com 503 (como o Agente 1): a memória só é usada com STORE_BACKEND=memory explícito
+(desenvolvimento local); nada é perdido em silêncio por erro de configuração.
 
 Todos os documentos aqui são pseudonimizados (sem CPF) — ver PLANO.md, Sub-Tarefa 4.
 """
@@ -94,10 +95,22 @@ class CloudantStore:
 _store: Optional[DocumentStore] = None
 
 
+def build_store() -> DocumentStore:
+    if env("STORE_BACKEND").lower() == "memory":
+        return MemoryStore()
+    url, key = env("CLOUDANT_URL"), env("CLOUDANT_APIKEY")
+    if not (url and key):
+        raise ServiceError(
+            503, "SERVICE_UNAVAILABLE",
+            "Cloudant não configurado (CLOUDANT_URL e CLOUDANT_APIKEY). "
+            "Para desenvolvimento local sem Cloudant, defina STORE_BACKEND=memory.",
+        )
+    return CloudantStore(url, key)
+
+
 def get_store() -> DocumentStore:
     """Dependência FastAPI — singleton por processo."""
     global _store
     if _store is None:
-        url, key = env("CLOUDANT_URL"), env("CLOUDANT_APIKEY")
-        _store = CloudantStore(url, key) if url and key else MemoryStore()
+        _store = build_store()
     return _store

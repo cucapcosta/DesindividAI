@@ -43,7 +43,7 @@ Watson Studio uma vez pelo navegador).
 | Agente 2 (LCEL + Granite) | `src/agents/recommendation_agent.py`, `tools.py` | Pronto, testado com LLM falso; validado com Granite real em 2026-11-05 |
 | `POST /recommendation` | `src/api/routers/recommendation.py`, `src/services/recommendation_service.py` | Pronto, mesmo caveat |
 | Trace de auditoria | `src/services/governance.py` | Grava no Cloudant/memória; **sem envio ao watsonx.governance** |
-| Armazenamento | `src/storage/store.py` | Cloudant (httpx + IAM) ou memória se `CLOUDANT_URL` vazio |
+| Armazenamento | `src/storage/store.py` | Cloudant (httpx + IAM); sem credenciais falha com 503, memória só com `STORE_BACKEND=memory` |
 | Testes | `tests/` | 17 passando, 1 pulado (integração cloud, `RUN_CLOUD_TESTS=1`) |
 | Validação cloud | `scripts/cloud_setup.py`, `scripts/cloud_smoke_test.py` | Prontos e **executados com sucesso** |
 | Docs | `docs/m3-simulation-engine.md`, `docs/m3-agent2-recommendation.md` | Prontos |

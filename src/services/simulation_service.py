@@ -6,23 +6,10 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from src.api.models import SimulationResponse
-from src.core.config import env, env_bool
+from src.core.config import consents_db, decisions_db, env_bool, snapshots_db  # noqa: F401  (reexportados)
 from src.core.errors import ServiceError
 from src.simulation.client import run_engine
 from src.storage.store import DocumentStore
-
-
-def snapshots_db() -> str:
-    return env("CLOUDANT_DB_SNAPSHOTS", "financial_snapshots")
-
-
-def decisions_db() -> str:
-    """Banco de simulações, recomendações e traces.
-
-    Contém dados financeiros vinculados ao pseudonym_id e deve ficar em banco
-    separado dos snapshots (padrão: ``decision_traces``), com acesso restrito.
-    """
-    return env("CLOUDANT_DB_DECISIONS", "decision_traces")
 
 
 def now_iso() -> str:
@@ -44,7 +31,7 @@ async def ensure_consent(store: DocumentStore, pseudonym_id: str) -> None:
     if not env_bool("REQUIRE_CONSENT"):
         return
     found = await store.find(
-        env("CLOUDANT_DB_CONSENTS", "consent_registry"),
+        consents_db(),
         {"pseudonym_id": pseudonym_id, "status": "AUTHORISED"},
         limit=1,
     )

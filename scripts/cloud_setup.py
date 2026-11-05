@@ -13,8 +13,7 @@ from __future__ import annotations
 import asyncio
 import sys
 
-from src.core.config import env
-from src.services.simulation_service import decisions_db, snapshots_db
+from src.core.config import consents_db, decisions_db, env, snapshots_db
 from src.storage.store import CloudantStore
 
 SAMPLE_SNAPSHOT_ID = "00000000-0000-4000-8000-000000000001"
@@ -40,7 +39,7 @@ def cloudant_store() -> CloudantStore:
 
 
 async def setup(store: CloudantStore) -> None:
-    dbs = {snapshots_db(), decisions_db(), env("CLOUDANT_DB_CONSENTS", "consent_registry")}
+    dbs = {snapshots_db(), decisions_db(), consents_db()}
     for db in sorted(dbs):
         created = await store.ensure_db(db)
         print(f"[OK] database {db}: {'criado' if created else 'já existia'}")
