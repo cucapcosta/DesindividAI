@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from uuid import UUID, uuid4
 
 from langchain_core.runnables import Runnable
@@ -15,8 +16,18 @@ from src.simulation.engine import CONSOLIDATED_DEBT_ID
 from src.storage.store import DocumentStore
 
 
+def _safe_text(valor, limite: int = 40) -> str:
+    texto = str(valor)
+    texto = re.sub(r"[\x00-\x1f\x7f]", " ", texto)
+    texto = texto.strip()
+    return texto[:limite]
+
+
 def _first_steps(scenarios: list[SimulationScenario], debts: list[dict]):
-    names = {str(d["debt_id"]): f'{d["institution"]} ({d["product_type"]})' for d in debts}
+    names = {
+        str(d["debt_id"]): f'{_safe_text(d["institution"])} ({_safe_text(d["product_type"])})'
+        for d in debts
+    }
     names[CONSOLIDATED_DEBT_ID] = "nova linha de consolidação BB"
 
     def steps(scenario_id: ScenarioId) -> list[str]:

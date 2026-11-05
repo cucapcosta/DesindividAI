@@ -56,7 +56,7 @@ def _loans(debts: list[dict]) -> list[_Loan]:
             balance=float(d["outstanding_balance"]),
             cet=float(d["cet_annual"]),
             min_payment=float(d["monthly_payment"]),
-            installments=int(d.get("remaining_installments") or 1),
+            installments=max(1, min(MAX_MONTHS, int(d.get("remaining_installments") or 1))),
         )
         for d in debts
         if float(d["outstanding_balance"]) > EPS
@@ -186,6 +186,7 @@ def simulate(debts: list[dict], monthly_budget: float, bb_cet_annual: Optional[f
     # (o maior entre o prazo contratado e o do cenário mais longo). Dívidas cujo mínimo não cobre
     # os juros (ex.: cartão rotativo) nunca quitam; o horizonte limita o baseline.
     horizon = max([len(r[0]) for r in runs] + [l.installments for l in _loans(debts)] + [12])
+    horizon = min(horizon, MAX_MONTHS)
     _, baseline_interest, _ = _run(_loans(debts), _minimum_only, horizon)
 
     return [

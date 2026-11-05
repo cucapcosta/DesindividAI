@@ -91,7 +91,7 @@ class DebtListResponse(BaseModel):
 
 class SimulationRequest(BaseModel):
     snapshot_id: UUID
-    monthly_budget: float = Field(..., ge=0)
+    monthly_budget: float = Field(..., gt=0, le=1_000_000)
 
 
 class MonthlyPaymentItem(BaseModel):

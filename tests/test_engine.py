@@ -58,3 +58,18 @@ def test_invalid_inputs():
         simulate(DEBTS, 0)
     with pytest.raises(ValueError):
         simulate([{**DEBTS[0], "outstanding_balance": 0}], 100)
+
+
+def test_absurd_installments_are_capped():
+    out = simulate([{**DEBTS[0], "remaining_installments": 10**9}], 1500)
+    assert all(s["total_months"] <= MAX_MONTHS for s in out)
+
+
+def test_budget_below_minimums_pays_highest_cet_first():
+    out = by_id(simulate(DEBTS, 400))
+    month1 = out["aggressive"]["monthly_plan"][0]["payments"]
+    paid = {p["debt_id"]: p["amount"] for p in month1}
+    assert paid.get("aaaaaaaa-0000-0000-0000-000000000001", 0.0) == pytest.approx(300.0, abs=0.01)
+    assert paid.get("aaaaaaaa-0000-0000-0000-000000000002", 0.0) == pytest.approx(100.0, abs=0.01)
+    assert paid.get("aaaaaaaa-0000-0000-0000-000000000003", 0.0) == pytest.approx(0.0, abs=0.01)
+    assert sum(p["amount"] for p in month1) <= 400.01

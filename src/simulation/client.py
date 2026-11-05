@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import httpx
 
 from src.core.config import env, env_float
@@ -15,7 +16,7 @@ async def run_engine(debts: list[dict], monthly_budget: float) -> list[dict]:
     url = env("WATSONX_SIMULATION_URL")
     if not url:
         try:
-            return simulate(debts, monthly_budget, bb_cet)
+            return await asyncio.to_thread(simulate, debts, monthly_budget, bb_cet)
         except ValueError as exc:
             raise ServiceError(400, "INVALID_INPUT", str(exc)) from exc
 

@@ -17,8 +17,12 @@ def snapshots_db() -> str:
 
 
 def decisions_db() -> str:
-    """Simulações, recomendações e traces (pseudonimizados). Por padrão, o mesmo DB dos snapshots."""
-    return env("CLOUDANT_DB_DECISIONS", snapshots_db())
+    """Banco de simulações, recomendações e traces.
+
+    Contém dados financeiros vinculados ao pseudonym_id e deve ficar em banco
+    separado dos snapshots (padrão: ``decision_traces``), com acesso restrito.
+    """
+    return env("CLOUDANT_DB_DECISIONS", "decision_traces")
 
 
 def now_iso() -> str:
@@ -52,7 +56,11 @@ async def create_simulation(store: DocumentStore, snapshot_id: UUID, monthly_bud
     snapshot = await load_snapshot(store, snapshot_id)
     await ensure_consent(store, snapshot.get("pseudonym_id", ""))
 
-    scenarios = await run_engine(snapshot["debts"], monthly_budget)
+    debts = snapshot.get("debts")
+    if not isinstance(debts, list) or not debts:
+        raise ServiceError(422, "SNAPSHOT_INVALID", "Snapshot financeiro sem dívidas válidas.")
+
+    scenarios = await run_engine(debts, monthly_budget)
     response = SimulationResponse(
         simulation_id=uuid4(),
         snapshot_id=snapshot_id,
