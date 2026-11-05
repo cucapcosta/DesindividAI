@@ -10,7 +10,7 @@ Implementar:
 
 from fastapi import APIRouter, status
 
-from api.models import SimulationRequest, SimulationResponse, ErrorResponse
+from src.api.models import SimulationRequest, SimulationResponse, ErrorResponse
 
 router = APIRouter(prefix="/simulation", tags=["Simulation"])
 

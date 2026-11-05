@@ -13,7 +13,7 @@ from uuid import UUID
 from fastapi import APIRouter, status
 from fastapi.responses import JSONResponse
 
-from api.models import ConsentRequest, ConsentResponse, ErrorResponse
+from src.api.models import ConsentRequest, ConsentResponse, ErrorResponse
 
 router = APIRouter(prefix="/consent", tags=["Consent"])
 
