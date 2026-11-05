@@ -48,7 +48,10 @@ async def create_recommendation(
     sim = await store.get(decisions_db(), f"simulation:{simulation_id}")
     if not sim:
         raise ServiceError(404, "SIMULATION_NOT_FOUND", "Simulação não encontrada.")
-    await ensure_consent(store, sim.get("pseudonym_id", ""))
+    await ensure_consent(
+        store, consent_id=sim.get("consent_id"),
+        pseudonym_id=sim.get("pseudonym_id", ""), scope="recommendation:read",
+    )
     scenarios = [SimulationScenario(**s) for s in sim["scenarios"]]
 
     try:

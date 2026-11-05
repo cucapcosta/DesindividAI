@@ -66,6 +66,14 @@ Se o orçamento não cobre os mínimos, estes são pagos em ordem decrescente de
 - Dívida malformada no snapshot (campo ausente, não numérico, CET negativo) → `400 INVALID_INPUT`, nunca 500.
 - A dívida consolidada usa o `debt_id` fixo `uuid5("desendividai:bb-consolidation")` (`CONSOLIDATED_DEBT_ID`).
 
+## Consentimento
+
+Com `REQUIRE_CONSENT=true`, `/simulation` e `/recommendation` aplicam a mesma regra do `GET /debts` sobre o
+consentimento **do próprio snapshot** (`consent_id`, gravado pelo Agente 1): `AUTHORISED`, escopo do endpoint,
+`expires_at` no futuro e mesmo `pseudonym_id` do snapshot. Assim, se o titular revoga depois da coleta, a
+simulação e a recomendação deixam de ser servidas. Snapshot sem `consent_id` cai na busca por titular.
+A simulação grava o `consent_id`, e o `/recommendation` revalida a partir dela.
+
 ## Persistência
 
 `POST /simulation` grava `simulation:<simulation_id>` em `CLOUDANT_DB_DECISIONS` (padrão: DB dos snapshots)
@@ -76,6 +84,8 @@ com `type: "simulation"`, `pseudonym_id`, `monthly_budget` e a resposta completa
 | Status | code | Quando |
 |---|---|---|
 | 400 | `INVALID_INPUT` | orçamento ≤ 0, sem dívida em aberto ou dívida malformada no snapshot |
-| 403 | `CONSENT_REQUIRED` | `REQUIRE_CONSENT=true` e sem consentimento `AUTHORISED` |
-| 404 | `SNAPSHOT_NOT_FOUND` | snapshot inexistente |
+| 403 | `CONSENT_REQUIRED` | `REQUIRE_CONSENT=true` e o consentimento do snapshot (`consent_id`) não existe, não está `AUTHORISED` ou é de outro titular |
+| 403 | `INSUFFICIENT_SCOPE` | consentimento sem `simulation:read` (`recommendation:read` no `/recommendation`) |
+| 403 | `CONSENT_EXPIRED` | `expires_at` do consentimento já passou (sem fuso é lido como UTC) |
+| 404 | `SNAPSHOT_NOT_FOUND` | snapshot inexistente **ou com `expires_at` vencido** (consentimento + 90 dias) |
 | 503 | `SERVICE_UNAVAILABLE` | AI Service, IAM ou Cloudant indisponível |
