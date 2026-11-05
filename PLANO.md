@@ -206,37 +206,57 @@ Projetar o Agente 2 responsável por simular cenários de quitação e gerar a r
 
 ### Sub-Tarefa 4 — Dados, Pseudonimização, HSM e Governança LGPD
 **Responsável:** M4
-**Status:** [ ] pending
+**Status:** Parte A concluída (Parte B — integração com M3 — pendente)
 
 #### Intent
 Projetar a camada de dados garantindo que informações pessoais financeiras sejam pseudonimizadas antes de qualquer persistência, com chave de re-identificação segregada em HSM, e que toda operação seja auditável para conformidade com a LGPD.
 
 #### Expected Outcomes
 - Estratégia de pseudonimização definida e documentada
-- Arquitetura do MongoDB com separação de coleções sensíveis e pseudonimizadas
-- Fluxo de gestão da chave de re-identificação no IBM Cloud Secrets Manager + HSM
-- Política de retenção e deleção de dados (direito ao esquecimento — LGPD Art. 18)
-- Configuração do watsonx.governance para rastreamento de decisões dos agentes
+- Arquitetura do Cloudant com separação de coleções sensíveis e pseudonimizadas
+- Fluxo de gestão da chave de re-identificação (hackathon: env + `KeyProvider`; produção: Secrets Manager + HSM, Trusted Profile)
+- Política de retenção e deleção de dados via job de expurgo idempotente (direito ao esquecimento — LGPD Art. 18)
+- Trilha de auditoria imutável em `audit_trail` + COS (`audit/`)
 - Mapeamento de dados pessoais (ROPA — Record of Processing Activities)
 
 #### Todo List
-- [ ] Mapear todos os campos pessoais/sensíveis processados (CPF, saldo, dívidas, renda)
-- [ ] Definir algoritmo de pseudonimização: HMAC-SHA256 com chave mestra no HSM
-- [ ] Projetar separação no MongoDB:
+- [x] Mapear todos os campos pessoais/sensíveis processados (CPF, saldo, dívidas, renda)
+- [x] Definir algoritmo de pseudonimização: HMAC-SHA256 com chave mestra via `KeyProvider`
+- [x] Projetar separação no Cloudant:
   - Coleção `financial_snapshots` — apenas dados pseudonimizados
   - Coleção `consent_registry` — registro de consentimentos (sem dados financeiros)
-- [ ] Especificar fluxo de acesso à chave HSM: qual serviço acessa, quando, com qual role IAM
-- [ ] Definir política de retenção: TTL por tipo de dado, processo de deleção segura
-- [ ] Mapear como o watsonx.governance registra cada decisão dos agentes (trace de auditoria)
-- [ ] Documentar ROPA (mapeamento de tratamento de dados pessoais) conforme LGPD
-- [ ] Definir alertas de IBM Cloud Logs para acessos anômalos aos dados sensíveis
+  - Coleção `identity_vault` — CPF cifrado com DEK por titular + envelope KEK
+  - Coleção `audit_trail` — eventos e traces (nunca expurgada)
+- [x] Especificar fluxo de acesso à chave: `EnvKeyProvider` (hackathon); esqueleto `SecretsManagerKeyProvider` (produção) com role IAM `SecretsReader`
+- [x] Definir política de retenção: job de expurgo idempotente (`src/privacy/retention.py`) sobre `expires_at` / `awaiting_expires_at`
+- [x] Registrar cada operação sobre dados do titular na trilha de auditoria (`src/privacy/audit.py`); `WatsonxGovernanceSink` como esqueleto (plano / produção)
+- [x] Documentar ROPA (mapeamento de tratamento de dados pessoais) conforme LGPD
+- [x] Definir alertas de acesso anômalo — especificados em `docs/m4-auditoria-governanca.md` (plano / produção)
+- [ ] Ligar `resolve_for_serasa` ao cliente Serasa real (Parte B)
+
+#### Entregáveis
+- [`src/privacy/key_provider.py`](src/privacy/key_provider.py) — `KeyProvider`, `EnvKeyProvider`, `SecretsManagerKeyProvider` (esqueleto)
+- [`src/privacy/pseudonymization.py`](src/privacy/pseudonymization.py) — HMAC-SHA256 + `current_key_version()` + `pseudonymize_cpf_with_version()`
+- [`src/privacy/identity_vault.py`](src/privacy/identity_vault.py) — cofre AES-256-GCM com DEK por titular; `store`, `reveal` (auditado), `shred`, `resolve_for_serasa`
+- [`src/privacy/pii_guard.py`](src/privacy/pii_guard.py) — `assert_no_pii()` recursivo
+- [`src/privacy/audit.py`](src/privacy/audit.py) — `record_event()`, `AuditRepository`, cópia COS, `GovernanceSink`
+- [`src/privacy/retention.py`](src/privacy/retention.py) — `run_retention()`, `ensure_indexes()`, `ensure_databases()`; CLI `python -m src.privacy.retention [--dry-run] [--ensure]`
+- [`src/privacy/retention_store.py`](src/privacy/retention_store.py) — repositórios de retenção
+- [`src/privacy/erasure.py`](src/privacy/erasure.py) — lógica de apagamento LGPD Art. 18
+- [`src/api/routers/internal.py`](src/api/routers/internal.py) — `POST /internal/erase/{pseudonym_id}`, `POST /internal/retention/run`
+- [`tests/m4/`](tests/m4/) — testes unitários e de integração da camada de privacidade
+- [`docs/m4-mapeamento-dados.md`](docs/m4-mapeamento-dados.md) — mapeamento de todos os campos pessoais/financeiros
+- [`docs/m4-ropa.md`](docs/m4-ropa.md) — ROPA LGPD
+- [`docs/m4-retencao-e-delecao.md`](docs/m4-retencao-e-delecao.md) — política de retenção e deleção
+- [`docs/m4-chaves-e-iam.md`](docs/m4-chaves-e-iam.md) — gestão de chaves e IAM
+- [`docs/m4-auditoria-governanca.md`](docs/m4-auditoria-governanca.md) — auditoria e governança
 
 #### Relevant Context
 - IBM Cloud Secrets Manager: `docs_ibm_cloud_secrets_manager`
 - watsonx.governance: `docs_ibm_watsonx` (seção governance/AI Factsheets)
 - LGPD: Lei nº 13.709/2018 — especialmente Art. 18 (direitos do titular) e Art. 46 (segurança)
 - IBM Cloud IAM: `docs_ibm_cloud_iam` — trusted profiles para acesso ao HSM
-- MongoDB TTL indexes para expiração automática de documentos
+- Cloudant sem TTL nativo — job de expurgo substitui os índices TTL do MongoDB
 
 ---
 
@@ -249,8 +269,9 @@ Projetar a camada de dados garantindo que informações pessoais financeiras sej
 | Armazenamento (produção) | IBM Cloud Databases for MongoDB | NoSQL flexível para snapshots financeiros semi-estruturados |
 | Armazenamento (hackathon) | **Cloudant** (substituto) | MongoDB indisponível na conta do hackathon; Cloudant é document-store compatível |
 | Secrets (produção) | IBM Cloud Secrets Manager + HSM | Pseudonimização determinística com chave segregada em hardware |
-| Secrets (hackathon) | COS + envelope encryption | Secrets Manager indisponível na conta do hackathon |
+| Secrets (hackathon) | **Env + KeyProvider; envelope encryption com DEK por titular** | Secrets Manager indisponível na conta do hackathon; chaves via variáveis de ambiente atrás da interface `KeyProvider`; CPF cifrado com AES-256-GCM e DEK aleatória por titular, envolvida pela KEK |
 | Pseudonimização | HMAC-SHA256 + chave mestra | Pseudonimização determinística (permite correlação interna) |
+| Retenção no Cloudant | Job de expurgo idempotente (`src/privacy/retention.py`) | Cloudant não tem TTL nativo; job substitui os índices TTL do MongoDB previstos no M1 |
 | Gateway | IBM API Connect | Padrão IBM, suporte a FAPI (Financial-grade API), políticas OAuth2 nativas |
 | Governança | watsonx.governance | Rastreabilidade de decisões de IA exigida por regulação financeira |
 | Motor de simulação | AI Service Python no watsonx.ai | Lógica financeira pura, sem dependência de LLM, reutilizável como endpoint REST |

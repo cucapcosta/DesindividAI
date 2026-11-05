@@ -26,7 +26,7 @@ Os seguintes serviços do PLANO original **não podem ser provisionados** nesta 
 | Serviço original | Alternativa adotada | Impacto |
 |---|---|---|
 | IBM Cloud Databases for MongoDB | **Cloudant** (já disponível) | Cloudant é NoSQL document-store compatível; schemas do PLANO se aplicam com adaptação mínima |
-| IBM Cloud Secrets Manager + HSM | **COS + envelope encryption** via watsonx.ai | Sem HSM dedicado; chave mestra armazenada em COS com criptografia de envelope |
+| IBM Cloud Secrets Manager + HSM | **Env + KeyProvider** (`EnvKeyProvider`) | Sem HSM dedicado; chave mestra em variáveis de ambiente atrás da interface `KeyProvider`; envelope encryption com DEK por titular no cofre `identity_vault` |
 | IBM Cloud Logs | **COS** como destino de logs + IBM Cloud Activity Tracker nativo | Sem interface de busca em tempo real; logs em JSON no COS |
 | IBM API Connect | **Fora desta conta** — documentado em `openapi/openapi.yaml` para deploy futuro | OpenAPI contract pronto; gateway pode ser provisionado em conta BB de produção |
 
@@ -72,17 +72,35 @@ ibmcloud iam service-api-key-create desendividai-agents-key desendividai-agents 
 
 ### 3. Criar databases no Cloudant
 
-Após ter as credenciais, execute:
+Após ter as credenciais, obtenha primeiro um token IAM (o Cloudant usa Bearer IAM, não a API key diretamente):
 
 ```bash
+# 1. Obter token IAM
+IAM_TOKEN=$(curl -s -X POST https://iam.cloud.ibm.com/identity/token \
+  -d "grant_type=urn:ibm:params:oauth:grant-type:apikey&apikey=$CLOUDANT_APIKEY" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+# 2. Criar os databases (M2)
 # financial_snapshots — snapshots pseudonimizados do Agente 1
 curl -X PUT "$CLOUDANT_URL/financial_snapshots" \
-  -H "Authorization: Bearer $CLOUDANT_APIKEY"
+  -H "Authorization: Bearer $IAM_TOKEN"
 
 # consent_registry — registro de consentimentos Open Finance
 curl -X PUT "$CLOUDANT_URL/consent_registry" \
-  -H "Authorization: Bearer $CLOUDANT_APIKEY"
+  -H "Authorization: Bearer $IAM_TOKEN"
+
+# 3. Criar os databases do M4 (ou usar --ensure)
+# identity_vault — cofre de identidade (CPF cifrado por titular)
+curl -X PUT "$CLOUDANT_URL/identity_vault" \
+  -H "Authorization: Bearer $IAM_TOKEN"
+
+# audit_trail — trilha de auditoria imutável
+curl -X PUT "$CLOUDANT_URL/audit_trail" \
+  -H "Authorization: Bearer $IAM_TOKEN"
 ```
+
+> **Alternativa para os bancos do M4:** `python -m src.privacy.retention --dry-run --ensure`
+> cria `identity_vault` e `audit_trail` e aplica todos os índices Mango idempotentemente.
 
 Ou usando o `ibmcloud` com o plugin Cloudant (se disponível):
 
@@ -96,6 +114,25 @@ ibmcloud resource service-key-create desendividai-cloudant-key Manager \
 1. Acesse a instância **watsonx-Hackathon COS**
 2. **Service credentials → New credential → Advanced → HMAC → On**
 3. Copie `cos_hmac_keys.access_key_id` e `secret_access_key` para `.env`
+
+> **Trilha de auditoria (M4):** os eventos são gravados no bucket `desendividai-artifacts`
+> com o prefixo `audit/` (ex.: `audit/2026/11/05/<trace_id>.json`). As credenciais HMAC
+> configuradas acima são as mesmas usadas pelo M4 para escrever nesse prefixo.
+> Variáveis relevantes: `COS_BUCKET_NAME`, `COS_AUDIT_PREFIX=audit/`, `COS_ACCESS_KEY_ID`,
+> `COS_SECRET_ACCESS_KEY`.
+
+---
+
+## watsonx.ai — Modelo Granite
+
+O modelo utilizado pelo Agente 1 é `ibm/granite-4-h-small` (configurável via `WATSONX_MODEL_ID`).
+O `ibm/granite-3-8b-instruct` previsto no PLANO original foi descontinuado em `us-south`.
+
+> Para confirmar os modelos disponíveis na sua conta:
+> ```bash
+> curl -s "$WATSONX_URL/ml/v1/foundation_model_specs?version=2025-02-01&filters=function_text_chat" \
+>   -H "Authorization: Bearer $IAM_TOKEN" | python3 -m json.tool | grep model_id
+> ```
 
 ---
 
