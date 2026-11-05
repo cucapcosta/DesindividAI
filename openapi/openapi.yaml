@@ -52,6 +52,15 @@ components:
             "simulation:read":  Solicitar simulação de cenários
             "recommendation:read": Obter recomendação de quitação
 
+    internalApiKey:
+      type: apiKey
+      in: header
+      name: X-Internal-Token
+      description: |
+        Token estático para os endpoints /internal/*. Deve ser comparado via
+        hmac.compare_digest contra INTERNAL_API_TOKEN (variável de ambiente).
+        Ausente → 401. Token não configurado → 503 INTERNAL_API_DISABLED.
+
   # -------------------------------------------------------------------------
   # Schemas reutilizáveis
   # -------------------------------------------------------------------------
@@ -297,6 +306,60 @@ components:
         request_id:
           type: string
           format: uuid
+
+    ErasureReport:
+      type: object
+      description: Resultado do apagamento de titular (LGPD Art. 18)
+      required: [consents_revoked, snapshots_deleted, vault_shredded, trace_id]
+      properties:
+        consents_revoked:
+          type: integer
+          description: Número de consentimentos revogados nesta operação
+          example: 1
+        snapshots_deleted:
+          type: integer
+          description: Número de snapshots financeiros apagados
+          example: 3
+        vault_shredded:
+          type: boolean
+          description: true se o cofre de identidade foi destruído agora; false se já estava ou não existia
+          example: true
+        trace_id:
+          type: string
+          format: uuid
+          description: trace_id do evento consent.erasure_requested no audit_trail
+          example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+    RetentionReport:
+      type: object
+      description: Resultado do job de retenção
+      required: [snapshots_deleted, consents_awaiting_deleted, consents_expired, consents_revoked_deleted, vault_shredded, skipped_invalid, dry_run]
+      properties:
+        snapshots_deleted:
+          type: integer
+          example: 5
+        consents_awaiting_deleted:
+          type: integer
+          example: 2
+        consents_expired:
+          type: integer
+          description: Consentimentos AUTHORISED expirados → REVOKED
+          example: 1
+        consents_revoked_deleted:
+          type: integer
+          example: 3
+        vault_shredded:
+          type: integer
+          description: Titulares com cofre destruído nesta execução
+          example: 1
+        skipped_invalid:
+          type: integer
+          description: Documentos ignorados por dados inválidos/ausentes
+          example: 0
+        dry_run:
+          type: boolean
+          description: true se nenhuma alteração foi aplicada
+          example: true
 
 # ---------------------------------------------------------------------------
 # Global security (Bearer token em todos os endpoints)
@@ -545,6 +608,109 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         "503":
           description: Motor de Simulação ou LLM indisponível
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ── Internal (M4) ──────────────────────────────────────────────────────────
+  /internal/erase/{pseudonymId}:
+    post:
+      operationId: eraseSubject
+      summary: Apagar dados do titular (LGPD Art. 18)
+      description: |
+        Remove todos os dados do titular identificado por pseudonymId:
+          1. Evento consent.erasure_requested gravado no audit_trail
+          2. Todos os consentimentos não-REVOKED → REVOKED (revocation_reason=LGPD_ERASURE)
+          3. Todos os snapshots financeiros do titular são apagados
+          4. Cofre de identidade destruído (crypto-shredding da DEK)
+          5. Evento erasure.completed gravado no audit_trail
+
+        Idempotente: segunda chamada retorna contagens zero.
+        Requer header X-Internal-Token.
+      tags: [Internal]
+      security:
+        - internalApiKey: []
+      parameters:
+        - name: pseudonymId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[0-9a-f]{64}$'
+          description: |
+            pseudonym_id do titular — 64 caracteres hexadecimais (HMAC-SHA256).
+            CPFs (11 dígitos) e outros formatos são rejeitados com 422.
+      responses:
+        "200":
+          description: "Apagamento concluído (pode ser idempotente — zeros indicam que já foi feito)"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErasureReport'
+        "401":
+          description: "Header X-Internal-Token ausente ou inválido"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "422":
+          description: "pseudonymId inválido (ex.: CPF na URL)"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: "INTERNAL_API_TOKEN não configurado ou dependência indisponível"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /internal/retention/run:
+    post:
+      operationId: runRetention
+      summary: Executar job de retenção de dados
+      description: |
+        Executa o job de retenção que aplica as políticas de TTL definidas no M1/M4
+        (o Cloudant não tem TTL nativo). Por segurança, dry_run=true é o padrão.
+
+        Regras aplicadas (ver docs/m4-plano-de-acao.md Fase 6):
+          - Snapshots: expires_at < now → apagar
+          - Consentimentos AWAITING_AUTHORISATION: awaiting_expires_at < now → apagar
+          - Consentimentos AUTHORISED: expires_at < now → REVOKED + evento consent.expired
+          - Consentimentos REVOKED: revoked_at + 90d < now → apagar
+          - identity_vault: sem consentimento nem snapshot → shred
+
+        Requer header X-Internal-Token.
+      tags: [Internal]
+      security:
+        - internalApiKey: []
+      parameters:
+        - name: dry_run
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: true
+          description: |
+            Se true (padrão), calcula o que seria feito mas NÃO aplica nenhuma alteração.
+            Passe dry_run=false para executar efetivamente.
+      responses:
+        "200":
+          description: "Relatório de retenção com contagens por regra"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RetentionReport'
+        "401":
+          description: "Header X-Internal-Token ausente ou inválido"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: "INTERNAL_API_TOKEN não configurado ou dependência indisponível"
           content:
             application/json:
               schema:

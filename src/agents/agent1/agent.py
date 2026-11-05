@@ -81,8 +81,21 @@ def run_agent1(
     open_finance: Optional[OpenFinanceClient] = None,
     serasa: Optional[SerasaClient] = None,
     llm=None,
+    audit=None,
 ) -> dict:
     """Executa o Agente 1 e devolve o snapshot persistido (fonte da resposta da API)."""
+    # M4: se audit não for injetado, tenta get_audit_logger(); falha → None + warning.
+    if audit is None:
+        try:
+            from src.privacy.audit import get_audit_logger
+            audit = get_audit_logger()
+        except Exception as exc:
+            logger.warning(
+                "run_agent1: auditoria indisponível, continuando sem ela. exc=%s",
+                type(exc).__name__,
+            )
+            audit = None
+
     llm = llm or build_llm()
     ctx = RunContext(
         consent=consent,
@@ -91,6 +104,7 @@ def run_agent1(
         serasa=serasa or build_serasa_client(),
         # Registra o modelo que de fato rodou (o injetado, se houver).
         model_id=getattr(llm, "model_id", None),
+        audit=audit,
     )
     _execute(ctx, llm)
     return ctx.snapshot

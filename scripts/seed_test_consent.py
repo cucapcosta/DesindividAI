@@ -5,9 +5,13 @@ Enquanto POST /consent (M1) não está implementado, este script cria um
 consentimento AUTHORISED para exercitar GET /debts contra os serviços reais.
 O CPF é o fictício do sandbox; só o pseudonym_id (HMAC) é persistido.
 
+O pseudonym_id é gerado via identity_vault.store(SANDBOX_CPF), que também
+cifra o CPF no cofre de identidade (M4).
+
 Uso (na raiz do repo, com o .env preenchido):
     python scripts/seed_test_consent.py create
-    python scripts/seed_test_consent.py delete <consent_id>   # remove consentimento e snapshots dele
+    python scripts/seed_test_consent.py delete <consent_id>   # remove consentimento,
+                                                              # snapshots e cofre do titular
 """
 
 from __future__ import annotations
@@ -28,7 +32,7 @@ from ibmcloudant.cloudant_v1 import Document  # noqa: E402
 from src.agents.agent1.repository import build_cloudant_client  # noqa: E402
 from src.agents.agent1.sandbox_data import SANDBOX_CPF  # noqa: E402
 from src.core.config import consents_db, snapshots_db  # noqa: E402
-from src.privacy.pseudonymization import pseudonymize_cpf  # noqa: E402
+from src.privacy.identity_vault import get_identity_vault  # noqa: E402
 
 CONSENTS_DB = consents_db()
 SNAPSHOTS_DB = snapshots_db()
@@ -38,10 +42,12 @@ client = build_cloudant_client
 def create() -> None:
     now = datetime.now(timezone.utc)
     consent_id = str(uuid.uuid4())
+    # M4: gerar pseudonym_id via cofre de identidade (cifra e armazena o CPF).
+    pseudonym_id = get_identity_vault().store(SANDBOX_CPF)
     doc = {
         "_id": consent_id,
         "consent_id": consent_id,
-        "pseudonym_id": pseudonymize_cpf(SANDBOX_CPF),
+        "pseudonym_id": pseudonym_id,
         "institutions": ["bb", "itau", "nubank"],
         "scopes": ["debts:read", "simulation:read", "recommendation:read"],
         "status": "AUTHORISED",
@@ -65,7 +71,13 @@ def delete(consent_id: str) -> None:
     if not consent.get("test_fixture"):
         sys.exit(f"{consent_id} não foi criado por este script — recusando apagar.")
     service.delete_document(db=CONSENTS_DB, doc_id=consent_id, rev=consent["_rev"])
-    print(f"removidos: consentimento {consent_id} e {len(snapshots)} snapshot(s)")
+
+    # M4: destruir o cofre do titular de teste (crypto-shredding).
+    vault_shredded = get_identity_vault().shred(consent["pseudonym_id"])
+    print(
+        f"removidos: consentimento {consent_id} e {len(snapshots)} snapshot(s); "
+        f"cofre destruído: {vault_shredded}"
+    )
 
 
 if __name__ == "__main__":
