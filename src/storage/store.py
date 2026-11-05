@@ -8,6 +8,7 @@ Todos os documentos aqui são pseudonimizados (sem CPF) — ver PLANO.md, Sub-Ta
 from __future__ import annotations
 
 from typing import Any, Optional, Protocol
+from urllib.parse import quote
 
 import httpx
 
@@ -55,11 +56,17 @@ class CloudantStore:
         except httpx.HTTPError as exc:
             raise ServiceError(503, "SERVICE_UNAVAILABLE", "Cloudant indisponível.") from exc
 
+    def _check(self, resp: httpx.Response) -> None:
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise ServiceError(503, "SERVICE_UNAVAILABLE", "Cloudant indisponível.") from exc
+
     async def get(self, db, doc_id):
-        resp = await self._request("GET", f"{db}/{doc_id}")
+        resp = await self._request("GET", f"{quote(db, safe='')}/{quote(doc_id, safe='')}")
         if resp.status_code == 404:
             return None
-        resp.raise_for_status()
+        self._check(resp)
         return resp.json()
 
     async def put(self, db, doc_id, doc):
@@ -67,12 +74,20 @@ class CloudantStore:
         body = {**doc, "_id": doc_id}
         if existing:
             body["_rev"] = existing["_rev"]
-        resp = await self._request("PUT", f"{db}/{doc_id}", json=body)
-        resp.raise_for_status()
+        resp = await self._request("PUT", f"{quote(db, safe='')}/{quote(doc_id, safe='')}", json=body)
+        self._check(resp)
+
+    async def ensure_db(self, db: str) -> bool:
+        """Cria o database se não existir (idempotente). Retorna True se criou."""
+        resp = await self._request("PUT", quote(db, safe=""))
+        if resp.status_code == 412:  # já existe
+            return False
+        self._check(resp)
+        return True
 
     async def find(self, db, selector, limit=10):
-        resp = await self._request("POST", f"{db}/_find", json={"selector": selector, "limit": limit})
-        resp.raise_for_status()
+        resp = await self._request("POST", f"{quote(db, safe='')}/_find", json={"selector": selector, "limit": limit})
+        self._check(resp)
         return resp.json().get("docs", [])
 
 
