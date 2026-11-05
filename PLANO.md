@@ -123,7 +123,7 @@ Definir como o cliente autoriza o acesso aos seus dados financeiros via Open Fin
 
 ### Sub-Tarefa 2 — Agente 1: Coleta, Análise e Priorização por CET
 **Responsável:** M2
-**Status:** [ ] pending
+**Status:** [x] done — pendências que dependem de M1, M3 e M4 listadas em [`docs/m2-agent1.md`](docs/m2-agent1.md#12-pendências)
 
 #### Intent
 Projetar o Agente 1 responsável por coletar dívidas via Open Finance e Serasa, calcular o CET de cada dívida e montar o retrato financeiro priorizado do cliente.
@@ -135,14 +135,23 @@ Projetar o Agente 1 responsável por coletar dívidas via Open Finance e Serasa,
 - Schema do documento MongoDB para snapshot financeiro pseudonimizado
 
 #### Todo List
-- [ ] Definir modelo Granite a ser usado (ex: `ibm/granite-3-8b-instruct`) via watsonx.ai API
-- [ ] Especificar integração LangChain com watsonx.ai (IBM watsonx LLM wrapper)
-- [ ] Definir as 4 tools do Agente 1 com assinaturas de entrada/saída
-- [ ] Especificar fórmula de cálculo do CET e campos obrigatórios da API Open Finance
-- [ ] Definir critérios de priorização (ordenação decrescente por CET)
-- [ ] Projetar schema do documento MongoDB: campos, índices, campo `pseudonym_id`
-- [ ] Definir estratégia de pseudonimização: geração do `pseudonym_id` antes da persistência
-- [ ] Documentar prompt template do Agente 1 (system prompt + tool descriptions)
+- [x] Definir modelo Granite a ser usado (ex: `ibm/granite-3-8b-instruct`) via watsonx.ai API — adotado `ibm/granite-4-h-small` (o 3-8b não é mais suportado em us-south)
+- [x] Especificar integração LangChain com watsonx.ai (IBM watsonx LLM wrapper)
+- [x] Definir as 4 tools do Agente 1 com assinaturas de entrada/saída
+- [x] Especificar fórmula de cálculo do CET e campos obrigatórios da API Open Finance
+- [x] Definir critérios de priorização (ordenação decrescente por CET)
+- [x] Projetar schema do documento MongoDB: campos, índices, campo `pseudonym_id`
+- [x] Definir estratégia de pseudonimização: geração do `pseudonym_id` antes da persistência
+- [x] Documentar prompt template do Agente 1 (system prompt + tool descriptions)
+
+#### Entregáveis
+- [`docs/m2-agent1.md`](docs/m2-agent1.md) — Arquitetura, tools, fórmula do CET, priorização, schema do snapshot, pseudonimização e prompt
+- [`src/agents/agent1/`](src/agents/agent1/) — Implementação do Agente 1 (LangChain `AgentExecutor` + Granite via watsonx.ai)
+- [`src/privacy/pseudonymization.py`](src/privacy/pseudonymization.py) — HMAC-SHA256 compartilhado com M1/M4
+- [`src/api/routers/debts.py`](src/api/routers/debts.py) — `GET /debts` implementado
+- [`scripts/seed_test_consent.py`](scripts/seed_test_consent.py) — Cria/remove consentimento de teste no Cloudant (até o `POST /consent` do M1 existir)
+- [`scripts/update_market_rates.py`](scripts/update_market_rates.py) — Atualiza as taxas médias PF do BCB usadas para estimar CET de dívidas só do Serasa
+- [`tests/`](tests/) — Testes de CET, priorização, pseudonimização, agente e endpoint
 
 #### Relevant Context
 - LangChain + watsonx.ai: [IBM watsonx LangChain integration](https://python.langchain.com/docs/integrations/llms/ibm_watsonx/)

@@ -11,7 +11,7 @@ Implementar:
 
 from fastapi import APIRouter, status
 
-from api.models import RecommendationRequest, RecommendationResponse, ErrorResponse
+from src.api.models import RecommendationRequest, RecommendationResponse, ErrorResponse
 
 router = APIRouter(prefix="/recommendation", tags=["Recommendation"])
 
