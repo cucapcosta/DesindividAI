@@ -107,3 +107,150 @@ def test_agent_failure_is_502(client, monkeypatch):
     response = client.get("/debts", params={"consent_id": SANDBOX_CONSENT_ID})
     assert response.status_code == 502
     assert response.json()["code"] == "AGENT_FAILED"
+
+
+# --- Jobs: resultado não buscado expira (🔴1) ---------------------------------
+
+def _start_slow_job(client, monkeypatch):
+    """Dispara um job que só termina após release.set(); devolve (release, contador)."""
+    import threading
+
+    from src.api.routers import debts
+
+    release, runs = threading.Event(), []
+    fast_run = debts.run_agent1
+
+    def slow_run(consent, **kw):
+        runs.append(1)
+        release.wait(5)
+        return fast_run(consent, **kw)
+
+    monkeypatch.setattr(debts, "run_agent1", slow_run)
+    monkeypatch.setenv("DEBTS_SYNC_TIMEOUT_S", "0.05")
+    assert client.get("/debts", params={"consent_id": SANDBOX_CONSENT_ID}).status_code == 202
+    return release, runs
+
+
+def _finish(release):
+    from src.api.routers import debts
+
+    release.set()
+    debts._jobs[SANDBOX_CONSENT_ID].future.result(timeout=5)
+
+
+def test_unfetched_result_expires_and_next_call_recollects(client, monkeypatch):
+    release, runs = _start_slow_job(client, monkeypatch)
+    _finish(release)                      # terminou, mas ninguém buscou o resultado
+
+    monkeypatch.setenv("DEBTS_RESULT_TTL_S", "-1")   # já expirado
+    monkeypatch.setenv("DEBTS_SYNC_TIMEOUT_S", "5")
+    response = client.get("/debts", params={"consent_id": SANDBOX_CONSENT_ID})
+    assert response.status_code == 200
+    assert len(runs) == 2                 # nova coleta, não o retrato velho
+
+
+def test_recent_result_is_delivered_within_ttl(client, monkeypatch):
+    release, runs = _start_slow_job(client, monkeypatch)
+    _finish(release)
+
+    monkeypatch.setenv("DEBTS_SYNC_TIMEOUT_S", "5")
+    response = client.get("/debts", params={"consent_id": SANDBOX_CONSENT_ID})
+    assert response.status_code == 200
+    assert len(runs) == 1
+
+
+def test_expired_error_is_not_returned_to_later_calls(client, monkeypatch):
+    from src.api.routers import debts
+
+    import threading
+
+    calls, release = [], threading.Event()
+    good_run = debts.run_agent1
+
+    def flaky(consent, **kw):
+        calls.append(1)
+        if len(calls) == 1:
+            release.wait(5)
+            raise SourceUnavailableError("instabilidade")
+        return good_run(consent, **kw)
+
+    monkeypatch.setattr(debts, "run_agent1", flaky)
+    monkeypatch.setenv("DEBTS_SYNC_TIMEOUT_S", "0.05")   # cliente desiste antes do fim
+    assert client.get("/debts", params={"consent_id": SANDBOX_CONSENT_ID}).status_code == 202
+    release.set()
+    debts._jobs[SANDBOX_CONSENT_ID].future.exception(timeout=5)
+
+    monkeypatch.setenv("DEBTS_RESULT_TTL_S", "-1")
+    monkeypatch.setenv("DEBTS_SYNC_TIMEOUT_S", "5")
+    assert client.get("/debts", params={"consent_id": SANDBOX_CONSENT_ID}).status_code == 200
+
+
+# --- Erros sem tratamento específico (🔴2) ------------------------------------
+
+def test_unexpected_agent_error_is_500_with_code(client, monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr("src.api.routers.debts.run_agent1", boom)
+    response = client.get("/debts", params={"consent_id": SANDBOX_CONSENT_ID})
+    assert response.status_code == 500
+    assert response.json()["code"] == "INTERNAL_ERROR"
+    assert "bug" not in response.json()["message"]       # sem detalhe interno
+
+
+def test_repository_failure_is_500_with_code(client, monkeypatch):
+    def broken(consent_id):
+        raise ConnectionError("cloudant")
+
+    monkeypatch.setattr(client.repo, "get_consent", broken)
+    response = client.get("/debts", params={"consent_id": SANDBOX_CONSENT_ID})
+    assert response.status_code == 500
+    assert response.json()["code"] == "INTERNAL_ERROR"
+
+
+@pytest.mark.parametrize("expires_at, expected", [
+    ((datetime.now(timezone.utc) + timedelta(days=30)).replace(tzinfo=None).isoformat(), 200),
+    ((datetime.now(timezone.utc) - timedelta(days=1)).replace(tzinfo=None).isoformat(), 403),
+    ("amanhã", 403),
+])
+def test_expires_at_without_timezone_is_read_as_utc(client, expires_at, expected):
+    add_consent(client, expires_at=expires_at)
+    assert client.get("/debts", params={"consent_id": OTHER_ID}).status_code == expected
+
+
+# --- 502/503 passando pelo AgentExecutor -------------------------------------
+
+def test_granite_stopping_early_is_502_through_executor(client, monkeypatch):
+    from langchain_core.messages import AIMessage
+
+    from tests.fakes import ToolCallingFakeModel, tool_call
+
+    def lazy_granite(consent, **kw):
+        llm = ToolCallingFakeModel(messages=iter([
+            tool_call("get_open_finance_debts", {"consent_id": consent["consent_id"]}, "1"),
+            AIMessage(content="Pronto."),                 # para sem persistir
+        ]))
+        return run_agent1(consent, llm=llm, **kw)
+
+    monkeypatch.setattr("src.api.routers.debts.run_agent1", lazy_granite)
+    response = client.get("/debts", params={"consent_id": SANDBOX_CONSENT_ID})
+    assert response.status_code == 502
+    assert response.json()["code"] == "AGENT_FAILED"
+    assert client.repo._snapshots == {}
+
+
+@pytest.mark.parametrize("client_behaviour", [
+    "down",          # receptor fora do ar
+    "malformed",     # payload sem campos obrigatórios
+])
+def test_open_finance_failure_is_503_through_executor(client, monkeypatch, client_behaviour):
+    class BrokenOpenFinance:
+        def fetch_contracts(self, consent):
+            if client_behaviour == "down":
+                raise SourceUnavailableError("receptor fora do ar")
+            return [{"productSubType": "CHEQUE_ESPECIAL"}]
+
+    monkeypatch.setattr("src.agents.agent1.agent.build_open_finance_client", BrokenOpenFinance)
+    response = client.get("/debts", params={"consent_id": SANDBOX_CONSENT_ID})
+    assert response.status_code == 503
+    assert response.json()["code"] == "SOURCE_UNAVAILABLE"

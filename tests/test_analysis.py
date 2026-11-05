@@ -66,3 +66,47 @@ def test_merge_serasa_marks_known_contract_and_adds_unknown():
 def test_market_estimates_cover_every_product_type():
     assert set(analysis.MARKET_CET_ESTIMATES) == set(ProductType)
     assert all(0 < rate < 20 for rate in analysis.MARKET_CET_ESTIMATES.values())  # fração a.a.
+
+
+def serasa(**overrides) -> RawDebt:
+    return raw(**{"source": DebtSource.SERASA, "is_negativado": True, **overrides})
+
+
+def test_merge_serasa_is_one_to_one():
+    """Duas restrições do mesmo produto não colapsam no único contrato do Open Finance."""
+    of = [raw(institution="nubank", contract_id="NU-1", product_type=ProductType.CREDIT_CARD,
+              outstanding_balance=4_000)]
+    records = [
+        serasa(institution="nubank", contract_id="NU-X", product_type=ProductType.CREDIT_CARD,
+               outstanding_balance=4_050),
+        serasa(institution="nubank", contract_id="NU-Y", product_type=ProductType.CREDIT_CARD,
+               outstanding_balance=900),
+    ]
+    merged = analysis.merge_serasa(of, records)
+    assert len(merged) == 2
+    assert merged[0].contract_id == "NU-1" and merged[0].is_negativado
+    assert merged[1].contract_id == "NU-Y"              # a segunda vira dívida própria
+
+
+def test_merge_serasa_prefers_exact_contract_match_over_nearest_balance():
+    of = [
+        raw(institution="itau", contract_id="A", outstanding_balance=1_000),
+        raw(institution="itau", contract_id="B", outstanding_balance=5_000),
+    ]
+    # Saldo mais próximo de A, mas o contrato é B.
+    merged = analysis.merge_serasa(of, [serasa(institution="itau", contract_id="B",
+                                               outstanding_balance=1_100, days_overdue=30)])
+    assert len(merged) == 2
+    by_id = {d.contract_id: d for d in merged}
+    assert by_id["B"].is_negativado and by_id["B"].days_overdue == 30
+    assert not by_id["A"].is_negativado
+
+
+def test_merge_serasa_does_not_mutate_inputs():
+    of = [raw(institution="nubank", product_type=ProductType.CREDIT_CARD)]
+    records = [serasa(institution="nubank", product_type=ProductType.CREDIT_CARD, days_overdue=60),
+               serasa(institution="loja", contract_id="L1")]
+    merged = analysis.merge_serasa(of, records)
+    assert of[0].is_negativado is False and of[0].days_overdue == 0
+    assert merged[0] is not of[0]
+    assert all(m is not r for m in merged for r in records)

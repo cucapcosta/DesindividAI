@@ -95,3 +95,6 @@ class AnalyzedDebt:
 class SerasaReport:
     score_band: Optional[str] = None      # faixa, nunca o score exato
     negative_records: list[RawDebt] = field(default_factory=list)
+    # False quando a consulta falhou: o retrato segue só com o Open Finance e
+    # o snapshot registra a lacuna em sources.serasa.available.
+    available: bool = True

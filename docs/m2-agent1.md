@@ -109,19 +109,28 @@ Cada tool grava seu resultado no `RunContext` e devolve ao modelo um resumo JSON
 |---|---|---|---|
 | `get_open_finance_debts` | `consent_id: str` | `contracts_found`, `institutions[]`, `products[]` | `open_finance_debts: list[RawDebt]` |
 | `get_serasa_data` | `pseudonym_id: str` | `available`, `score_band`, `negative_records` | `serasa_report: SerasaReport` |
-| `calculate_cet` | — | `debts[]` com `rank`, `institution`, `product_type`, `cet_annual_pct`, `cet_method`, `negativado` | `analyzed_debts: list[AnalyzedDebt]` (pseudonimizadas e ordenadas) |
+| `calculate_cet` | — | `debts[]` com `rank`, `institution`, `product_type`, `cet_annual_pct`, `cet_method`, `negativado`; `serasa_available` | `analyzed_debts: list[AnalyzedDebt]` (pseudonimizadas e ordenadas) |
 | `persist_snapshot` | — | `snapshot_id`, `debts_count`, `total_outstanding` | grava em `financial_snapshots` |
 
 **Guardas:**
 - `consent_id` / `pseudonym_id` recebidos do modelo são comparados com os da sessão;
   divergência → `ToolInputError` devolvido ao modelo. Mesmo sob prompt injection o
   agente não acessa dados de outro titular.
-- Ordem obrigatória: `calculate_cet` exige Open Finance coletado; `persist_snapshot`
-  exige CET calculado. `persist_snapshot` é idempotente na execução.
-- Serasa indisponível **não** interrompe: o snapshot registra
-  `sources.serasa.available = false`. Open Finance indisponível → `503`.
+- Ordem obrigatória, imposta pelas tools: `get_serasa_data` exige Open Finance coletado;
+  `calculate_cet` exige Open Finance **e** Serasa consultados; `persist_snapshot` exige CET
+  calculado. Fora de ordem → `ToolInputError` devolvido ao modelo, que pode corrigir.
+  `persist_snapshot` é idempotente na execução.
+- Serasa indisponível ou com payload fora do formato **não** interrompe: o snapshot
+  registra `sources.serasa.available = false` (`SerasaReport.available`). Open Finance
+  indisponível ou fora do formato → `503`.
+- Payload sem campo obrigatório (`institution`, `contractId`, `amount`…) ou com tipo
+  inválido → `InvalidSourceDataError` (subclasse de `SourceUnavailableError`) — nunca
+  um `KeyError` solto. Resposta HTTP não-JSON idem.
+- Produto sem mapeamento (`productSubType` / `nature` desconhecido) é tratado como
+  `PERSONAL_LOAN` **com `logger.warning`**, para o código ser incluído na tabela.
 - Cada chamada é registrada em `agent.tool_calls` (nome, horário, duração, sucesso —
-  sem argumentos, para não levar dados ao log).
+  sem argumentos, para não levar dados ao log). A trilha persistida inclui o próprio
+  `persist_snapshot` (sem `duration_ms`, que só existe depois do save).
 
 ---
 
@@ -143,7 +152,7 @@ $10^{-10}$, teto de 100.000% a.a.
 | Método | Quando | Como |
 |---|---|---|
 | `cash_flow` | Contrato parcelado com valor, tarifas, parcela e nº de parcelas | Fórmula acima. Usa os dias reais até o 1º vencimento; demais parcelas a cada 365/12 dias |
-| `revolving` | Cartão rotativo, cheque especial (sem cronograma) | $CET = (1 + i_{mensal} + IOF_{mensal})^{12} - 1$, com IOF = 0,0082% a.d. × 30 |
+| `revolving` | Cartão rotativo, cheque especial (sem cronograma) | $CET = (1 + i_{mensal} + IOF_{mensal})^{12} - 1$, com IOF = 0,0082% a.d. × 30 (`MONTHLY_IOF_RATE`; os 0,38% fixos incidem na contratação, não mês a mês) |
 | `reported` | Só o campo `CET` informado pela transmissora | Usa o valor informado |
 | `market_estimate` | Dívida só no Serasa (sem taxa) | Taxa média de juros PF do BCB por produto (`market_rates.json`, ver abaixo). É juros, não CET: a estimativa é um piso do custo real |
 
@@ -196,10 +205,14 @@ mais cara é o que mais reduz o custo total). Desempates:
 
 `priority_rank = 1` é a dívida de quitação mais urgente.
 
-**Consolidação com o Serasa:** uma restrição com mesma instituição e mesmo produto de
-um contrato do Open Finance apenas marca o contrato como negativado (e atualiza
-`days_overdue`). Restrição sem correspondência vira nova dívida — tipicamente
-credores fora do Open Finance (varejo, telecom).
+**Consolidação com o Serasa** (pareamento 1:1, sem alterar as listas de entrada):
+1. restrição com mesmo `contract_id` e instituição de um contrato do Open Finance → casamento exato;
+2. senão, mesma instituição e produto, saldo mais próximo, entre os contratos **ainda não pareados**.
+
+O contrato pareado é marcado como negativado (e `days_overdue` atualizado). Restrição sem
+par vira nova dívida — credores fora do Open Finance (varejo, telecom) ou um segundo
+contrato do mesmo produto que o Open Finance não trouxe. Duas restrições nunca colapsam
+num único contrato.
 
 ---
 
@@ -227,8 +240,8 @@ cálculos usam frações; a conversão acontece só ao montar o documento.
   "debts_count": 6,
   "credit_score_band": "C",                // faixa, nunca o score exato
   "sources": {
-    "open_finance": { "institutions": ["bb", "itau", "nubank"] },
-    "serasa": { "available": true }
+    "open_finance": { "institutions": ["bb", "itau", "nubank"], "sandbox": true },
+    "serasa": { "available": true, "sandbox": true }
   },
   "debts": [
     {
@@ -252,7 +265,11 @@ cálculos usam frações; a conversão acontece só ao montar o documento.
   "agent": {
     "name": "agent1-analysis-prioritization",
     "model_id": "ibm/granite-4-h-small",
-    "tool_calls": [{ "tool": "get_open_finance_debts", "at": "…", "ok": true, "duration_ms": 412.0 }]
+    "tool_calls": [
+      { "tool": "get_open_finance_debts", "at": "…", "ok": true, "duration_ms": 412.0 },
+      …,
+      { "tool": "persist_snapshot", "at": "…", "ok": true }
+    ]
   }
 }
 ```
@@ -338,28 +355,35 @@ pseudonym_id: {pseudonym_id}
 |---|---|---|
 | 200 | — | `DebtListResponse`; `cet_annual` em % a.a. (2 casas) |
 | 202 | `PROCESSING` | agente ainda rodando após `DEBTS_SYNC_TIMEOUT_S` (padrão 25 s) — chamar de novo com o mesmo `consent_id` |
-| 403 | `CONSENT_NOT_AUTHORISED` | status ≠ `AUTHORISED` |
+| 403 | `CONSENT_NOT_AUTHORISED` | status ≠ `AUTHORISED`, ou `expires_at` ausente/inválido |
 | 403 | `INSUFFICIENT_SCOPE` | consentimento sem `debts:read` |
-| 403 | `CONSENT_EXPIRED` | `expires_at` no passado |
+| 403 | `CONSENT_EXPIRED` | `expires_at` no passado (sem fuso → lido como UTC) |
 | 404 | `CONSENT_NOT_FOUND` | consentimento inexistente |
+| 500 | `INTERNAL_ERROR` | erro sem tratamento específico (detalhe só no log) |
 | 502 | `AGENT_FAILED` | Granite não completou a sequência de tools |
-| 503 | `SOURCE_UNAVAILABLE` | receptor Open Finance indisponível |
+| 503 | `SOURCE_UNAVAILABLE` | receptor Open Finance indisponível ou payload fora do formato |
 | 503 | `NOT_CONFIGURED` | variáveis de ambiente obrigatórias ausentes |
 
-> Os `502`/`503` não estavam no contrato original — sugeridos para inclusão no `openapi.yaml` (M1).
+> Os `202`/`500`/`502`/`503` não estavam no contrato original — sugeridos para inclusão no `openapi.yaml` (M1).
 
 **Processamento assíncrono (`202`):** a requisição espera o agente por até `DEBTS_SYNC_TIMEOUT_S`.
 Se ele não terminar, responde `202 PROCESSING` e a execução continua em segundo plano; a
-próxima chamada com o mesmo `consent_id` reaproveita essa execução e recebe o `200`. Os jobs
-ficam na memória do processo: com vários workers, o API Connect precisa de afinidade por
-`consent_id` (ou os jobs devem ir para um store compartilhado).
+próxima chamada com o mesmo `consent_id` reaproveita essa execução e recebe o `200`.
+
+- **Expiração:** um resultado (ou erro) não buscado é descartado `DEBTS_RESULT_TTL_S`
+  (padrão 60 s) após o fim da execução; a chamada seguinte dispara uma nova coleta em vez
+  de devolver um retrato velho. A varredura acontece a cada nova requisição.
+- **Concorrência:** `DEBTS_MAX_WORKERS` (padrão 4) execuções simultâneas; o pool é criado
+  sob demanda e encerrado no shutdown da aplicação (lifespan do router).
+- Os jobs ficam na memória do processo: com vários workers, o API Connect precisa de
+  afinidade por `consent_id` (ou os jobs devem ir para um store compartilhado).
 
 ---
 
 ## 11. Rodando
 
 ```bash
-python3.12 -m venv .venv && source .venv/bin/activate   # langchain-ibm ainda não suporta 3.14
+python3.12 -m venv .venv && source .venv/bin/activate   # .python-version; 3.13 também ok; langchain-ibm não suporta 3.14
 pip install --index-url https://pypi.org/simple -r requirements.txt
 cp .env.example .env        # preencher conforme docs/infra-setup.md
 uvicorn src.main:app --reload       # na raiz do repo
@@ -401,17 +425,24 @@ roteirizado, o repositório é em memória, e o `conftest.py` zera as credenciai
 | Latência do Granite (~19 s) × timeout do gateway | `202 PROCESSING` após `DEBTS_SYNC_TIMEOUT_S` |
 | Taxas de mercado defasadas | Séries SGS do BCB + `scripts/update_market_rates.py` |
 | Índice `consent_id` em `consent_registry` | Criado (`by-consent-id`) |
+| Revisão do PR #1 — 🔴1 job/erro velho entregue a chamadas futuras | TTL de resultado (`DEBTS_RESULT_TTL_S`) + `add_done_callback` |
+| Revisão do PR #1 — 🔴2 erros sem tratamento viravam `500` sem código | `INTERNAL_ERROR`; `InvalidSourceDataError` para payload incompleto/não-JSON; `parse_utc` para `expires_at` sem fuso |
+| Revisão do PR #1 — 🔴3 `merge_serasa` colapsava restrições e mutava a entrada | Pareamento 1:1, `contract_id` exato primeiro, cópias |
+| Revisão do PR #1 — 🔴4 produto desconhecido virava `PERSONAL_LOAN` em silêncio | `logger.warning` |
+| Revisão do PR #1 — 🟡 limpeza | Código morto do CET removido; `model_id` do LLM injetado; ordem completa das tools; `persist_snapshot` na trilha; `serasa_available` → `SerasaReport.available`; `model_validate` na resposta; executor configurável com shutdown; CPF nos fixtures; testes 502/503 via AgentExecutor; `.python-version` |
 
 ### Abertas — e em qual tarefa se resolvem
 
 | Item | Onde se resolve |
 |---|---|
 | Merge com `feat/m3-simulacao-recomendacao`: conflitos em `main.py`, `tests/conftest.py`, `requirements.txt`, `.env.example`, `PLANO.md` | **Integração M2 × M3** (quem mergear por último) |
-| Duas camadas de Cloudant/config (`src/core`+`src/storage` do M3 × `agent1/config`+`repository`) | **Integração M2 × M3** — unificar em uma |
+| Duas camadas de Cloudant/config (`src/core`+`src/storage` do M3 × `agent1/config`+`repository`), e o client duplicado em `scripts/seed_test_consent.py` | **Integração M2 × M3** — unificar em uma |
 | Dívidas rotativas têm `remaining_installments: 0`; o motor trata como 1 parcela | **Sub-Tarefa 3 (M3)** — tratar rotativo no motor |
 | `POST /consent` não implementado (hoje: `scripts/seed_test_consent.py`) | **Sub-Tarefa 1 (M1)** |
 | Escopo validado no documento de consentimento, não no token OAuth | **Sub-Tarefa 1 (M1)** — política do API Connect |
-| `502`/`503`/`202 PROCESSING` fora do `openapi.yaml` | **Sub-Tarefa 1 (M1)** |
+| `202`/`500`/`502`/`503` fora do `openapi.yaml` | **Sub-Tarefa 1 (M1)** |
+| `expires_at` do consentimento sempre ISO 8601 **com fuso** | **Sub-Tarefa 1 (M1)** — M2 já assume UTC quando falta |
+| Confirmar retenção de 90 dias após o consentimento e dono da chave de pseudonimização | **Sub-Tarefa 4 (M4)** |
 | Afinidade por `consent_id` no gateway (jobs do `202` em memória) | **Sub-Tarefa 1 (M1)** — ou store compartilhado de jobs |
 | `PSEUDONYM_HMAC_KEY` vem do `.env` (deveria vir do COS/HSM) | **Sub-Tarefa 4 (M4)** |
 | Serviço de re-identificação para consultar o Serasa por CPF | **Sub-Tarefa 4 (M4)** — `HttpSerasaClient` já aponta para ele |

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Iterable
 
@@ -66,7 +67,7 @@ def compute_cet(debt: RawDebt) -> tuple[float, CETMethod]:
 
     if debt.monthly_rate is not None:
         rate = cet_calc.cet_from_monthly_rate(
-            debt.monthly_rate, monthly_charges_rate=cet_calc.monthly_iof_rate()
+            debt.monthly_rate, monthly_charges_rate=cet_calc.MONTHLY_IOF_RATE
         )
         return rate, CETMethod.REVOLVING
 
@@ -104,24 +105,52 @@ def analyze_debt(debt: RawDebt) -> AnalyzedDebt:
 
 def merge_serasa(open_finance: list[RawDebt], serasa: Iterable[RawDebt]) -> list[RawDebt]:
     """
-    Cruza restrições do Serasa com contratos do Open Finance.
+    Cruza restrições do Serasa com contratos do Open Finance (pareamento 1:1).
 
-    Restrição de um contrato já conhecido (mesma instituição e produto) apenas
-    marca o contrato como negativado. Restrição sem correspondência vira uma
-    nova dívida — tipicamente credores fora do Open Finance (varejo, telecom).
+    Cada restrição casa com no máximo um contrato e vice-versa:
+        1. mesmo contract_id e instituição (casamento exato);
+        2. senão, mesma instituição e produto, saldo mais próximo, entre os
+           contratos ainda não pareados.
+    O contrato pareado é marcado como negativado. Restrição sem par vira uma
+    nova dívida — credores fora do Open Finance (varejo, telecom) ou um segundo
+    contrato do mesmo produto que o Open Finance não trouxe.
+
+    Não altera as listas de entrada: devolve cópias.
     """
-    merged = list(open_finance)
-    for record in serasa:
+    merged = [replace(d) for d in open_finance]
+    of_count = len(merged)  # restrições sem par anexadas abaixo não são candidatas
+    paired: set[int] = set()
+    records = list(serasa)
+
+    def mark(index: int, record: RawDebt) -> None:
+        paired.add(index)
+        debt = merged[index]
+        debt.is_negativado = True
+        debt.days_overdue = max(debt.days_overdue, record.days_overdue)
+
+    unmatched: list[RawDebt] = []
+    for record in records:
+        exact = next(
+            (i for i, d in enumerate(merged)
+             if i not in paired and d.institution == record.institution
+             and d.contract_id == record.contract_id),
+            None,
+        )
+        if exact is None:
+            unmatched.append(record)
+        else:
+            mark(exact, record)
+
+    for record in unmatched:
         candidates = [
-            d for d in merged
-            if d.institution == record.institution and d.product_type == record.product_type
+            i for i, d in enumerate(merged[:of_count])
+            if i not in paired and d.institution == record.institution
+            and d.product_type == record.product_type
         ]
         if candidates:
-            match = min(candidates, key=lambda d: abs(d.outstanding_balance - record.outstanding_balance))
-            match.is_negativado = True
-            match.days_overdue = max(match.days_overdue, record.days_overdue)
+            mark(min(candidates, key=lambda i: abs(merged[i].outstanding_balance - record.outstanding_balance)), record)
         else:
-            merged.append(record)
+            merged.append(replace(record))
     return merged
 
 

@@ -46,7 +46,7 @@ def test_granite_drives_tools_and_persists_prioritized_snapshot(consent, repo):
     assert snapshot["debts"][0]["product_type"] == "CREDIT_CARD"
     assert snapshot["debts"][0]["is_negativado"]
     assert [c["tool"] for c in snapshot["agent"]["tool_calls"]] == [
-        "get_open_finance_debts", "get_serasa_data", "calculate_cet"]
+        "get_open_finance_debts", "get_serasa_data", "calculate_cet", "persist_snapshot"]
 
 
 def test_snapshot_flags_sandboxed_sources(consent, repo):
@@ -56,6 +56,10 @@ def test_snapshot_flags_sandboxed_sources(consent, repo):
 
 
 def test_snapshot_contains_no_clear_identifiers(consent, repo):
+    from src.agents.agent1.sandbox_data import OPEN_FINANCE_CONTRACTS, SERASA_REPORT
+
+    # Pré-condição: as fontes entregam o CPF — o teste só vale se ele estiver na entrada.
+    assert SANDBOX_CPF in str(OPEN_FINANCE_CONTRACTS) and SANDBOX_CPF in str(SERASA_REPORT)
     text = str(run(consent, repo))
     assert SANDBOX_CPF not in text
     assert "ITAU-CP-2025-000123" not in text
@@ -85,10 +89,50 @@ def test_serasa_unavailable_still_produces_snapshot(consent, repo):
 def test_tools_enforce_order(consent, repo):
     ctx = tools.RunContext(consent=consent, repository=repo,
                            open_finance=SandboxOpenFinanceClient(), serasa=SandboxSerasaClient())
+    with pytest.raises(tools.ToolInputError, match="get_open_finance_debts"):
+        tools.get_serasa_data(ctx, consent["pseudonym_id"])
     with pytest.raises(tools.ToolInputError):
         tools.calculate_cet(ctx)
     with pytest.raises(tools.ToolInputError):
         tools.persist_snapshot(ctx)
+
+    tools.get_open_finance_debts(ctx, consent["consent_id"])
+    with pytest.raises(tools.ToolInputError, match="get_serasa_data"):
+        tools.calculate_cet(ctx)   # pular o Serasa não é permitido
+
+
+def test_granite_skipping_serasa_is_corrected_by_tool_error(consent, repo):
+    """O erro de ordem volta ao modelo como ToolException, e ele consegue corrigir."""
+    llm = ToolCallingFakeModel(messages=iter([
+        tool_call("get_open_finance_debts", {"consent_id": consent["consent_id"]}, "1"),
+        tool_call("calculate_cet", {}, "2"),                       # pula o Serasa
+        tool_call("get_serasa_data", {"pseudonym_id": consent["pseudonym_id"]}, "3"),
+        tool_call("calculate_cet", {}, "4"),
+        tool_call("persist_snapshot", {}, "5"),
+        AIMessage(content="ok"),
+    ]))
+    snapshot = run(consent, repo, llm=llm)
+    calls = [(c["tool"], c["ok"]) for c in snapshot["agent"]["tool_calls"]]
+    assert ("calculate_cet", False) in calls
+    assert any(d["source"] == "serasa" for d in snapshot["debts"])
+
+
+def test_malformed_serasa_report_is_treated_as_unavailable(consent, repo):
+    class BrokenSerasa:
+        def fetch_report(self, pseudonym_id):
+            return {"negative_records": [{"creditor": "x", "contract": "y"}]}   # sem amount
+
+    snapshot = run(consent, repo, serasa=BrokenSerasa())
+    assert snapshot["sources"]["serasa"]["available"] is False
+    assert all(d["source"] == "open_finance" for d in snapshot["debts"])
+
+
+def test_model_id_comes_from_injected_llm(consent, repo, monkeypatch):
+    monkeypatch.setenv("WATSONX_MODEL_ID", "ibm/outro-modelo")   # não deve ser usado
+    llm = happy_path_granite(consent)
+    llm.model_id = "ibm/granite-teste"
+    snapshot = run(consent, repo, llm=llm)
+    assert snapshot["agent"]["model_id"] == "ibm/granite-teste"
 
 
 def test_sources_require_credentials_unless_sandbox_flag_set(monkeypatch):

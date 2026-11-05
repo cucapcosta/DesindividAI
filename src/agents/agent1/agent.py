@@ -49,7 +49,8 @@ def build_llm():
     )
 
 
-def build_agent_executor(ctx: RunContext, llm=None):
+def _execute(ctx: RunContext, llm) -> None:
+    """Roda o AgentExecutor; falha se o Granite não chegar ao persist_snapshot."""
     from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
     from langchain_core.prompts import ChatPromptTemplate
 
@@ -59,15 +60,11 @@ def build_agent_executor(ctx: RunContext, llm=None):
         ("placeholder", "{agent_scratchpad}"),
     ])
     agent_tools = tools.build_langchain_tools(ctx)
-    agent = create_tool_calling_agent(llm or build_llm(), agent_tools, prompt)
-    return AgentExecutor(
-        agent=agent, tools=agent_tools, max_iterations=MAX_ITERATIONS,
+    executor = AgentExecutor(
+        agent=create_tool_calling_agent(llm, agent_tools, prompt),
+        tools=agent_tools, max_iterations=MAX_ITERATIONS,
         handle_parsing_errors=True, verbose=False,
     )
-
-
-def run_with_llm(ctx: RunContext, llm=None) -> None:
-    executor = build_agent_executor(ctx, llm)
     result = executor.invoke({"consent_id": ctx.consent_id, "pseudonym_id": ctx.pseudonym_id})
     logger.info("agent1 concluiu: %s", result.get("output"))
     if ctx.snapshot is None:
@@ -86,12 +83,14 @@ def run_agent1(
     llm=None,
 ) -> dict:
     """Executa o Agente 1 e devolve o snapshot persistido (fonte da resposta da API)."""
+    llm = llm or build_llm()
     ctx = RunContext(
         consent=consent,
         repository=repository or get_repository(),
         open_finance=open_finance or build_open_finance_client(),
         serasa=serasa or build_serasa_client(),
-        model_id=os.getenv("WATSONX_MODEL_ID", DEFAULT_MODEL_ID),
+        # Registra o modelo que de fato rodou (o injetado, se houver).
+        model_id=getattr(llm, "model_id", None),
     )
-    run_with_llm(ctx, llm)
+    _execute(ctx, llm)
     return ctx.snapshot

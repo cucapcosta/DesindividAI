@@ -1,8 +1,13 @@
 """
 Dados fictícios para desenvolvimento local e demo do hackathon.
 
-Usados automaticamente quando OPEN_FINANCE_BASE_URL / SERASA_BASE_URL /
-CLOUDANT_URL não estão configurados. Nenhum dado aqui é real.
+Usados apenas quando a fonte é simulada explicitamente — OPEN_FINANCE_SANDBOX=true
+e/ou SERASA_SANDBOX=true — e pelos testes. Não há fallback automático: sem a
+flag, a fonte exige credenciais reais. Cloudant e Granite nunca são simulados.
+O snapshot registra sources.<fonte>.sandbox=true. Nenhum dado aqui é real.
+
+Os payloads trazem o CPF do titular, como as fontes reais: a normalização deve
+descartá-lo (tests/test_agent1.py verifica que ele não chega ao snapshot).
 
 Cenário: cliente com 5 contratos em 4 instituições, das quais 3 consentidas
 (bb, itau, nubank), e 2 restrições no Serasa — uma do cartão Nubank e outra
@@ -35,6 +40,7 @@ OPEN_FINANCE_CONTRACTS = [
     {
         "institution": "itau",
         "contractId": "ITAU-CP-2025-000123",
+        "customerDocument": {"identification": SANDBOX_CPF, "rel": "CPF"},
         "productType": "EMPRESTIMOS",
         "productSubType": "CREDITO_PESSOAL_SEM_CONSIGNACAO",
         "contractDate": "2026-03-10",
@@ -72,6 +78,7 @@ OPEN_FINANCE_CONTRACTS = [
     {
         "institution": "nubank",
         "contractId": "NU-CC-5521-XXXX-0042",
+        "customerDocument": {"identification": SANDBOX_CPF, "rel": "CPF"},
         "productType": "CARTAO_CREDITO",
         "productSubType": "CARTAO_CREDITO_ROTATIVO",
         "interestRates": [{"taxPeriodicity": "AM", "preFixedRate": "0.135"}],
@@ -125,6 +132,7 @@ OPEN_FINANCE_CONTRACTS = [
 ]
 
 SERASA_REPORT = {
+    "document": SANDBOX_CPF,
     "score_band": "C",
     "negative_records": [
         {

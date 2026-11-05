@@ -22,6 +22,7 @@ from typing import Any, Callable, Optional
 
 from . import analysis
 from .cet import to_percent
+from .dates import parse_utc
 from .domain import AnalyzedDebt, RawDebt, SerasaReport
 from .repository import Repository
 from .sources import (
@@ -50,8 +51,7 @@ class RunContext:
     model_id: Optional[str] = None
 
     open_finance_debts: Optional[list[RawDebt]] = None
-    serasa_report: Optional[SerasaReport] = None
-    serasa_available: bool = True
+    serasa_report: Optional[SerasaReport] = None   # None = get_serasa_data não chamada
     analyzed_debts: Optional[list[AnalyzedDebt]] = None
     snapshot: Optional[dict] = None
     tool_calls: list[dict] = field(default_factory=list)
@@ -104,13 +104,15 @@ def get_serasa_data(ctx: RunContext, pseudonym_id: str) -> dict:
     def run() -> dict:
         if pseudonym_id != ctx.pseudonym_id:
             raise ToolInputError("pseudonym_id não corresponde ao titular desta sessão")
+        if ctx.open_finance_debts is None:
+            raise ToolInputError("chame get_open_finance_debts antes de get_serasa_data")
         try:
             ctx.serasa_report = normalize_serasa_report(ctx.serasa.fetch_report(pseudonym_id))
         except SourceUnavailableError:
-            # Serasa complementa o Open Finance; sem ele o retrato fica
-            # incompleto, mas ainda é útil. O snapshot registra a lacuna.
-            ctx.serasa_available = False
-            ctx.serasa_report = SerasaReport()
+            # Inclui InvalidSourceDataError. Serasa complementa o Open Finance;
+            # sem ele o retrato fica incompleto, mas ainda é útil. O snapshot
+            # registra a lacuna em sources.serasa.available.
+            ctx.serasa_report = SerasaReport(available=False)
             return {"available": False}
         return {
             "available": True,
@@ -125,8 +127,9 @@ def calculate_cet(ctx: RunContext) -> dict:
     def run() -> dict:
         if ctx.open_finance_debts is None:
             raise ToolInputError("chame get_open_finance_debts antes de calculate_cet")
-        serasa_records = ctx.serasa_report.negative_records if ctx.serasa_report else []
-        merged = analysis.merge_serasa(ctx.open_finance_debts, serasa_records)
+        if ctx.serasa_report is None:
+            raise ToolInputError("chame get_serasa_data antes de calculate_cet")
+        merged = analysis.merge_serasa(ctx.open_finance_debts, ctx.serasa_report.negative_records)
         ctx.analyzed_debts = analysis.prioritize(analysis.analyze_debt(d) for d in merged)
         return {
             "debts": [
@@ -140,7 +143,7 @@ def calculate_cet(ctx: RunContext) -> dict:
                 }
                 for d in ctx.analyzed_debts
             ],
-            "serasa_included": ctx.serasa_report is not None,
+            "serasa_available": ctx.serasa_report.available,
         }
 
     return _traced("calculate_cet", ctx, run)
@@ -153,8 +156,15 @@ def persist_snapshot(ctx: RunContext) -> dict:
         if ctx.snapshot is not None:
             return {"snapshot_id": ctx.snapshot["snapshot_id"], "already_persisted": True}
 
-        ctx.snapshot = build_snapshot(ctx)
-        ctx.repository.save_snapshot(ctx.snapshot)
+        snapshot = build_snapshot(ctx)
+        # A trilha persistida inclui esta própria chamada. A entrada definitiva
+        # (com duração) só existe depois do save; aqui fica o registro da
+        # chamada que gerou o documento.
+        snapshot["agent"]["tool_calls"].append(
+            {"tool": "persist_snapshot", "at": snapshot["generated_at"], "ok": True}
+        )
+        ctx.repository.save_snapshot(snapshot)
+        ctx.snapshot = snapshot
         return {
             "snapshot_id": ctx.snapshot["snapshot_id"],
             "debts_count": ctx.snapshot["debts_count"],
@@ -167,7 +177,7 @@ def persist_snapshot(ctx: RunContext) -> dict:
 def build_snapshot(ctx: RunContext) -> dict:
     debts = ctx.analyzed_debts or []
     now = datetime.now(timezone.utc)
-    consent_expires = datetime.fromisoformat(ctx.consent["expires_at"])
+    consent_expires = parse_utc(ctx.consent["expires_at"])
     return {
         "type": "financial_snapshot",
         "schema_version": SNAPSHOT_SCHEMA_VERSION,
@@ -187,7 +197,7 @@ def build_snapshot(ctx: RunContext) -> dict:
                 "sandbox": getattr(ctx.open_finance, "is_sandbox", False),
             },
             "serasa": {
-                "available": ctx.serasa_report is not None and ctx.serasa_available,
+                "available": ctx.serasa_report is not None and ctx.serasa_report.available,
                 "sandbox": getattr(ctx.serasa, "is_sandbox", False),
             },
         },
@@ -215,7 +225,8 @@ TOOL_DESCRIPTIONS = {
     ),
     "calculate_cet": (
         "Consolida as dívidas coletadas, calcula o CET anual de cada uma "
-        "(BCB Res. 3.517/2007) e ordena por prioridade de quitação. Não recebe argumentos."
+        "(BCB Res. 3.517/2007) e ordena por prioridade de quitação. Chamar depois de "
+        "get_serasa_data. Não recebe argumentos."
     ),
     "persist_snapshot": (
         "Pseudonimiza e grava o retrato financeiro priorizado. Retorna o snapshot_id. "

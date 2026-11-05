@@ -16,6 +16,7 @@ A agregação é feita pelo receptor Open Finance do BB; aqui só lemos o result
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import date
 from typing import Any, Optional, Protocol
@@ -52,9 +53,19 @@ _SERASA_NATURE_MAP: dict[str, ProductType] = {
 
 _REVOLVING = {ProductType.CREDIT_CARD, ProductType.OVERDRAFT}
 
+logger = logging.getLogger(__name__)
+
 
 class SourceUnavailableError(RuntimeError):
     """Fonte externa fora do ar ou respondeu com erro."""
+
+
+class InvalidSourceDataError(SourceUnavailableError):
+    """
+    Fonte respondeu fora do formato esperado (campo ausente, tipo inválido).
+    Tratada como indisponibilidade: melhor um retrato marcado como incompleto
+    do que uma dívida descartada em silêncio.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -81,8 +92,25 @@ def _monthly_rate(interest_rates: list[dict]) -> Optional[float]:
     return None
 
 
+def _map_product(table: dict[str, ProductType], code: str, source: str) -> ProductType:
+    product = table.get(code)
+    if product is None:
+        # Sem mapeamento, a dívida cai na estimativa de crédito pessoal — pode
+        # distorcer a priorização. O aviso permite incluir o código na tabela.
+        logger.warning("%s: produto desconhecido %r tratado como PERSONAL_LOAN", source, code)
+        return ProductType.PERSONAL_LOAN
+    return product
+
+
 def normalize_open_finance_contract(payload: dict) -> RawDebt:
-    product = _OF_SUBTYPE_MAP.get(payload.get("productSubType", ""), ProductType.PERSONAL_LOAN)
+    try:
+        return _normalize_open_finance_contract(payload)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise InvalidSourceDataError(f"Open Finance: contrato fora do formato ({exc!r})") from exc
+
+
+def _normalize_open_finance_contract(payload: dict) -> RawDebt:
+    product = _map_product(_OF_SUBTYPE_MAP, payload.get("productSubType", ""), "Open Finance")
     instalments = payload.get("instalments") or {}
     payments = payload.get("payments") or {}
     bill = payload.get("bill") or {}
@@ -124,7 +152,13 @@ def normalize_open_finance_contract(payload: dict) -> RawDebt:
 
 
 def normalize_serasa_report(payload: dict, *, today: Optional[date] = None) -> SerasaReport:
-    today = today or date.today()
+    try:
+        return _normalize_serasa_report(payload, today or date.today())
+    except (KeyError, TypeError, ValueError) as exc:
+        raise InvalidSourceDataError(f"Serasa: relatório fora do formato ({exc!r})") from exc
+
+
+def _normalize_serasa_report(payload: dict, today: date) -> SerasaReport:
     records = []
     for item in payload.get("negative_records") or []:
         occurred = _date(item.get("occurrence_date"))
@@ -132,7 +166,7 @@ def normalize_serasa_report(payload: dict, *, today: Optional[date] = None) -> S
             source=DebtSource.SERASA,
             institution=item["creditor"],
             contract_id=item["contract"],
-            product_type=_SERASA_NATURE_MAP.get(item.get("nature", ""), ProductType.PERSONAL_LOAN),
+            product_type=_map_product(_SERASA_NATURE_MAP, item.get("nature", ""), "Serasa"),
             outstanding_balance=float(item["amount"]),
             is_negativado=True,
             days_overdue=(today - occurred).days if occurred else 0,
@@ -187,9 +221,11 @@ class _HttpClient:
                 timeout=self._timeout,
             )
             response.raise_for_status()
+            return response.json()
         except httpx.HTTPError as exc:
             raise SourceUnavailableError(f"{self._base_url}: {exc}") from exc
-        return response.json()
+        except ValueError as exc:  # corpo não-JSON
+            raise InvalidSourceDataError(f"{self._base_url}: resposta não é JSON") from exc
 
 
 class HttpOpenFinanceClient(_HttpClient):

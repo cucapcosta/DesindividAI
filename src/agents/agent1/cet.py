@@ -32,11 +32,14 @@ DAYS_PER_YEAR = 365
 # mensal: (1 + i_mensal) ^ 12 = 1 + CET.
 AVG_DAYS_PER_MONTH = DAYS_PER_YEAR / 12
 
-# IOF pessoa física (Decreto 6.306/2007): 0,0082% ao dia + 0,38% fixo.
+# IOF pessoa física (Decreto 6.306/2007): 0,0082% ao dia. A alíquota fixa de
+# 0,38% incide uma vez na contratação — para parcelados ela já vem em
+# contractedFees; no rotativo entra só o componente diário (× 30 dias).
 IOF_DAILY_RATE = 0.000082
-IOF_FIXED_RATE = 0.0038
+MONTHLY_IOF_RATE = IOF_DAILY_RATE * 30
 
-_MIN_RATE = -0.99
+# Bisseção no intervalo [0, _MAX_RATE]: CET negativo é rejeitado antes
+# (soma dos pagamentos < valor liberado).
 _MAX_RATE = 1_000.0  # 100.000% a.a. — teto de segurança para o rotativo
 _TOLERANCE = 1e-10
 _MAX_ITERATIONS = 300
@@ -124,11 +127,6 @@ def cet_from_installments(
         for k in range(installments)
     ]
     return cet_from_cash_flows(released_amount, flows)
-
-
-def monthly_iof_rate() -> float:
-    """IOF efetivo de um mês de crédito rotativo (diário × 30 dias)."""
-    return IOF_DAILY_RATE * 30
 
 
 def cet_from_monthly_rate(monthly_rate: float, *, monthly_charges_rate: float = 0.0) -> float:

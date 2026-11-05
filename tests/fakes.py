@@ -1,6 +1,6 @@
 """Fakes compartilhados pelos testes — nenhum teste chama serviços reais."""
 
-from typing import Any
+from typing import Any, Optional
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage
@@ -11,6 +11,7 @@ class ToolCallingFakeModel(BaseChatModel):
     """Fake do Granite: devolve as mensagens roteirizadas e aceita bind_tools."""
 
     messages: Any
+    model_id: Optional[str] = None
 
     @property
     def _llm_type(self) -> str:
