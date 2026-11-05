@@ -387,3 +387,186 @@ def test_two_holders_independent():
     doc1 = repo.get(pid1)
     doc2 = repo.get(pid2)
     assert doc1["wrapped_dek"] != doc2["wrapped_dek"]
+
+
+# ---------------------------------------------------------------------------
+# Ajustes M4 — Fase 4 (PARTE B)
+# ---------------------------------------------------------------------------
+
+# B1: reveal com purpose inválido deve chamar audit ANTES de levantar ValueError
+# -------------------------------------------------------------------------------
+
+def test_audit_called_before_raise_on_invalid_purpose():
+    """
+    Garante que audit("vault.reveal", ..., ok=False, reason="invalid_purpose")
+    é chamado ANTES de ValueError ser levantado.
+    """
+    events = []
+
+    def audit(event_type, **fields):
+        events.append({"event_type": event_type, **fields})
+
+    vault, _ = _make_vault(audit=audit)
+    pid = vault.store(_CPF)
+
+    with pytest.raises(ValueError, match="purpose inválido"):
+        vault.reveal(pid, purpose="INVALID_PURPOSE", actor="test")
+
+    # Auditoria deve ter sido chamada
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["event_type"] == "vault.reveal"
+    assert ev["pseudonym_id"] == pid
+    assert ev["actor"] == "test"
+    assert ev["purpose"] == "INVALID_PURPOSE"
+    assert ev["ok"] is False
+    assert ev.get("reason") == "invalid_purpose"
+
+
+def test_audit_called_before_raise_on_empty_purpose():
+    """purpose vazio também deve disparar o audit antes do raise."""
+    events = []
+
+    def audit(event_type, **fields):
+        events.append({"event_type": event_type, **fields})
+
+    vault, _ = _make_vault(audit=audit)
+    pid = vault.store(_CPF)
+
+    with pytest.raises(ValueError):
+        vault.reveal(pid, purpose="", actor="system")
+
+    assert len(events) == 1
+    assert events[0]["ok"] is False
+    assert events[0].get("reason") == "invalid_purpose"
+
+
+# B2: store com 409 ApiException na criação concorrente
+# -------------------------------------------------------------------------------
+
+class _FakeApiException(Exception):
+    """Simula ibm_cloud_sdk_core.ApiException com atributo .code."""
+
+    def __init__(self, code: int) -> None:
+        self.code = code
+        super().__init__(f"ApiException code={code}")
+
+
+class _ConflictOnFirstPutRepository:
+    """
+    Repositório fake que levanta _FakeApiException(409) no PRIMEIRO put,
+    depois persiste o documento normalmente (como se outro processo tivesse
+    criado o documento entre o get e o put).
+    """
+
+    def __init__(self) -> None:
+        self._store: dict[str, dict] = {}
+        self._put_calls = 0
+
+    def get(self, pseudonym_id: str):
+        doc = self._store.get(pseudonym_id)
+        return dict(doc) if doc is not None else None
+
+    def put(self, doc: dict) -> None:
+        self._put_calls += 1
+        if self._put_calls == 1:
+            # Simula que outro processo criou o documento com sucesso
+            # (o vault vai ler e retornar esse documento)
+            self._store[doc["_id"]] = dict(doc)
+            raise _FakeApiException(409)
+        self._store[doc["_id"]] = dict(doc)
+
+    def delete(self, pseudonym_id: str) -> None:
+        self._store.pop(pseudonym_id, None)
+
+
+def test_store_409_concurrent_active_returns_pseudonym_id():
+    """
+    Quando put levanta uma exceção com code=409 e o documento está ativo,
+    store deve retornar o pseudonym_id sem propagar a exceção.
+    """
+    from src.privacy.key_provider import EnvKeyProvider
+
+    repo = _ConflictOnFirstPutRepository()
+    kp = EnvKeyProvider()
+    vault = IdentityVault(repository=repo, key_provider=kp)
+
+    pid = vault.store(_CPF)
+    assert pid  # retorna normalmente, sem levantar
+
+
+def test_store_409_concurrent_returns_same_pseudonym_as_normal_store():
+    """O pseudonym_id retornado no cenário 409 é idêntico ao gerado normalmente."""
+    from src.privacy.key_provider import EnvKeyProvider
+    from src.privacy.pseudonymization import pseudonymize_cpf
+
+    repo = _ConflictOnFirstPutRepository()
+    kp = EnvKeyProvider()
+    vault = IdentityVault(repository=repo, key_provider=kp)
+
+    expected_pid = pseudonymize_cpf(_CPF)
+    actual_pid = vault.store(_CPF)
+    assert actual_pid == expected_pid
+
+
+def test_store_non_409_exception_is_reraised():
+    """Exceções com código diferente de 409 devem ser propagadas normalmente."""
+    from src.privacy.key_provider import EnvKeyProvider
+
+    class _AlwaysFailRepository:
+        def get(self, _):
+            return None
+
+        def put(self, _):
+            raise _FakeApiException(500)
+
+        def delete(self, _):
+            pass
+
+    repo = _AlwaysFailRepository()
+    kp = EnvKeyProvider()
+    vault = IdentityVault(repository=repo, key_provider=kp)
+
+    with pytest.raises(_FakeApiException) as exc_info:
+        vault.store(_CPF)
+    assert exc_info.value.code == 500
+
+
+# B3: get_vault_repository() usa ConfigurationError
+# -------------------------------------------------------------------------------
+
+def test_get_vault_repository_raises_configuration_error(monkeypatch):
+    """
+    Sem CLOUDANT_URL/CLOUDANT_APIKEY, get_vault_repository deve levantar
+    ConfigurationError (de src/agents/agent1/config.py), não KeyProviderError.
+    """
+    from src.agents.agent1.config import ConfigurationError
+    from src.privacy.identity_vault import get_vault_repository
+
+    monkeypatch.delenv("CLOUDANT_URL", raising=False)
+    monkeypatch.setenv("CLOUDANT_URL", "")
+    monkeypatch.setenv("CLOUDANT_APIKEY", "")
+    get_vault_repository.cache_clear()
+    try:
+        with pytest.raises(ConfigurationError, match="CLOUDANT_URL"):
+            get_vault_repository()
+    finally:
+        get_vault_repository.cache_clear()
+
+
+def test_get_vault_repository_not_key_provider_error(monkeypatch):
+    """Garante que KeyProviderError NÃO é levantado (foi substituído)."""
+    from src.privacy.key_provider import KeyProviderError
+    from src.privacy.identity_vault import get_vault_repository
+
+    monkeypatch.setenv("CLOUDANT_URL", "")
+    monkeypatch.setenv("CLOUDANT_APIKEY", "")
+    get_vault_repository.cache_clear()
+    try:
+        with pytest.raises(Exception) as exc_info:
+            get_vault_repository()
+        assert not isinstance(exc_info.value, KeyProviderError), (
+            "get_vault_repository não deve levantar KeyProviderError"
+        )
+    finally:
+        get_vault_repository.cache_clear()

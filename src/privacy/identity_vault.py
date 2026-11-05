@@ -160,12 +160,12 @@ def get_vault_repository() -> VaultRepository:
     Factory com @lru_cache — padrão do M2 (get_repository()).
     Em produção, requer CLOUDANT_URL e CLOUDANT_APIKEY.
     """
-    from .key_provider import KeyProviderError
+    from src.agents.agent1.config import ConfigurationError
 
     url = os.getenv("CLOUDANT_URL", "")
     apikey = os.getenv("CLOUDANT_APIKEY", "")
     if not url or not apikey:
-        raise KeyProviderError(
+        raise ConfigurationError(
             "CLOUDANT_URL e CLOUDANT_APIKEY são obrigatórios para CloudantVaultRepository."
         )
     db = os.getenv("CLOUDANT_DB_IDENTITY_VAULT", "identity_vault")
@@ -256,7 +256,17 @@ class IdentityVault:
                 doc["_rev"] = existing["_rev"]
             doc["previously_shredded_at"] = existing.get("shredded_at")
 
-        self._repo.put(doc)
+        try:
+            self._repo.put(doc)
+        except Exception as exc:
+            # Tratar criação concorrente (409): se o documento agora está ativo,
+            # retornar o pseudonym_id existente; caso contrário, relançar.
+            code = getattr(exc, "code", None)
+            if code == 409:
+                fresh = self._repo.get(pseudonym_id)
+                if fresh is not None and fresh.get("shredded_at") is None:
+                    return pseudonym_id
+            raise
         return pseudonym_id
 
     # ------------------------------------------------------------------
@@ -273,6 +283,14 @@ class IdentityVault:
         Sempre registra o evento vault.reveal via self._audit (nunca com o CPF).
         """
         if purpose not in _ALLOWED_PURPOSES:
+            self._audit(
+                "vault.reveal",
+                pseudonym_id=pseudonym_id,
+                actor=actor,
+                purpose=purpose,
+                ok=False,
+                reason="invalid_purpose",
+            )
             raise ValueError(
                 f"purpose inválido: {purpose!r}. "
                 f"Valores aceitos: {sorted(_ALLOWED_PURPOSES)}"
