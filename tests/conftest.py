@@ -1,10 +1,33 @@
-import pytest
-from fastapi.testclient import TestClient
-from langchain_core.language_models.fake_chat_models import FakeListChatModel
+import os
 
-from src.agents.recommendation_agent import build_llm
-from src.main import app
-from src.storage.store import MemoryStore, get_store
+# Testes NUNCA chamam serviços reais. As variáveis são definidas como vazias (e
+# não removidas) porque main.py chama load_dotenv(), que só preenche variáveis
+# ausentes — assim o .env local com credenciais reais não vaza para os testes.
+# Exceção: RUN_CLOUD_TESTS=1 (tests/test_cloud_integration.py) precisa do .env real.
+_REAL_SERVICE_VARS = (
+    "WATSONX_URL", "WATSONX_PROJECT_ID", "WATSONX_SPACE_ID", "IBM_CLOUD_API_KEY",
+    "CLOUDANT_URL", "CLOUDANT_APIKEY",
+    "OPEN_FINANCE_BASE_URL", "OPEN_FINANCE_API_KEY",
+    "SERASA_BASE_URL", "SERASA_API_KEY",
+)
+if os.getenv("RUN_CLOUD_TESTS") != "1":
+    for var in _REAL_SERVICE_VARS:
+        os.environ[var] = ""
+
+# Fontes externas simuladas; Cloudant e Granite são substituídos por fakes injetados.
+os.environ["OPEN_FINANCE_SANDBOX"] = "true"
+os.environ["SERASA_SANDBOX"] = "true"
+# Chave fixa só para testes — precisa existir antes de importar os módulos.
+os.environ["PSEUDONYM_HMAC_KEY"] = "ab" * 32
+os.environ["APP_ENV"] = "development"
+
+import pytest  # noqa: E402  (o ambiente acima precisa existir antes dos imports da aplicação)
+from fastapi.testclient import TestClient  # noqa: E402
+from langchain_core.language_models.fake_chat_models import FakeListChatModel  # noqa: E402
+
+from src.agents.recommendation_agent import build_llm  # noqa: E402
+from src.main import app  # noqa: E402
+from src.storage.store import MemoryStore, get_store  # noqa: E402
 
 SNAPSHOT_ID = "11111111-1111-1111-1111-111111111111"
 

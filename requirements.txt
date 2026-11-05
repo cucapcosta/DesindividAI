@@ -4,13 +4,17 @@ pydantic>=2.7.0
 python-dotenv>=1.0.0
 httpx>=0.27.0
 
+# Agentes 1 e 2 (M2/M3) — LangChain 1.x + watsonx.ai
+langchain>=1.0.0
+langchain-classic>=1.0.0   # AgentExecutor (movido do langchain 1.x)
+langchain-ibm>=1.0.0
+ibmcloudant>=0.9.0
+
 # Testes
 pytest>=8.0.0
 
-# Agente 2 (LangChain + watsonx.ai)
-langchain-core>=0.3.0
-langchain-ibm>=0.3.0
-
-# Para rodar:
+# Para rodar (na raiz do repo):
 #   uvicorn src.main:app --reload
-# Testes: pytest
+# Testes (na raiz do repo):
+#   pytest
+# Obs.: langchain-ibm ainda não suporta Python 3.14 — use 3.11–3.13.

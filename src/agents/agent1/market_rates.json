@@ -1,0 +1,42 @@
+{
+  "source": "BCB/SGS — taxa média de juros, pessoas físicas (% a.a.)",
+  "updated_at": "2026-11-05T13:00:01.455231+00:00",
+  "rates": {
+    "CREDIT_CARD": {
+      "annual_rate_pct": 451.71,
+      "sgs_series": 22022,
+      "series_label": "Cartão de crédito rotativo",
+      "reference_month": "2026-09-01"
+    },
+    "OVERDRAFT": {
+      "annual_rate_pct": 139.02,
+      "sgs_series": 20741,
+      "series_label": "Cheque especial",
+      "reference_month": "2026-09-01"
+    },
+    "PERSONAL_LOAN": {
+      "annual_rate_pct": 110.94,
+      "sgs_series": 20742,
+      "series_label": "Crédito pessoal não consignado",
+      "reference_month": "2026-09-01"
+    },
+    "PAYROLL_LOAN": {
+      "annual_rate_pct": 28.53,
+      "sgs_series": 20747,
+      "series_label": "Crédito pessoal consignado total",
+      "reference_month": "2026-09-01"
+    },
+    "VEHICLE_LOAN": {
+      "annual_rate_pct": 26.18,
+      "sgs_series": 20749,
+      "series_label": "Aquisição de veículos",
+      "reference_month": "2026-09-01"
+    },
+    "MORTGAGE": {
+      "annual_rate_pct": 11.31,
+      "sgs_series": 20774,
+      "series_label": "Financiamento imobiliário total",
+      "reference_month": "2026-09-01"
+    }
+  }
+}

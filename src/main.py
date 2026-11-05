@@ -10,9 +10,12 @@ Documentação interativa (gerada automaticamente pelo FastAPI):
     http://localhost:8000/redoc      ← ReDoc
 """
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+
+load_dotenv()  # lê .env (na raiz do repo ou no cwd) antes de qualquer módulo consultar o ambiente
 
 from src.api.models import ErrorResponse
 from src.core.errors import ServiceError
