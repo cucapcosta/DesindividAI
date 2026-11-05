@@ -3,6 +3,36 @@
 Atualizado em 2026-11-04. Serve para retomar o trabalho em outra máquina. **Nenhum segredo aqui**;
 o `.env` não vai para o git e precisa ser recriado (ver "Retomar em outra máquina").
 
+## 0. Validação na cloud
+
+Decisão de 2026-11-05: **não testar chamadas de cloud na máquina/conta do autor do M3**. O código é entregue testado
+apenas offline (`pytest`: 17 passam, 1 pulado). A validação contra serviços reais acontece na cloud do colega ou no merge.
+
+**Estado de verificação (2026-11-05):** `python -m scripts.cloud_smoke_test` passou **inteiro** na conta do autor
+(IAM, Cloudant, Granite `ibm/granite-4-h-small`, `/simulation`, `/recommendation` em `simple` e `technical`, trace persistido).
+Ainda **não** verificado: `WATSONX_SIMULATION_URL` (AI Service não deployado) e o envio ao watsonx.governance.
+A validação na conta do colega continua útil para confirmar que a configuração é reproduzível.
+
+Observações do teste real: `granite-3-8b-instruct` não existe mais (usar `granite-4-h-small`); o parâmetro de chat é
+`max_tokens` (não `max_new_tokens`); o snapshot de exemplo tem um cartão cujo mínimo não cobre os juros, então o
+"juros pagando só o mínimo" do baseline fica muito alto (efeito dos dados de exemplo, não do motor).
+
+**Como validar (uma pessoa com a cloud configurada)**
+```bash
+cp .env.example .env     # preencher: IBM_CLOUD_API_KEY (44 caracteres), WATSONX_URL, WATSONX_PROJECT_ID (ou WATSONX_SPACE_ID),
+                         # WATSONX_MODEL_ID, CLOUDANT_URL, CLOUDANT_APIKEY
+# pré-requisito: o WML precisa estar associado ao projeto (ou usar um espaço de implementação)
+python -m scripts.cloud_smoke_test          # cria databases + snapshot de exemplo e testa o fluxo completo
+# ou, via pytest:  RUN_CLOUD_TESTS=1 pytest tests/test_cloud_integration.py -s
+```
+O smoke test imprime `[OK]`/`[FALHA]` por etapa (IAM, Cloudant, Granite, `/simulation`, `/recommendation` em `simple` e
+`technical`, trace persistido), mostra a explicação gerada e sai com código 1 se algo falhar. **Escreve** no Cloudant
+da conta usada (databases, snapshot de exemplo, simulações e traces). Só preparar os dados: `python -m scripts.cloud_setup`.
+
+Se falhar, os erros mais prováveis: `403 no_associated_service_instance_error` (associar o WML), 404 de modelo
+(trocar `WATSONX_MODEL_ID` por um Granite disponível na região), 401 com `Failed to verify user profile` (abrir o
+Watson Studio uma vez pelo navegador).
+
 ## 1. M3: o que está pronto
 
 | Item | Onde | Estado |
@@ -10,11 +40,12 @@ o `.env` não vai para o git e precisa ser recriado (ver "Retomar em outra máqu
 | Motor de Simulação (3 cenários) | `src/simulation/engine.py` | Pronto, testado |
 | Cliente do Motor (AI Service ou local) | `src/simulation/client.py`, `ai_service.py` | Pronto; modo local funciona, AI Service **não deployado** |
 | `POST /simulation` | `src/api/routers/simulation.py`, `src/services/simulation_service.py` | Pronto |
-| Agente 2 (LCEL + Granite) | `src/agents/recommendation_agent.py`, `tools.py` | Pronto, testado com LLM falso; **nunca rodou com Granite real** |
+| Agente 2 (LCEL + Granite) | `src/agents/recommendation_agent.py`, `tools.py` | Pronto, testado com LLM falso; validado com Granite real em 2026-11-05 |
 | `POST /recommendation` | `src/api/routers/recommendation.py`, `src/services/recommendation_service.py` | Pronto, mesmo caveat |
 | Trace de auditoria | `src/services/governance.py` | Grava no Cloudant/memória; **sem envio ao watsonx.governance** |
 | Armazenamento | `src/storage/store.py` | Cloudant (httpx + IAM) ou memória se `CLOUDANT_URL` vazio |
-| Testes | `tests/` | 16 passando (`pytest`) |
+| Testes | `tests/` | 17 passando, 1 pulado (integração cloud, `RUN_CLOUD_TESTS=1`) |
+| Validação cloud | `scripts/cloud_setup.py`, `scripts/cloud_smoke_test.py` | Prontos e **executados com sucesso** |
 | Docs | `docs/m3-simulation-engine.md`, `docs/m3-agent2-recommendation.md` | Prontos |
 
 Decisões: cenário recomendado por regra determinística (o LLM só explica); linha BB de consolidação é
@@ -66,7 +97,7 @@ git checkout feat/m3-simulacao-recomendacao
 python -m venv .venv                 # Python 3.11+ (foi usado 3.12)
 .venv/Scripts/python.exe -m pip install -r requirements.txt     # Windows; em Linux/Mac: .venv/bin/python
 cp .env.example .env                 # preencher valores
-.venv/Scripts/python.exe -m pytest -q                            # esperado: 16 passed
+.venv/Scripts/python.exe -m pytest -q                            # esperado: 17 passed, 1 skipped
 uvicorn src.main:app --reload        # a partir da raiz; Swagger em /docs
 ```
 
