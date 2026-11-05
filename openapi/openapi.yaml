@@ -432,6 +432,24 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Erro interno não previsto (`INTERNAL_ERROR`); o detalhe fica apenas no log
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "502":
+          description: O Agente 1 não completou a coleta (`AGENT_FAILED`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: Open Finance indisponível ou dados inválidos (`SOURCE_UNAVAILABLE`), ou serviço não configurado (`NOT_CONFIGURED`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   # ── Simulação ──────────────────────────────────────────────────────────────
   /simulation:
@@ -458,19 +476,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/SimulationResponse'
         "400":
-          description: snapshot_id inválido ou orçamento negativo
+          description: Orçamento inválido, snapshot sem dívida em aberto ou dívida malformada (`INVALID_INPUT`)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         "403":
-          description: Escopo insuficiente
+          description: Consentimento do snapshot ausente, revogado, de outro titular (`CONSENT_REQUIRED`), expirado (`CONSENT_EXPIRED`) ou sem o escopo `simulation:read` (`INSUFFICIENT_SCOPE`)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         "404":
-          description: Snapshot inexistente
+          description: Snapshot inexistente ou expirado (`SNAPSHOT_NOT_FOUND`)
           content:
             application/json:
               schema:
@@ -514,7 +532,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         "403":
-          description: Escopo insuficiente
+          description: Consentimento da simulação ausente, revogado, de outro titular (`CONSENT_REQUIRED`), expirado (`CONSENT_EXPIRED`) ou sem o escopo `recommendation:read` (`INSUFFICIENT_SCOPE`)
           content:
             application/json:
               schema:
