@@ -15,10 +15,19 @@ Cenários (PLANO.md, Sub-Tarefa 3):
 Premissas: juros mensais = (1 + CET a.a.)^(1/12) - 1; juros incidem antes do
 pagamento do mês; sem tarifas de portabilidade; a taxa da linha BB é uma
 premissa configurável (BB_CONSOLIDATION_CET_ANNUAL), não uma oferta real.
+
+Dívidas que não amortizam no mínimo (pagamento ausente ou abaixo dos juros do
+mês — ex.: dívida só do Serasa, rotativo, cheque especial): o motor assume um
+pagamento fixo de juros iniciais + ASSUMED_MIN_PRINCIPAL_PCT do saldo e declara
+a premissa na descrição de cada cenário. Prazo ausente (remaining_installments
+<= 0) vira DEFAULT_TERM_MONTHS. Se mesmo assim o saldo total passar de
+DIVERGENCE_FACTOR vezes o inicial (orçamento menor que os juros), a simulação
+para e o cenário é marcado como "não quita" — os valores nunca explodem.
 """
 
 from __future__ import annotations
 
+import math
 import uuid
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -26,6 +35,10 @@ from typing import Callable, Optional
 MAX_MONTHS = 600
 DEFAULT_BB_CET_ANNUAL = 30.0
 EPS = 0.005
+# Premissas para dívidas sem mínimo utilizável (ver docstring do módulo).
+ASSUMED_MIN_PRINCIPAL_PCT = 0.01
+DEFAULT_TERM_MONTHS = 36
+DIVERGENCE_FACTOR = 10.0
 CONSOLIDATED_DEBT_ID = str(uuid.uuid5(uuid.NAMESPACE_URL, "desendividai:bb-consolidation"))
 
 
@@ -40,6 +53,7 @@ class _Loan:
     cet: float
     min_payment: float
     installments: int
+    min_assumed: bool = False  # mínimo estimado pelo motor, não informado no snapshot
 
     @property
     def rate(self) -> float:
@@ -49,24 +63,38 @@ class _Loan:
 Allocator = Callable[[list[_Loan]], dict[str, float]]
 
 
+def _parse_loan(d: dict) -> _Loan:
+    """Converte uma dívida do snapshot; dado ausente ou inválido vira ValueError (HTTP 400), nunca 500."""
+    try:
+        debt_id = str(d["debt_id"])
+        balance = float(d["outstanding_balance"])
+        cet = float(d["cet_annual"])
+        payment = float(d.get("monthly_payment") or 0.0)
+        term = int(d.get("remaining_installments") or 0)
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        ident = d.get("debt_id", "?") if isinstance(d, dict) else "?"
+        raise ValueError(f"Dívida inválida no snapshot ({ident}): campo ausente ou não numérico ({exc}).") from exc
+    if not all(math.isfinite(v) for v in (balance, cet, payment)) or balance < 0 or cet < 0:
+        raise ValueError(f"Dívida inválida no snapshot ({debt_id}): saldo e CET devem ser finitos e não negativos.")
+
+    installments = min(MAX_MONTHS, term) if term > 0 else DEFAULT_TERM_MONTHS
+    payment = max(payment, 0.0)
+    rate = monthly_rate(cet)
+    assumed = balance > EPS and payment < balance * rate + EPS
+    if assumed:
+        payment = balance * (rate + ASSUMED_MIN_PRINCIPAL_PCT)
+    return _Loan(debt_id, balance, cet, payment, installments, min_assumed=assumed)
+
+
 def _loans(debts: list[dict]) -> list[_Loan]:
-    return [
-        _Loan(
-            id=str(d["debt_id"]),
-            balance=float(d["outstanding_balance"]),
-            cet=float(d["cet_annual"]),
-            min_payment=float(d["monthly_payment"]),
-            installments=max(1, min(MAX_MONTHS, int(d.get("remaining_installments") or 1))),
-        )
-        for d in debts
-        if float(d["outstanding_balance"]) > EPS
-    ]
+    return [l for l in (_parse_loan(d) for d in debts) if l.balance > EPS]
 
 
 def _run(loans: list[_Loan], allocate: Allocator, max_months: int = MAX_MONTHS):
     """Simula mês a mês. Retorna (plano, juros totais, quitou?)."""
     plan: list[dict[str, float]] = []
     interest = 0.0
+    divergence_limit = sum(l.balance for l in loans) * DIVERGENCE_FACTOR
     for _ in range(max_months):
         active = [l for l in loans if l.balance > EPS]
         if not active:
@@ -79,6 +107,8 @@ def _run(loans: list[_Loan], allocate: Allocator, max_months: int = MAX_MONTHS):
         for l in active:
             l.balance = max(l.balance - payments.get(l.id, 0.0), 0.0)
         plan.append(payments)
+        if sum(l.balance for l in loans) > divergence_limit:
+            break  # orçamento não cobre os juros: parar em vez de acumular valores absurdos
     return plan, interest, all(l.balance <= EPS for l in loans)
 
 
@@ -123,10 +153,20 @@ def _consolidate(loans: list[_Loan], bb_cet: float) -> tuple[list[_Loan], list[_
     return [merged] + rest, ported
 
 
-def _scenario(scenario_id: str, label: str, description: str, run, baseline_interest: float) -> dict:
+def _scenario(
+    scenario_id: str, label: str, description: str, run, baseline_interest: float, assumption_note: str = ""
+) -> dict:
     plan, interest, paid_off = run
     if not paid_off:
-        description += f" Atenção: não quita em {MAX_MONTHS // 12} anos com esse orçamento."
+        if len(plan) >= MAX_MONTHS:
+            description += f" Atenção: não quita em {MAX_MONTHS // 12} anos com esse orçamento."
+        else:
+            description += (
+                f" Atenção: não quita — o saldo cresce mais rápido do que o orçamento paga; "
+                f"a simulação foi interrompida no mês {len(plan)}."
+            )
+    if assumption_note:
+        description += " " + assumption_note
     return {
         "scenario_id": scenario_id,
         "label": label,
@@ -150,11 +190,18 @@ def _scenario(scenario_id: str, label: str, description: str, run, baseline_inte
 
 def simulate(debts: list[dict], monthly_budget: float, bb_cet_annual: Optional[float] = None) -> list[dict]:
     """Retorna os 3 cenários, sempre na ordem aggressive, consolidation, minimum_viable."""
-    if monthly_budget <= 0:
+    if not math.isfinite(monthly_budget) or monthly_budget <= 0:
         raise ValueError("monthly_budget deve ser maior que zero.")
-    if not any(float(d["outstanding_balance"]) > EPS for d in debts):
+    open_loans = _loans(debts)
+    if not open_loans:
         raise ValueError("Nenhuma dívida com saldo em aberto.")
     bb_cet = DEFAULT_BB_CET_ANNUAL if bb_cet_annual is None else bb_cet_annual
+    assumed = [l for l in open_loans if l.min_assumed]
+    note = (
+        f"Premissa: {len(assumed)} dívida(s) sem pagamento mínimo que cubra os juros foram simuladas "
+        f"com mínimo fixo de juros iniciais + {ASSUMED_MIN_PRINCIPAL_PCT:.0%} do saldo."
+        if assumed else ""
+    )
 
     # 1) Agressivo
     aggressive = _run(_loans(debts), _allocator(monthly_budget, lambda ordered: [l.id for l in ordered]))
@@ -193,12 +240,12 @@ def simulate(debts: list[dict], monthly_budget: float, bb_cet_annual: Optional[f
         _scenario(
             "aggressive", "Agressivo",
             "Paga os mínimos de todas as dívidas e direciona todo o orçamento restante à dívida de maior CET.",
-            aggressive, baseline_interest,
+            aggressive, baseline_interest, note,
         ),
-        _scenario("consolidation", "Consolidação", c_desc, consolidation, baseline_interest),
+        _scenario("consolidation", "Consolidação", c_desc, consolidation, baseline_interest, note),
         _scenario(
             "minimum_viable", "Mínimo viável",
             "Paga apenas os mínimos e usa o excedente só para quitar a dívida mais cara.",
-            minimum, baseline_interest,
+            minimum, baseline_interest, note,
         ),
     ]
