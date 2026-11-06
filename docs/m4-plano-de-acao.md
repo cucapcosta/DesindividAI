@@ -219,24 +219,184 @@ Atualizar também:
 
 ## Definição de Pronto (Parte A)
 
-- [ ] Fase 0 reportada e aprovada
-- [ ] `pytest -q -m "not integration"` verde, sem regressão nos testes do M2
-- [ ] `pytest -q -m integration` verde na cloud real, sem resíduo de dados de teste
-- [ ] `pseudonymize_cpf` e `pseudonymize_contract` com saída idêntica à anterior (teste de regressão)
-- [ ] Cofre de identidade com `store`, `reveal` auditado e `shred` funcionando
-- [ ] Snapshot do Agente 1 validado pela guarda de PII e auditado em `audit_trail` + COS
-- [ ] `/internal/erase/{pseudonym_id}` e `/internal/retention/run` funcionais, protegidos e idempotentes
-- [ ] Nenhum CPF em claro em snapshots, `audit_trail`, logs ou COS (verificado por teste)
-- [ ] `openapi.yaml`, `PLANO.md`, `m2-agent1.md`, `infra-setup.md` e os 5 docs `m4-*` atualizados
-- [ ] Nenhum segredo no diff (`git diff` revisado; `.env` intocado no git)
-- [ ] Nenhum commit feito pelo executor (`git log` inalterado; commits só pelo usuário)
+- [x] Fase 0 reportada e aprovada
+- [x] `pytest -q -m "not integration"` verde, sem regressão nos testes do M2
+- [x] `pytest -q -m integration` verde na cloud real, sem resíduo de dados de teste
+- [x] `pseudonymize_cpf` e `pseudonymize_contract` com saída idêntica à anterior (teste de regressão)
+- [x] Cofre de identidade com `store`, `reveal` auditado e `shred` funcionando
+- [x] Snapshot do Agente 1 validado pela guarda de PII e auditado em `audit_trail` + COS
+- [x] `/internal/erase/{pseudonym_id}` e `/internal/retention/run` funcionais, protegidos e idempotentes
+- [x] Nenhum CPF em claro em snapshots, `audit_trail`, logs ou COS (verificado por teste)
+- [x] `openapi.yaml`, `PLANO.md`, `m2-agent1.md`, `infra-setup.md` e os 5 docs `m4-*` atualizados
+- [x] Nenhum segredo no diff (`git diff` revisado; `.env` intocado no git)
+- [x] Nenhum commit feito pelo executor (`git log` inalterado; commits só pelo usuário)
 
 ---
 
-## Parte B (NÃO executar agora — virá em outro prompt, após o M3 entrar)
+## Parte B — Integração do M4 com o Agente 2 (M3)
 
-Registrado aqui só para o executor saber o que **não** fazer:
-- Fazer `services/governance.record_trace` do M3 delegar para `src/privacy/audit.py` (trace em `audit_trail` + COS, guarda de PII no prompt e na saída, hashes)
-- Separar simulações e recomendações em `decisions` (`CLOUDANT_DB_DECISIONS`) e incluí-las na retenção e no erase
-- Adaptar o M4 à camada de storage que a integração M2 × M3 adotar
-- Teste ponta a ponta `GET /debts` → `POST /simulation` → `POST /recommendation` com `trace_id` auditado
+> **Para o agente executor.** Execute as fases **na ordem**, rodando `pytest` ao fim de cada uma,
+> e **pare para revisão** ao fim de cada fase. A Parte A deve estar concluída antes de iniciar.
+>
+> **Base:** branch `develop`, com M1, M2 e M3 mergeados (PR #2 na develop).
+
+---
+
+### Contexto (estado real após o merge do PR #2 na develop)
+
+- M3 grava em Cloudant, banco `decision_traces` (`CLOUDANT_DB_DECISIONS`), via camada própria async `src/storage/store.py` (httpx; `DocumentStore.get`/`put`/`find`/`delete`). Tipos de documento: `simulation` (`_id = simulation:<uuid>`; campos `pseudonym_id`, `consent_id`, `monthly_budget`, `expires_at`, `scenarios`) e `trace` (`_id = trace-<uuid>`; campos `prompt` completo, `output` do LLM, `model_id`, `selection_rule`, `pseudonym_id`, `consent_id`, `expires_at`).
+- `src/services/governance.record_trace` grava o trace direto, **sem guarda de PII** e sem passar pela trilha do M4.
+- Config unificada em `src/core/config.py` (carrega o `.env`; `ConfigurationError` reexportado em `src/agents/agent1/config.py`).
+- `HttpSerasaClient.fetch_report(pseudonym_id)` envia só o `pseudonym_id` (`GET /reports/{pseudonym_id}`); `IdentityVault.resolve_for_serasa` **não** é chamado.
+- Retenção e erase do M4 cobrem `consent_registry`, `financial_snapshots` e `identity_vault` — **NÃO** cobrem `decision_traces`.
+- `REQUIRE_CONSENT=false` por padrão (decisão do grupo; fora do escopo do M4).
+
+---
+
+### Fase B1 — Retenção e apagamento cobrem `decision_traces`
+
+**Objetivo:** estender `RetentionStore`, `run_retention` e o endpoint `/internal/erase` para que o banco `decision_traces` fique sob a mesma política de retenção e apagamento do M4.
+
+**Implementar:**
+
+1. **`retention_store`** — adicionar ao Protocol, ao `InMemoryRetentionStore` e ao `CloudantRetentionStore`:
+   - `iter_decisions(selector: dict) -> Iterable[dict]`
+   - `delete_decision(doc: dict) -> None`
+   - banco alvo: `CLOUDANT_DB_DECISIONS` (padrão `decision_traces`).
+
+2. **`ensure_databases`** — criar o banco `decision_traces` se não existir.
+
+3. **`ensure_indexes`** — adicionar em `decision_traces`:
+   - `by-pseudonym`: `[pseudonym_id]`
+   - `by-type-expires`: `[type, expires_at]`
+
+4. **Regra a2** (nova, logo após a regra de snapshots): documento de decisão (`type = simulation` ou `trace`) com limite = `expires_at`; se o `consent_id` associado estiver `REVOKED` com `revoked_at`, limite = `min(expires_at, revoked_at + RETENTION_AFTER_REVOCATION_DAYS)`; limite < agora → apagar. Documento sem `expires_at` válido → contabilizado como `skipped_invalid`.
+
+5. **`RetentionReport`** — novo campo `decisions_deleted: int`. `dry_run` continua idêntico ao real (conta sem apagar).
+
+6. **Erase** (`/internal/erase/{pseudonym_id}`) — após apagar snapshots e antes do `shred`, apagar todos os documentos do titular em `decision_traces` (índice `by-pseudonym`). `ErasureReport`, evento `erasure.completed` e resposta JSON ganham o campo `decisions_deleted`; atualizar o `openapi/openapi.yaml`.
+
+**Testes (sem rede):**
+- Regra a2: documento expirado → apagado; revogação antecipa o limite; documento sem `expires_at` → `skipped_invalid`.
+- `erase` apaga apenas decisões do titular solicitante (não de outro titular).
+- Idempotência: segunda chamada retorna zeros.
+- `dry_run=True` não apaga nada.
+
+---
+
+### Fase B2 — Guarda de PII e trilha de auditoria no Agente 2
+
+**Objetivo:** garantir que nenhum dado pessoal em claro seja persistido pelo M3 e que cada simulação e recomendação gerem eventos auditáveis.
+
+**Implementar:**
+
+1. **`src/privacy/audit.py`** — novos `event_type`:
+   - `agent2.simulation_created`
+   - `agent2.recommendation_generated`
+
+2. **`simulation_service`** — antes do `put` do documento de simulação:
+   - chamar `assert_no_pii(doc)`; violação → `ServiceError` HTTP 500, `code="PII_BLOCKED"`, nada persistido.
+   - após gravar com sucesso: evento `agent2.simulation_created` com campos `pseudonym_id`, `actor="agent2"`, `simulation_id`, `snapshot_id`, `consent_id`.
+
+3. **`governance.record_trace`** — antes do `put` do documento de trace:
+   - chamar `assert_no_pii(doc)` (inclui `prompt` e `output`); violação → `ServiceError` HTTP 500, `code="PII_BLOCKED"`, nada persistido.
+   - adicionar ao documento os campos `prompt_sha256` e `output_sha256` (SHA-256 hex dos textos originais).
+   - após gravar: evento `agent2.recommendation_generated` com campos `decision_trace_id`, `simulation_id`, `recommended_scenario`, `model_id`, `prompt_sha256`, `output_sha256` — **nunca** o texto do prompt ou da saída.
+
+4. **Integração async/sync:** o M3 usa `async`; o SDK de auditoria é síncrono. Chamar via `asyncio.to_thread`. Obter o logger de auditoria de forma tolerante: `ConfigurationError` → `None` + `logger.warning` (mesmo padrão do `run_agent1`). **Falha de auditoria nunca derruba a requisição.**
+
+**Testes (sem rede):**
+- PII injetada no output do LLM fake → resposta 500 `PII_BLOCKED` e nada persistido no store.
+- Eventos emitidos contêm `prompt_sha256`/`output_sha256` e **não** contêm o texto do prompt ou da saída.
+- Auditoria indisponível (store falha) → endpoint continua respondendo 200.
+- Testes do M3 existentes continuam verdes.
+
+---
+
+### Fase B3 — Reidentificação para o Serasa real
+
+**Objetivo:** substituir o envio do `pseudonym_id` ao Serasa pelo CPF resolvido via cofre, sem vazar o CPF em URL, headers ou logs.
+
+**Implementar:**
+
+1. **`HttpSerasaClient`** — recebe um `resolver` injetável (padrão: `get_identity_vault().resolve_for_serasa`). `fetch_report(pseudonym_id)`:
+   - resolve o CPF via `resolver(pseudonym_id)` (auditado pelo cofre, `purpose=SERASA_QUERY`).
+   - envia `POST /reports` com o CPF **somente no corpo JSON** — nunca em URL, header ou log.
+
+2. **Sandbox inalterado** — o cliente sandbox continua usando só o `pseudonym_id`.
+
+3. **Erros:** titular sem cofre ou com cofre destruído → erro claro (`SerasaUnavailable` / `ToolInputError`, conforme o padrão do M2), sem vazar o motivo com dados pessoais.
+
+**Testes (sem rede, com transporte HTTP fake):**
+- CPF aparece no corpo da requisição, não na URL.
+- Evento `vault.reveal` emitido após a consulta.
+- Titular com cofre destruído (pós-shred) → erro correto, sem CPF no log.
+- Não há Serasa real na conta: validação só unitária.
+
+---
+
+### Fase B4 — Teste ponta a ponta na cloud real
+
+**Arquivo:** `tests/m4/test_integration.py` (ampliar o existente da Parte A).
+
+**Fluxo a validar:**
+
+1. `GET /debts` (Granite real) → `POST /simulation` → `POST /recommendation` (Granite real).
+2. Conferir que os documentos em `decision_traces` contêm `expires_at` e `consent_id` e **não** contêm PII.
+3. Conferir que os eventos `agent1.snapshot_persisted`, `agent2.simulation_created` e `agent2.recommendation_generated` estão em `audit_trail`.
+4. `POST /internal/erase/{pseudonym_id}` → confirmar que as decisões do titular foram apagadas de `decision_traces` (campo `decisions_deleted > 0`).
+5. `reveal` após erase → erro.
+
+**Requisitos:**
+- Tudo com `test_fixture: true` e limpeza completa ao final (inclui `decision_traces` e COS).
+- Rodar com `pytest -q -m integration`.
+
+---
+
+### Fase B5 — Documentação
+
+| Arquivo | Atualização |
+|---|---|
+| `docs/m4-mapeamento-dados.md` | Campos de `decision_traces` (`simulation` e `trace`): finalidade, pseudonimização, retenção |
+| `docs/m4-ropa.md` | Tratamento pelo Agente 2 (simulações e recomendações); envio de CPF ao Serasa quando `HttpSerasaClient` real estiver ativo |
+| `docs/m4-retencao-e-delecao.md` | Regra a2 (decisões) e campo `decisions_deleted` no erase |
+| `docs/m4-auditoria-governanca.md` | Novos eventos `agent2.*`, campos de hash e ausência de texto |
+| `docs/m4-chaves-e-iam.md` | §5 reidentificação: status "implementada" (resolver injetado, CPF só no corpo, auditado) |
+| `PLANO.md` | Sub-Tarefa 4 → status "Parte A e B concluídas" |
+| `docs/m3-revisao-seguranca.md` | Responder os itens marcados "ficam com a Sub-Tarefa 4 (M4)" e "Reavaliar com o M4" |
+
+---
+
+### Fora do escopo do M4 (registrar, não implementar)
+
+- Ligar `REQUIRE_CONSENT=true`.
+- Autenticação/IDOR via API Connect.
+- Unificar as duas camadas de Cloudant (SDK síncrono do M2 × httpx do M3).
+- Limpeza dos 13 documentos legados do M3 em `financial_snapshots` (decisão do usuário).
+
+---
+
+### Regras da Parte B
+
+Mesmas da Parte A:
+
+- **PROIBIDO** `git commit`, `git push`, `git merge`, `git rebase`, `git stash`, `git checkout` ou `git switch`.
+- Parar ao fim de **cada fase** para o usuário revisar e commitar.
+- Não ler, imprimir ou copiar valores do `.env`.
+- Testes sem rede por padrão; integração só com `-m integration`.
+- Falha de auditoria **nunca** derruba a requisição principal.
+
+---
+
+### Definição de Pronto (Parte B)
+
+- [ ] Fase B1 concluída: retenção e erase cobrem `decision_traces`
+- [ ] Fase B2 concluída: guarda de PII e auditoria no Agente 2
+- [ ] Fase B3 concluída: reidentificação para o Serasa real
+- [ ] Fase B4 concluída: teste ponta a ponta na cloud real verde e sem resíduo
+- [ ] Fase B5 concluída: documentação atualizada
+- [ ] `pytest -q` verde (M2 + M3 + M4, sem regressão)
+- [ ] `pytest -q -m integration` verde e sem resíduo em `decision_traces` nem COS
+- [ ] Nenhum prompt ou saída do LLM com CPF persistido (verificado por teste)
+- [ ] Erase cobre `decision_traces` (campo `decisions_deleted` na resposta)
+- [ ] Nenhum commit feito pelo executor (`git log` inalterado; commits só pelo usuário)
