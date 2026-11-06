@@ -52,18 +52,18 @@ def test_known_product_is_not_logged(caplog):
 
 
 def test_non_json_response_raises_invalid_data(monkeypatch):
-    def fake_get(url, **kwargs):
-        return httpx.Response(200, text="<html>manutenção</html>", request=httpx.Request("GET", url))
+    def fake_post(url, **kwargs):
+        return httpx.Response(200, text="<html>manutenção</html>", request=httpx.Request("POST", url))
 
-    monkeypatch.setattr(httpx, "get", fake_get)
+    monkeypatch.setattr(httpx, "post", fake_post)
     with pytest.raises(InvalidSourceDataError, match="JSON"):
-        HttpSerasaClient("https://serasa.example", "k").fetch_report("p")
+        HttpSerasaClient("https://serasa.example", "k", resolver=lambda p: "52998224725").fetch_report("p")
 
 
 def test_http_error_raises_source_unavailable(monkeypatch):
-    def fake_get(url, **kwargs):
-        return httpx.Response(500, request=httpx.Request("GET", url))
+    def fake_post(url, **kwargs):
+        return httpx.Response(500, request=httpx.Request("POST", url))
 
-    monkeypatch.setattr(httpx, "get", fake_get)
+    monkeypatch.setattr(httpx, "post", fake_post)
     with pytest.raises(SourceUnavailableError):
-        HttpSerasaClient("https://serasa.example", "k").fetch_report("p")
+        HttpSerasaClient("https://serasa.example", "k", resolver=lambda p: "52998224725").fetch_report("p")
