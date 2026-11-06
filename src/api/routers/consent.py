@@ -10,11 +10,13 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
 
-from src.api.models import ConsentRequest, ConsentResponse, ConsentStatusResponse
+from src.api.models import ConsentRequest, ConsentResponse, ConsentStatusResponse, ErrorResponse
 from src.services import consent_service
 from src.storage.store import DocumentStore, get_store
 
 router = APIRouter(prefix="/consent", tags=["Consent"])
+
+_err = ErrorResponse
 
 
 @router.post(
@@ -23,10 +25,10 @@ router = APIRouter(prefix="/consent", tags=["Consent"])
     status_code=status.HTTP_201_CREATED,
     summary="Criar consentimento Open Finance",
     responses={
-        400: {"description": "INVALID_REQUEST | INVALID_CPF | INVALID_SCOPE"},
-        401: {"description": "Token ausente ou inválido"},
-        429: {"description": "Rate limit excedido"},
-        503: {"description": "SERVICE_UNAVAILABLE | NOT_CONFIGURED"},
+        400: {"model": _err, "description": "INVALID_REQUEST | INVALID_CPF | INVALID_SCOPE"},
+        401: {"model": _err, "description": "Token ausente ou inválido"},
+        429: {"model": _err, "description": "Rate limit excedido"},
+        503: {"model": _err, "description": "SERVICE_UNAVAILABLE | NOT_CONFIGURED"},
     },
 )
 async def create_consent(
@@ -47,11 +49,11 @@ async def create_consent(
     status_code=status.HTTP_200_OK,
     summary="Callback OAuth: transiciona AWAITING_AUTHORISATION → AUTHORISED ou REJECTED",
     responses={
-        400: {"description": "INVALID_REQUEST"},
-        403: {"description": "CONSENT_AUTHORISATION_EXPIRED | CONSENT_REJECTED"},
-        404: {"description": "CONSENT_NOT_FOUND"},
-        409: {"description": "CONSENT_INVALID_STATE"},
-        503: {"description": "SERVICE_UNAVAILABLE"},
+        400: {"model": _err, "description": "INVALID_REQUEST"},
+        403: {"model": _err, "description": "CONSENT_AUTHORISATION_EXPIRED | CONSENT_REJECTED"},
+        404: {"model": _err, "description": "CONSENT_NOT_FOUND"},
+        409: {"model": _err, "description": "CONSENT_INVALID_STATE"},
+        503: {"model": _err, "description": "SERVICE_UNAVAILABLE"},
     },
 )
 async def consent_callback(
@@ -78,9 +80,9 @@ async def consent_callback(
     status_code=status.HTTP_200_OK,
     summary="Status do consentimento",
     responses={
-        400: {"description": "INVALID_REQUEST"},
-        404: {"description": "CONSENT_NOT_FOUND"},
-        503: {"description": "SERVICE_UNAVAILABLE"},
+        400: {"model": _err, "description": "INVALID_REQUEST"},
+        404: {"model": _err, "description": "CONSENT_NOT_FOUND"},
+        503: {"model": _err, "description": "SERVICE_UNAVAILABLE"},
     },
 )
 async def get_consent_status(
@@ -96,10 +98,10 @@ async def get_consent_status(
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Revogar consentimento",
     responses={
-        400: {"description": "INVALID_REQUEST"},
-        404: {"description": "CONSENT_NOT_FOUND"},
-        401: {"description": "Token ausente ou inválido"},
-        503: {"description": "SERVICE_UNAVAILABLE"},
+        400: {"model": _err, "description": "INVALID_REQUEST"},
+        401: {"model": _err, "description": "Token ausente ou inválido"},
+        404: {"model": _err, "description": "CONSENT_NOT_FOUND"},
+        503: {"model": _err, "description": "SERVICE_UNAVAILABLE"},
     },
 )
 async def revoke_consent(

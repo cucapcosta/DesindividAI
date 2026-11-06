@@ -105,6 +105,34 @@ async def not_implemented_handler(request: Request, exc: NotImplementedError):
 
 
 # ---------------------------------------------------------------------------
+# OpenAPI spec post-processing — strip auto-added 422 from /consent* routes
+# ---------------------------------------------------------------------------
+_openapi_cache: dict | None = None
+
+
+def _patched_openapi() -> dict:
+    global _openapi_cache
+    if _openapi_cache:
+        return _openapi_cache
+    from fastapi.openapi.utils import get_openapi
+    spec = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    for path, path_item in spec.get("paths", {}).items():
+        if path.startswith("/consent"):
+            for method_obj in path_item.values():
+                method_obj.get("responses", {}).pop("422", None)
+    _openapi_cache = spec
+    return spec
+
+
+app.openapi = _patched_openapi  # type: ignore[method-assign]
+
+
+# ---------------------------------------------------------------------------
 # Health check
 # ---------------------------------------------------------------------------
 @app.get("/health", tags=["Internal"], include_in_schema=False)
