@@ -67,6 +67,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _ALLOWED_EVENT_TYPES: frozenset[str] = frozenset({
+    "consent.created",
+    "consent.authorised",
+    "consent.rejected",
+    "consent.revoked",
     "consent.expired",
     "consent.erasure_requested",
     "erasure.completed",

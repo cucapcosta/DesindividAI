@@ -66,7 +66,8 @@ Cliente (App/Canal)          API Connect (Gateway)          Auth Server (FAPI)  
 ### 1. Criação do Consentimento (`POST /consent`)
 - O canal (app/portal) envia CPF, lista de instituições e escopos desejados.
 - O API Connect valida o Bearer token do canal (Service ID IAM provisionado pelo BB). *(pendência de configuração)*
-- O servidor cria um registro em `consent_registry` no Cloudant com `status: AWAITING_AUTHORISATION`.
+- O servidor cifra o CPF no cofre de identidade do M4 (`identity_vault`, envelope encryption), que devolve o `pseudonym_id`; o CPF não vai para nenhum outro lugar.
+- Cria o registro em `consent_registry` no Cloudant com `status: AWAITING_AUTHORISATION` e o `pseudonym_id`.
 - Retorna `redirect_url` apontando para o portal Open Finance da instituição.
   - Modo sandbox (`OPEN_FINANCE_AUTH_SANDBOX=true`): a URL aponta para o próprio `GET /consent/callback?state=...&code=sandbox`.
   - Modo real: URL do Authorization Server configurado em `OPEN_FINANCE_AUTHORIZE_URL`.
@@ -105,7 +106,9 @@ Cliente (App/Canal)          API Connect (Gateway)          Auth Server (FAPI)  
 
 ## Modo Sandbox
 
-Para desenvolvimento local sem Authorization Server:
+Para desenvolvimento local sem Authorization Server. Com `STORE_BACKEND=memory`, o consentimento
+e o cofre de identidade ficam em memória do processo; ainda são necessárias as chaves do M4
+(`PSEUDONYM_HMAC_KEY` e `VAULT_KEK_V1`, ver `.env.example`).
 
 ```bash
 STORE_BACKEND=memory OPEN_FINANCE_AUTH_SANDBOX=true uvicorn src.main:app --port 8000 &
@@ -123,7 +126,7 @@ curl -s "$(echo "$R" | python -c 'import sys,json;print(json.load(sys.stdin)["re
 
 | Gatilho | Ação |
 |---|---|
-| `DELETE /consent/{consentId}` (titular ou BB) | (1) grava `REVOKED` no banco; (2) tenta `POST OAUTH_REVOKE_URL`; (3) relê e atualiza `token_revocation` — `"ok"` / `"failed"` / `"skipped"`, reaplicando `REVOKED` se um callback concorrente o sobrescreveu |
+| `DELETE /consent/{consentId}` (titular ou BB) | (1) grava `REVOKED` no banco; (2) tenta `POST OAUTH_REVOKE_URL`; (3) relê e atualiza `token_revocation` — `"ok"` / `"failed"` / `"skipped"`. Escritas condicionais ao `_rev`: um callback concorrente recebe `409 CONSENT_INVALID_STATE` |
 | `expiration_days` atingido | Consentimento recusado pelos consumidores via `expires_at` (expiração preguiçosa) |
 | Fraude detectada | Time de segurança do BB revoga via API interna do OAuth Provider |
 | Requisição LGPD Art. 18 (direito ao esquecimento) | `POST /internal/erase` (M4) + revogação |

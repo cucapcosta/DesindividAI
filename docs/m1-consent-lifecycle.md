@@ -75,7 +75,7 @@ física de documentos vencidos fica com a retenção do M4.
 ```
 
 - **`_id` = `consent_id`** para permitir `store.get` direto.
-- **Nunca** gravar o CPF, nem mascarado.
+- **Nunca** gravar o CPF, nem mascarado. O CPF fica só cifrado no cofre de identidade do M4.
 - `rejection_reason`: `"ACCESS_DENIED"` | `"AUTHORISATION_TIMEOUT"`.
 - `revocation_reason`: `"CUSTOMER_REQUEST"` (único valor que o M1 grava; `FRAUD` e `LGPD_ERASURE` são de outros fluxos).
 - `token_revocation`: `"ok"` | `"failed"` | `"skipped"`.
@@ -139,8 +139,9 @@ Quando o consentimento expira naturalmente:
 3. Backend:
    a. Atualiza consent_registry: status → REVOKED, revoked_at, reason → "CUSTOMER_REQUEST"
    b. Tenta POST OAUTH_REVOKE_URL (se configurado); falha não impede a revogação
-   c. Relê o documento e grava token_revocation: "ok" | "failed" | "skipped";
-      se um callback concorrente sobrescreveu o REVOKED, reaplica a revogação
+   c. Relê o documento e grava token_revocation: "ok" | "failed" | "skipped"
+   As escritas são condicionais ao _rev lido: um callback concorrente recebe 409
+   em vez de sobrescrever a revogação
 4. Agente 1 não consegue mais buscar dados — consent check retorna REVOKED
 5. Dados ficam retidos 90 dias; deleção física fica com o M4
 ```
@@ -163,7 +164,10 @@ O backend não detém os tokens — eles ficam no API Connect.
 
 ---
 
-## Eventos Auditáveis (IBM Cloud Logs — Caminho B: logger.info)
+## Eventos Auditáveis (trilha de auditoria do M4 — `src/privacy/audit.py`)
+
+Todos levam `pseudonym_id` e `actor="consent_api"`. Envio melhor-esforço: falha na
+auditoria não derruba a operação.
 
 | Evento | Campos (sem CPF) |
 |---|---|

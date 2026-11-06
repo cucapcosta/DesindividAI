@@ -1,31 +1,37 @@
 """
 Regras de negócio para consentimento Open Finance (M1).
 
-Isola pseudonimização e auditoria num único ponto de troca entre o Caminho B
-(PR #3 ainda não mergeado) e o Caminho A (PR #3 em develop).
-
-Caminho B (atual): pseudonymize_cpf de src/privacy/pseudonymization.py + logger.info.
-Caminho A: await asyncio.to_thread(get_identity_vault().store, cpf) + await emit(…)
+O CPF entra só no POST /consent e vai direto para o cofre de identidade do M4
+(cifrado, devolve o pseudonym_id). Eventos vão para a trilha de auditoria do M4.
+Transições de estado usam escrita condicional por _rev: callback e DELETE
+concorrentes não sobrescrevem um ao outro.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
-import json
 import logging
 import re
 import secrets
 import urllib.parse
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
+from typing import Callable
 from uuid import UUID, uuid4
 
 import httpx
+import requests
+from ibm_cloud_sdk_core import ApiException
 
 from src.api.models import ConsentResponse, ConsentStatus, ConsentStatusResponse
 from src.core.config import ConfigurationError, consents_db, env, env_bool, require_env
 from src.core.dates import parse_utc
 from src.core.errors import ServiceError
-from src.privacy.pseudonymization import PseudonymizationKeyError, pseudonymize_cpf
+from src.privacy.audit_bridge import emit
+from src.privacy.identity_vault import IdentityVault, InMemoryVaultRepository, get_identity_vault
+from src.privacy.key_provider import KeyProviderError
+from src.privacy.pseudonymization import PseudonymizationKeyError
 from src.storage.store import DocumentStore
 
 logger = logging.getLogger(__name__)
@@ -36,6 +42,7 @@ logger = logging.getLogger(__name__)
 
 VALID_SCOPES = {"debts:read", "simulation:read", "recommendation:read"}
 AWAITING_EXPIRES_MINUTES = 10
+_MAX_WRITE_ATTEMPTS = 3
 
 # Código de instituição: minúsculas, dígitos (aceita código COMPE como "001"), hífen e underscore.
 _INSTITUTION_PATTERN = re.compile(r"^[a-z0-9_-]{1,32}$")
@@ -52,28 +59,54 @@ def _utcnow() -> datetime:
 
 
 # ---------------------------------------------------------------------------
-# Helpers: LGPD — pseudonimização e auditoria (pontos de troca A/B)
+# Helpers: LGPD — cofre de identidade e auditoria (M4)
 # ---------------------------------------------------------------------------
 
-def _pseudonymize(cpf: str) -> str:
-    """
-    Caminho B: HMAC-SHA256 determinístico via src/privacy/pseudonymization.
-    Caminho A: trocar por await asyncio.to_thread(get_identity_vault().store, cpf).
-    """
+@lru_cache(maxsize=1)
+def _memory_vault() -> IdentityVault:
+    return IdentityVault(repository=InMemoryVaultRepository())
+
+
+def _identity_vault() -> IdentityVault:
+    """Cofre do M4. Com STORE_BACKEND=memory (só desenvolvimento local), cofre em memória."""
+    if env("STORE_BACKEND").lower() == "memory":
+        return _memory_vault()
+    return get_identity_vault()
+
+
+async def _store_identity(cpf: str) -> str:
+    """Cifra o CPF no cofre e devolve o pseudonym_id. O CPF não sai daqui."""
     try:
-        return pseudonymize_cpf(cpf)
-    except PseudonymizationKeyError as exc:
-        raise ServiceError(503, "NOT_CONFIGURED", "Chave de pseudonimização não configurada.") from exc
+        vault = _identity_vault()
+        return await asyncio.to_thread(vault.store, cpf)
+    except (ConfigurationError, KeyProviderError, PseudonymizationKeyError) as exc:
+        raise ServiceError(503, "NOT_CONFIGURED", "Cofre de identidade não configurado.") from exc
+    except (ApiException, requests.RequestException) as exc:
+        raise ServiceError(503, "SERVICE_UNAVAILABLE", "Cofre de identidade indisponível.") from exc
 
 
-def _audit(event: str, **fields) -> None:
+async def _audit(event: str, *, pseudonym_id: str, **fields) -> None:
+    """Trilha de auditoria do M4. Melhor-esforço: emit nunca propaga erro. Sem CPF."""
+    await emit(event, pseudonym_id=pseudonym_id, actor="consent_api", **fields)
+
+
+async def _update(store: DocumentStore, consent_id: str, mutate: Callable[[dict], bool]) -> dict | None:
     """
-    Caminho B: log estruturado sem CPF. Campos serializados como JSON para evitar
-    injeção de linhas de log via valores fornecidos pelo usuário.
-    Caminho A: trocar por await emit(event, **fields) de src/privacy/audit_bridge.
-    Tratada como melhor-esforço: nunca propaga exceção nem devolve trace_id ao cliente.
+    Relê o consentimento, aplica ``mutate`` e grava condicionado ao _rev lido; em conflito,
+    repete. ``mutate`` devolve False para não gravar. Retorna o documento gravado ou None.
     """
-    logger.info("audit event=%s %s", event, json.dumps(fields, default=str))
+    for _ in range(_MAX_WRITE_ATTEMPTS):
+        doc = await store.get(consents_db(), consent_id)
+        if doc is None or not mutate(doc):
+            return None
+        try:
+            await store.put(consents_db(), consent_id, doc, rev=doc["_rev"])
+            return doc
+        except ServiceError as exc:
+            if exc.code != "CONFLICT":
+                raise
+    raise ServiceError(409, "CONSENT_INVALID_STATE",
+                       "Consentimento alterado por outra operação; tente novamente.")
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +206,7 @@ async def create_consent(store: DocumentStore, body) -> ConsentResponse:
     scopes = list(dict.fromkeys(body.scopes))
 
     # --- pseudonimização (CPF não sai daqui) ---
-    pseudonym_id = _pseudonymize(body.cpf)
+    pseudonym_id = await _store_identity(body.cpf)
 
     # --- gerar IDs e datas ---
     consent_id = str(uuid4())
@@ -209,8 +242,9 @@ async def create_consent(store: DocumentStore, body) -> ConsentResponse:
     await store.put(consents_db(), consent_id, doc)
 
     # --- auditoria (melhor-esforço, sem CPF) ---
-    _audit(
+    await _audit(
         "consent.created",
+        pseudonym_id=pseudonym_id,
         consent_id=consent_id,
         institutions=institutions,
         scopes=scopes,
@@ -275,28 +309,24 @@ async def authorise_callback(
         awaiting_exp = now - timedelta(seconds=1)  # ausente/inválido → tratar como vencido
 
     if now >= awaiting_exp:
-        doc["status"] = ConsentStatus.REJECTED.value
-        doc["rejected_at"] = now.isoformat()
-        doc["rejection_reason"] = "AUTHORISATION_TIMEOUT"
-        await store.put(consents_db(), consent_id, doc)
-        _audit("consent.rejected", consent_id=consent_id, reason="AUTHORISATION_TIMEOUT")
+        await _transition(store, doc, status=ConsentStatus.REJECTED.value,
+                          rejected_at=now.isoformat(), rejection_reason="AUTHORISATION_TIMEOUT")
+        await _audit("consent.rejected", pseudonym_id=doc["pseudonym_id"],
+                     consent_id=consent_id, reason="AUTHORISATION_TIMEOUT")
         raise ServiceError(403, "CONSENT_AUTHORISATION_EXPIRED",
                            "Prazo de autorização expirado.")
 
     if error:
-        doc["status"] = ConsentStatus.REJECTED.value
-        doc["rejected_at"] = now.isoformat()
-        doc["rejection_reason"] = "ACCESS_DENIED"
-        await store.put(consents_db(), consent_id, doc)
-        _audit("consent.rejected", consent_id=consent_id, reason="ACCESS_DENIED")
+        await _transition(store, doc, status=ConsentStatus.REJECTED.value,
+                          rejected_at=now.isoformat(), rejection_reason="ACCESS_DENIED")
+        await _audit("consent.rejected", pseudonym_id=doc["pseudonym_id"],
+                     consent_id=consent_id, reason="ACCESS_DENIED")
         raise ServiceError(403, "CONSENT_REJECTED", "Autorização negada pelo titular.")
 
-    # sucesso: AUTHORISED
-    doc["status"] = ConsentStatus.AUTHORISED.value
-    doc["authorised_at"] = now.isoformat()
-    doc.pop("state_hash", None)       # state de uso único — removido após consumo
-    await store.put(consents_db(), consent_id, doc)
-    _audit("consent.authorised", consent_id=consent_id)
+    # sucesso: AUTHORISED; o state é de uso único e sai do documento
+    doc.pop("state_hash", None)
+    await _transition(store, doc, status=ConsentStatus.AUTHORISED.value, authorised_at=now.isoformat())
+    await _audit("consent.authorised", pseudonym_id=doc["pseudonym_id"], consent_id=consent_id)
 
     return _to_status_response(doc)
 
@@ -315,40 +345,33 @@ async def get_consent_status(store: DocumentStore, consent_id: str) -> ConsentSt
 # ---------------------------------------------------------------------------
 
 async def revoke_consent(store: DocumentStore, consent_id: str) -> None:
-    doc = await _load_consent(store, consent_id)
-    status = doc.get("status")
+    await _load_consent(store, consent_id)  # 404 se não existir
 
-    # idempotente: já revogado ou rejeitado
-    if status in (ConsentStatus.REVOKED.value, ConsentStatus.REJECTED.value):
+    def revoke(doc: dict) -> bool:
+        # idempotente: já revogado ou rejeitado
+        if doc.get("status") in (ConsentStatus.REVOKED.value, ConsentStatus.REJECTED.value):
+            return False
+        doc.update(status=ConsentStatus.REVOKED.value, revoked_at=_utcnow().isoformat(),
+                   revocation_reason="CUSTOMER_REQUEST", revoked_by="customer", token_revocation=None)
+        return True
+
+    # REVOKED é gravado antes de qualquer I/O externo: demora ou falha na revogação de
+    # token não deixa o consentimento ativo. A escrita é condicional ao _rev, então um
+    # callback concorrente não sobrescreve a revogação (ele recebe 409).
+    revoked = await _update(store, consent_id, revoke)
+    if revoked is None:
         return
-
-    now = _utcnow()
-    doc["status"] = ConsentStatus.REVOKED.value
-    doc["revoked_at"] = now.isoformat()
-    doc["revocation_reason"] = "CUSTOMER_REQUEST"
-    doc["revoked_by"] = "customer"
-    doc["token_revocation"] = None  # preenchido na escrita 2
-
-    # Escrita 1: REVOKED antes de qualquer I/O externo, para que demora ou falha na
-    # revogação de token não deixe o consentimento ativo. Reduz, mas não elimina, a
-    # corrida com o callback: o store é last-write-wins (pendência C3 no PLANO.md).
-    await store.put(consents_db(), consent_id, doc)
 
     token_revocation = await _revoke_tokens(consent_id)
 
-    # Escrita 2: registra token_revocation. Se um callback concorrente sobrescreveu o
-    # REVOKED entre as duas escritas, reaplica a revogação, que é a intenção mais
-    # recente do titular.
-    current = await store.get(consents_db(), consent_id)
-    if current is not None:
-        if current.get("status") != ConsentStatus.REVOKED.value:
-            logger.warning("Consentimento %s sobrescrito durante a revogação; REVOKED reaplicado", consent_id)
-            current.update({k: doc[k] for k in ("status", "revoked_at", "revocation_reason", "revoked_by")})
-        current["token_revocation"] = token_revocation
-        await store.put(consents_db(), consent_id, current)
+    def record_token_revocation(doc: dict) -> bool:
+        doc["token_revocation"] = token_revocation
+        return True
 
-    _audit(
+    await _update(store, consent_id, record_token_revocation)
+    await _audit(
         "consent.revoked",
+        pseudonym_id=revoked["pseudonym_id"],
         consent_id=consent_id,
         revocation_reason="CUSTOMER_REQUEST",
         revoked_by="customer",
@@ -359,6 +382,18 @@ async def revoke_consent(store: DocumentStore, consent_id: str) -> None:
 # ---------------------------------------------------------------------------
 # Helpers internos
 # ---------------------------------------------------------------------------
+
+async def _transition(store: DocumentStore, doc: dict, **changes) -> None:
+    """Grava a transição só se o documento não mudou desde a leitura; senão 409."""
+    doc.update(changes)
+    try:
+        await store.put(consents_db(), doc["consent_id"], doc, rev=doc["_rev"])
+    except ServiceError as exc:
+        if exc.code != "CONFLICT":
+            raise
+        raise ServiceError(409, "CONSENT_INVALID_STATE",
+                           "Consentimento alterado por outra operação; tente novamente.") from exc
+
 
 async def _load_consent(store: DocumentStore, consent_id: str) -> dict:
     """Carrega consentimento pelo _id (= consent_id por contrato)."""

@@ -115,11 +115,12 @@ Definir como o cliente autoriza o acesso aos seus dados financeiros via Open Fin
 - [`docs/m1-consent-lifecycle.md`](docs/m1-consent-lifecycle.md) — Ciclo de vida do consentimento
 
 #### Entregáveis de código
-- [`src/services/consent_service.py`](src/services/consent_service.py) — regras, validação, pseudonimização, auditoria, cliente de revogação
+- [`src/services/consent_service.py`](src/services/consent_service.py) — regras, validação, CPF no cofre de identidade do M4, eventos `consent.*` na trilha de auditoria do M4, transições com escrita condicional por `_rev`, cliente de revogação de token
 - [`src/api/routers/consent.py`](src/api/routers/consent.py) — 4 rotas implementadas (POST, GET /callback, GET /{id}, DELETE)
 - [`src/api/models.py`](src/api/models.py) — `ConsentStatusResponse`; `Field(example=…)` → `json_schema_extra`; `cpf` pattern ASCII-only
 - [`src/main.py`](src/main.py) — handler de `RequestValidationError` para `/consent` e `/consent/*` (400 sem ecoar CPF)
-- [`tests/test_consent_api.py`](tests/test_consent_api.py) — 56 casos de teste (create, callback, status, revoke, integração M2/M3, lgpd, openapi contract)
+- [`src/storage/store.py`](src/storage/store.py) — `put(..., rev=...)`: escrita condicional (409 `CONFLICT` se outra escrita chegou antes); sem `rev`, comportamento anterior
+- [`tests/test_consent_api.py`](tests/test_consent_api.py) — 63 casos de teste (create, callback, status, revoke, concorrência, cofre e auditoria, integração M2/M3, lgpd, openapi contract)
 - [`.env.example`](.env.example) — bloco M1 (`OPEN_FINANCE_AUTH_SANDBOX`, `PUBLIC_BASE_URL`, `OPEN_FINANCE_AUTHORIZE_URL`, `OPEN_FINANCE_CLIENT_ID`, `OPEN_FINANCE_REDIRECT_URI`, `OAUTH_REVOKE_URL`)
 - [`scripts/cloud_setup.py`](scripts/cloud_setup.py) — índices `by-state-hash` e `by-consent-id` em `consent_registry`
 
@@ -132,10 +133,7 @@ Definir como o cliente autoriza o acesso aos seus dados financeiros via Open Fin
 | Afinidade por `consent_id` no gateway (jobs `202` do `GET /debts` em memória) | API Connect |
 | Rate limit (`429`) e `401` | API Connect |
 | Ligar `REQUIRE_CONSENT=true` por padrão e aposentar `scripts/seed_test_consent.py` | Decisão do time após o merge |
-| Limpeza de AWAITING/REJECTED antigos (retention.py não apaga REJECTED) | Retenção do M4 |
-| Bug em `retention.py:358` — destrói cofre do titular se um consentimento antigo for apagado enquanto outro está AUTHORISED | M4 |
 | Contrato exato do endpoint de revogação de token do IBM API Connect (B3) | API Connect |
-| Corrida callback × DELETE ainda é last-write-wins no Cloudant; falta escrita condicional por `_rev` em `src/storage/store.py` (compartilhado com M3) — sem mudança de store por ora (C3) | Integração M1+M4 |
 
 #### Relevant Context
 - Regulação: Open Finance Brasil — [openfinancebrasil.org.br](https://openfinancebrasil.org.br)

@@ -21,13 +21,18 @@ import httpx
 import pytest
 import yaml
 
+import src.privacy.audit_bridge as audit_bridge
 import src.privacy.pseudonymization as ps
 import src.services.consent_service as svc
-from src.api.models import ConsentStatus
+from src.api.models import ConsentRequest, ConsentStatus
 from src.api.routers.debts import _consent_error
 from src.core.config import consents_db, snapshots_db
 from src.core.dates import parse_utc
+from src.core.errors import ServiceError
+from src.privacy.audit import AuditLogger, InMemoryAuditRepository
+from src.privacy.identity_vault import IdentityVault, InMemoryVaultRepository
 from src.services.consent_service import _is_valid_cpf
+from src.storage.store import MemoryStore
 
 OPENAPI_YAML = Path(__file__).resolve().parent.parent / "openapi" / "openapi.yaml"
 
@@ -39,6 +44,14 @@ CPF_REPEATED = "11111111111"    # sequência repetida
 # ===========================================================================
 # Helpers
 # ===========================================================================
+
+@pytest.fixture(autouse=True)
+def vault(monkeypatch):
+    """Cofre de identidade do M4 em memória, novo a cada teste."""
+    v = IdentityVault(repository=InMemoryVaultRepository())
+    monkeypatch.setattr(svc, "_identity_vault", lambda: v)
+    return v
+
 
 def _assert_tz(value: str, label: str = "") -> None:
     """Data ISO-8601 com fuso explícito (sem parse_utc, que completaria o fuso)."""
@@ -591,22 +604,99 @@ def test_revoke_malformed_revoke_url_still_revokes(client, monkeypatch, store):
     assert doc["token_revocation"] == "failed"
 
 
-def test_revoke_reapplies_revoked_if_callback_overwrites(client, monkeypatch, store):
-    """Callback concorrente grava AUTHORISED entre as duas escritas do DELETE → REVOKED é reaplicado."""
-    consent_id = _authorised_consent(client, monkeypatch)
+class _SlowStore(MemoryStore):
+    """MemoryStore com latência de rede, para expor corridas entre requisições."""
 
-    async def callback_overwrites(cid):
-        doc = await store.get(consents_db(), cid)
-        doc["status"] = ConsentStatus.AUTHORISED.value
-        await store.put(consents_db(), cid, doc)
-        return "skipped"
+    async def get(self, *a, **k):
+        await asyncio.sleep(0.02)
+        return await super().get(*a, **k)
 
-    monkeypatch.setattr(svc, "_revoke_tokens", callback_overwrites)
-    assert client.delete(f"/consent/{consent_id}").status_code == 204
-    doc = asyncio.run(store.get(consents_db(), consent_id))
+    async def find(self, *a, **k):
+        await asyncio.sleep(0.02)
+        return await super().find(*a, **k)
+
+    async def put(self, *a, **k):
+        await asyncio.sleep(0.02)
+        return await super().put(*a, **k)
+
+
+async def _status_or_code(coro):
+    try:
+        result = await coro
+        return result.status.value if result is not None else "204"
+    except ServiceError as exc:
+        return exc.code
+
+
+@pytest.mark.parametrize("callback_delay", [0.0, 0.01, 0.03, 0.05, 0.08])
+def test_callback_concurrent_with_delete_never_resurrects(monkeypatch, callback_delay):
+    """C3: callback e DELETE concorrentes terminam REVOKED, qualquer que seja a ordem."""
+    monkeypatch.setenv("OPEN_FINANCE_AUTH_SANDBOX", "true")
+    store = _SlowStore()
+
+    async def scenario():
+        created = await svc.create_consent(store, ConsentRequest(cpf=CPF_VALID, institutions=["bb"], scopes=["debts:read"]))
+        state = parse_qs(urlparse(created.redirect_url).query)["state"][0]
+        cid = str(created.consent_id)
+
+        async def callback():
+            await asyncio.sleep(callback_delay)
+            return await _status_or_code(svc.authorise_callback(store, state, "sandbox", None))
+
+        deleted, cb = await asyncio.gather(_status_or_code(svc.revoke_consent(store, cid)), callback())
+        return deleted, cb, await store.get(consents_db(), cid)
+
+    deleted, cb, doc = asyncio.run(scenario())
+    assert deleted == "204"
+    assert cb in ("AUTHORISED", "CONSENT_INVALID_STATE")
     assert doc["status"] == ConsentStatus.REVOKED.value
     assert doc["revocation_reason"] == "CUSTOMER_REQUEST"
-    assert doc["token_revocation"] == "skipped"
+
+
+def test_parallel_callbacks_same_state_single_winner(monkeypatch):
+    """C3: o mesmo state usado em paralelo autoriza uma vez só; as demais recebem 409."""
+    monkeypatch.setenv("OPEN_FINANCE_AUTH_SANDBOX", "true")
+    store = _SlowStore()
+
+    async def scenario():
+        created = await svc.create_consent(store, ConsentRequest(cpf=CPF_VALID, institutions=["bb"], scopes=["debts:read"]))
+        state = parse_qs(urlparse(created.redirect_url).query)["state"][0]
+        results = await asyncio.gather(*(
+            _status_or_code(svc.authorise_callback(store, state, "sandbox", None)) for _ in range(3)
+        ))
+        return results, await store.get(consents_db(), str(created.consent_id))
+
+    results, doc = asyncio.run(scenario())
+    assert sorted(results) == ["AUTHORISED", "CONSENT_INVALID_STATE", "CONSENT_INVALID_STATE"]
+    assert doc["status"] == ConsentStatus.AUTHORISED.value
+
+
+def test_audit_trail_records_consent_events(client, monkeypatch, store):
+    """Os 4 eventos consent.* chegam à trilha do M4, com pseudonym_id e sem CPF."""
+    repo = InMemoryAuditRepository()
+    monkeypatch.setattr(audit_bridge, "_get_logger", lambda: AuditLogger(repository=repo))
+    consent_id = _authorised_consent(client, monkeypatch)
+    client.delete(f"/consent/{consent_id}")
+    _, state = _get_state(client, monkeypatch)
+    client.get("/consent/callback", params={"state": state, "error": "access_denied"})
+
+    events = [r["event_type"] for r in repo._store]
+    assert events == ["consent.created", "consent.authorised", "consent.revoked",
+                      "consent.created", "consent.rejected"]
+    doc = asyncio.run(store.get(consents_db(), consent_id))
+    assert all(r["pseudonym_id"] == doc["pseudonym_id"] for r in repo._store[:3])
+    assert CPF_VALID not in json.dumps(repo._store)
+
+
+def test_cpf_goes_to_vault_encrypted(client, monkeypatch, store, vault):
+    """O pseudonym_id do consentimento é o devolvido pelo cofre; o CPF fica só cifrado lá."""
+    monkeypatch.setenv("OPEN_FINANCE_AUTH_SANDBOX", "true")
+    consent_id = _created(client)["consent_id"]
+    doc = asyncio.run(store.get(consents_db(), consent_id))
+    identity = vault._repo.get(doc["pseudonym_id"])
+    assert identity is not None and identity["cpf_ciphertext"]
+    assert CPF_VALID not in json.dumps(identity)
+    assert vault.reveal(doc["pseudonym_id"], purpose="LEGAL_REQUEST", actor="test") == CPF_VALID
 
 
 # ===========================================================================

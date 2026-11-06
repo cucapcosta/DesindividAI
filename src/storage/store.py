@@ -20,7 +20,9 @@ from src.core.ibm_auth import get_iam_token
 
 class DocumentStore(Protocol):
     async def get(self, db: str, doc_id: str) -> Optional[dict[str, Any]]: ...
-    async def put(self, db: str, doc_id: str, doc: dict[str, Any]) -> None: ...
+    async def put(self, db: str, doc_id: str, doc: dict[str, Any], *, rev: Optional[str] = None) -> None:
+        """Grava o documento. Com ``rev``, a escrita só acontece se o documento ainda estiver
+        nessa revisão; se outra escrita chegou antes, levanta ServiceError(409, "CONFLICT")."""
     async def find(self, db: str, selector: dict[str, Any], limit: int = 10) -> list[dict[str, Any]]: ...
     async def delete(self, db: str, doc_id: str) -> bool: ...
 
@@ -28,13 +30,18 @@ class DocumentStore(Protocol):
 class MemoryStore:
     def __init__(self) -> None:
         self._dbs: dict[str, dict[str, dict[str, Any]]] = {}
+        self._seq = 0
 
     async def get(self, db, doc_id):
         doc = self._dbs.get(db, {}).get(doc_id)
         return dict(doc) if doc else None
 
-    async def put(self, db, doc_id, doc):
-        self._dbs.setdefault(db, {})[doc_id] = {**doc, "_id": doc_id}
+    async def put(self, db, doc_id, doc, *, rev=None):
+        current = self._dbs.get(db, {}).get(doc_id)
+        if rev is not None and (current or {}).get("_rev") != rev:
+            raise ServiceError(409, "CONFLICT", "Documento alterado por outra escrita.")
+        self._seq += 1
+        self._dbs.setdefault(db, {})[doc_id] = {**doc, "_id": doc_id, "_rev": f"{self._seq}-mem"}
 
     async def find(self, db, selector, limit=10):
         docs = [d for d in self._dbs.get(db, {}).values()
@@ -78,12 +85,17 @@ class CloudantStore:
         self._check(resp)
         return resp.json()
 
-    async def put(self, db, doc_id, doc):
-        existing = await self.get(db, doc_id)
+    async def put(self, db, doc_id, doc, *, rev=None):
         body = {**doc, "_id": doc_id}
-        if existing:
-            body["_rev"] = existing["_rev"]
+        if rev is not None:
+            body["_rev"] = rev
+        else:
+            existing = await self.get(db, doc_id)
+            if existing:
+                body["_rev"] = existing["_rev"]
         resp = await self._request("PUT", f"{quote(db, safe='')}/{quote(doc_id, safe='')}", json=body)
+        if rev is not None and resp.status_code == 409:
+            raise ServiceError(409, "CONFLICT", "Documento alterado por outra escrita.")
         self._check(resp)
 
     async def ensure_db(self, db: str) -> bool:
