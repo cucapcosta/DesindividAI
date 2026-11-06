@@ -654,37 +654,86 @@ def test_lgpd_validation_error_no_cpf_in_response(client, monkeypatch):
 
 
 # ===========================================================================
-# Grupo: openapi contract  (C4)
+# Grupo: openapi contract  (O8)
 # ===========================================================================
 
-def test_openapi_consent_responses_keys(client):
-    """Cada operação /consent* tem exatamente os status codes esperados (C4)."""
-    spec = client.app.openapi()
-    paths = spec["paths"]
+# Expected error codes per operation (ignoring 200/201/204, 401, 429).
+# These are the codes that BOTH the YAML and app.openapi() must declare.
+_CONSENT_EXPECTED_ERRORS: dict[str, dict[str, set[str]]] = {
+    "/consent": {
+        "post": {"400", "503"},
+    },
+    "/consent/callback": {
+        "get": {"400", "403", "404", "409", "503"},
+    },
+    "/consent/{consentId}": {
+        "get": {"400", "404", "503"},
+        "delete": {"400", "404", "503"},
+    },
+}
 
-    # POST /consent
-    post_resps = set(paths["/consent"]["post"]["responses"].keys())
-    assert "201" in post_resps
-    assert "400" in post_resps
-    assert "503" in post_resps
 
-    # GET /consent/callback
-    cb_resps = set(paths["/consent/callback"]["get"]["responses"].keys())
-    assert "200" in cb_resps
-    assert "400" in cb_resps
-    assert "403" in cb_resps
-    assert "404" in cb_resps
-    assert "409" in cb_resps
+def _yaml_error_codes(yaml_path: str, route: str, method: str) -> set[str]:
+    """Return error response codes from openapi.yaml (ignores 200/201/204, 401, 429)."""
+    import yaml
+    with open(yaml_path) as f:
+        spec = yaml.safe_load(f)
+    responses = spec["paths"][route][method]["responses"]
+    return {
+        str(k) for k in responses
+        if str(k) not in ("200", "201", "204", "401", "429")
+    }
 
-    # GET /consent/{consentId}
-    get_resps = set(paths["/consent/{consent_id}"]["get"]["responses"].keys())
-    assert "200" in get_resps
-    assert "404" in get_resps
 
-    # DELETE /consent/{consentId}
-    del_resps = set(paths["/consent/{consent_id}"]["delete"]["responses"].keys())
-    assert "204" in del_resps
-    assert "404" in del_resps
+def _fastapi_error_codes(app_spec: dict, route: str, method: str) -> set[str]:
+    """Return error response codes from FastAPI-generated spec."""
+    # FastAPI uses /consent/{consent_id} internally; YAML uses /consent/{consentId}
+    fastapi_route = route.replace("{consentId}", "{consent_id}")
+    responses = app_spec["paths"][fastapi_route][method]["responses"]
+    return {
+        str(k) for k in responses
+        if str(k) not in ("200", "201", "204", "401", "429")
+    }
+
+
+def test_openapi_consent_responses_match_yaml_and_code(client):
+    """O8: YAML, app.openapi(), and expected table all agree on error codes."""
+    import os
+    yaml_path = os.path.join(os.path.dirname(__file__), "..", "openapi", "openapi.yaml")
+    app_spec = client.app.openapi()
+
+    for route, methods in _CONSENT_EXPECTED_ERRORS.items():
+        for method, expected_errors in methods.items():
+            yaml_codes = _yaml_error_codes(yaml_path, route, method)
+            fastapi_codes = _fastapi_error_codes(app_spec, route, method)
+            assert yaml_codes == expected_errors, (
+                f"{method.upper()} {route}: YAML has {yaml_codes}, expected {expected_errors}"
+            )
+            assert fastapi_codes == expected_errors, (
+                f"{method.upper()} {route}: FastAPI spec has {fastapi_codes}, expected {expected_errors}"
+            )
+
+    # No /consent* operation should announce 422 in the FastAPI spec
+    for route in app_spec["paths"]:
+        if route.startswith("/consent"):
+            for method_obj in app_spec["paths"][route].values():
+                assert "422" not in method_obj.get("responses", {}), (
+                    f"{route}: FastAPI spec announces 422 (should be suppressed)"
+                )
+
+    # Every error response in app.openapi() for /consent* must reference ErrorResponse
+    error_response_ref = "#/components/schemas/ErrorResponse"
+    for route in app_spec["paths"]:
+        if not route.startswith("/consent"):
+            continue
+        for method_obj in app_spec["paths"][route].values():
+            for code, resp_obj in method_obj.get("responses", {}).items():
+                if str(code) in ("200", "201", "204"):
+                    continue
+                schema = resp_obj.get("content", {}).get("application/json", {}).get("schema", {})
+                assert schema.get("$ref") == error_response_ref, (
+                    f"{route} HTTP {code}: schema ref is {schema.get('$ref')!r}, expected {error_response_ref!r}"
+                )
 
 
 # ===========================================================================

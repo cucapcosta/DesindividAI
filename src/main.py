@@ -15,6 +15,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 
 load_dotenv()  # lê .env (na raiz do repo ou no cwd) antes de qualquer módulo consultar o ambiente
@@ -105,31 +106,21 @@ async def not_implemented_handler(request: Request, exc: NotImplementedError):
 
 
 # ---------------------------------------------------------------------------
-# OpenAPI spec post-processing — strip auto-added 422 from /consent* routes
+# OpenAPI: /consent* nunca responde 422 (o handler acima converte em 400)
 # ---------------------------------------------------------------------------
-_openapi_cache: dict | None = None
+def _openapi() -> dict:
+    if app.openapi_schema is None:
+        schema = get_openapi(title=app.title, version=app.version,
+                             description=app.description, routes=app.routes)
+        for path, path_item in schema["paths"].items():
+            if path == "/consent" or path.startswith("/consent/"):
+                for operation in path_item.values():
+                    operation["responses"].pop("422", None)
+        app.openapi_schema = schema
+    return app.openapi_schema
 
 
-def _patched_openapi() -> dict:
-    global _openapi_cache
-    if _openapi_cache:
-        return _openapi_cache
-    from fastapi.openapi.utils import get_openapi
-    spec = get_openapi(
-        title=app.title,
-        version=app.version,
-        description=app.description,
-        routes=app.routes,
-    )
-    for path, path_item in spec.get("paths", {}).items():
-        if path.startswith("/consent"):
-            for method_obj in path_item.values():
-                method_obj.get("responses", {}).pop("422", None)
-    _openapi_cache = spec
-    return spec
-
-
-app.openapi = _patched_openapi  # type: ignore[method-assign]
+app.openapi = _openapi  # type: ignore[method-assign]
 
 
 # ---------------------------------------------------------------------------
