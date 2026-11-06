@@ -55,7 +55,7 @@ async def create_consent(
     },
 )
 async def consent_callback(
-    state: str | None = Query(default=None),
+    state: str = Query(...),
     code: str | None = Query(default=None),
     error: str | None = Query(default=None),
     store: DocumentStore = Depends(get_store),
@@ -67,7 +67,8 @@ async def consent_callback(
     Limitação: a troca code→token (PKCE) e a introspecção são responsabilidade do IBM API
     Connect. O backend valida apenas o state e persiste o novo status.
     O state é de uso único: após autorização bem-sucedida, uma segunda chamada com o
-    mesmo state retorna 404 CONSENT_NOT_FOUND.
+    mesmo state retorna 404 CONSENT_NOT_FOUND. O mesmo 404 vale para um state cujo
+    consentimento AWAITING vencido já foi apagado pela retenção do M4.
     """
     return await consent_service.authorise_callback(store, state, code, error)
 
@@ -79,6 +80,7 @@ async def consent_callback(
     summary="Status do consentimento",
     responses={
         400: {"model": ErrorResponse, "description": "INVALID_REQUEST"},
+        401: {"model": ErrorResponse, "description": "Token ausente ou inválido"},
         404: {"model": ErrorResponse, "description": "CONSENT_NOT_FOUND"},
         503: {"model": ErrorResponse, "description": "SERVICE_UNAVAILABLE"},
     },
@@ -99,6 +101,7 @@ async def get_consent_status(
         400: {"model": ErrorResponse, "description": "INVALID_REQUEST"},
         401: {"model": ErrorResponse, "description": "Token ausente ou inválido"},
         404: {"model": ErrorResponse, "description": "CONSENT_NOT_FOUND"},
+        409: {"model": ErrorResponse, "description": "CONSENT_INVALID_STATE (escritas concorrentes)"},
         503: {"model": ErrorResponse, "description": "SERVICE_UNAVAILABLE"},
     },
 )
@@ -108,6 +111,7 @@ async def revoke_consent(
 ) -> None:
     """
     Revoga o consentimento conforme LGPD Art. 8º §5 — sem ônus ao titular.
-    Não aciona /internal/erase: os dados são retidos por 90 dias (política M4).
+    AUTHORISED → REVOKED; AWAITING_AUTHORISATION (cancelado antes de autorizar) → REJECTED.
+    Não aciona /internal/erase: a limpeza segue a retenção do M4.
     """
     await consent_service.revoke_consent(store, str(consent_id))

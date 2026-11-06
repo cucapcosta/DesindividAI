@@ -18,7 +18,7 @@ import asyncio
 import sys
 from datetime import datetime, timedelta, timezone
 
-from src.core.config import consents_db, decisions_db, env, snapshots_db
+from src.core.config import audit_db, consents_db, decisions_db, env, snapshots_db, vault_db
 from src.storage.store import CloudantStore
 
 SAMPLE_SNAPSHOT_ID = "00000000-0000-4000-8000-000000000001"
@@ -44,7 +44,8 @@ def cloudant_store() -> CloudantStore:
 
 
 async def setup(store: CloudantStore) -> None:
-    dbs = {snapshots_db(), decisions_db(), consents_db()}
+    # identity_vault e audit_trail: o POST /consent grava o CPF no cofre e audita (M4)
+    dbs = {snapshots_db(), decisions_db(), consents_db(), vault_db(), audit_db()}
     for db in sorted(dbs):
         created = await store.ensure_db(db)
         print(f"[OK] database {db}: {'criado' if created else 'já existia'}")

@@ -126,8 +126,10 @@ curl -s "$(echo "$R" | python -c 'import sys,json;print(json.load(sys.stdin)["re
 
 | Gatilho | Ação |
 |---|---|
-| `DELETE /consent/{consentId}` (titular ou BB) | (1) grava `REVOKED` no banco; (2) tenta `POST OAUTH_REVOKE_URL`; (3) relê e atualiza `token_revocation` — `"ok"` / `"failed"` / `"skipped"`. Escritas condicionais ao `_rev`: um callback concorrente recebe `409 CONSENT_INVALID_STATE` |
-| `expiration_days` atingido | Consentimento recusado pelos consumidores via `expires_at` (expiração preguiçosa) |
+| `DELETE /consent/{consentId}` em `AUTHORISED` | (1) grava `REVOKED` e audita `consent.revoked`; (2) tenta `POST OAUTH_REVOKE_URL`; (3) grava `token_revocation` — `"ok"` / `"failed"` / `"skipped"` (melhor-esforço). Escritas condicionais ao `_rev`: um callback concorrente recebe `409 CONSENT_INVALID_STATE` |
+| `DELETE /consent/{consentId}` em `AWAITING_AUTHORISATION` | Cancela: `REJECTED` com `rejection_reason=CUSTOMER_CANCELLED` (ainda não há tokens). Sai na próxima retenção do M4 |
+| `expiration_days` atingido | Consumidores recusam via `expires_at` (expiração preguiçosa); o job de retenção do M4 (regra c) depois grava `REVOKED` com `revocation_reason=EXPIRED` e audita `consent.expired` |
+| `AWAITING` vencido | Callback depois do prazo → `403 CONSENT_AUTHORISATION_EXPIRED`; se a retenção do M4 (regra b) já apagou o documento, `404 CONSENT_NOT_FOUND` |
 | Fraude detectada | Time de segurança do BB revoga via API interna do OAuth Provider |
 | Requisição LGPD Art. 18 (direito ao esquecimento) | `POST /internal/erase` (M4) + revogação |
 

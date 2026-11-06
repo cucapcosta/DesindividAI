@@ -40,8 +40,8 @@ async def load_snapshot(store: DocumentStore, snapshot_id: UUID) -> dict:
 async def ensure_consent(store: DocumentStore, *, consent_id: str | None, pseudonym_id: str, scope: str) -> None:
     """
     Exige consentimento vigente (AUTHORISED, com o escopo do endpoint e não expirado), mesma regra do
-    GET /debts. Só é imposto com REQUIRE_CONSENT=true, pois a persistência de consentimentos é da
-    Sub-Tarefa 1 (endpoint /consent ainda stub).
+    GET /debts. Só é imposto com REQUIRE_CONSENT=true: o /consent já persiste consentimentos, mas
+    ligar a exigência por padrão é decisão do time (snapshots antigos e ambiente de demonstração).
 
     O consentimento é o do próprio snapshot (consent_id): se o titular revogar depois da coleta, a
     simulação e a recomendação deixam de ser servidas. Snapshots sem consent_id (anteriores ao

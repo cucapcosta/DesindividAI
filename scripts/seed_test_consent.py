@@ -1,8 +1,9 @@
 """
 Grava ou remove um consentimento de teste no Cloudant (consent_registry).
 
-Enquanto POST /consent (M1) não está implementado, este script cria um
-consentimento AUTHORISED para exercitar GET /debts contra os serviços reais.
+Atalho de teste: cria direto um consentimento AUTHORISED (marcado test_fixture)
+para exercitar GET /debts contra os serviços reais. O caminho normal é
+POST /consent seguido do callback (code=sandbox no modo sandbox).
 O CPF é o fictício do sandbox; só o pseudonym_id (HMAC) é persistido.
 
 O pseudonym_id é gerado via identity_vault.store(SANDBOX_CPF), que também

@@ -76,7 +76,7 @@ física de documentos vencidos fica com a retenção do M4.
 
 - **`_id` = `consent_id`** para permitir `store.get` direto.
 - **Nunca** gravar o CPF, nem mascarado. O CPF fica só cifrado no cofre de identidade do M4.
-- `rejection_reason`: `"ACCESS_DENIED"` | `"AUTHORISATION_TIMEOUT"`.
+- `rejection_reason`: `"ACCESS_DENIED"` | `"AUTHORISATION_TIMEOUT"` | `"CUSTOMER_CANCELLED"` (DELETE antes de autorizar).
 - `revocation_reason`: `"CUSTOMER_REQUEST"` (único valor que o M1 grava; `FRAUD` e `LGPD_ERASURE` são de outros fluxos).
 - `token_revocation`: `"ok"` | `"failed"` | `"skipped"`.
 - `state_hash` é removido do documento após a autorização bem-sucedida (state de uso único).
@@ -136,10 +136,14 @@ Quando o consentimento expira naturalmente:
 ```
 1. Canal chama DELETE /consent/{consentId}
 2. API Connect valida token (scope: consent:write)  [pendência de configuração]
-3. Backend:
+3. Backend, se AUTHORISED:
    a. Atualiza consent_registry: status → REVOKED, revoked_at, reason → "CUSTOMER_REQUEST"
+      e audita consent.revoked
    b. Tenta POST OAUTH_REVOKE_URL (se configurado); falha não impede a revogação
    c. Relê o documento e grava token_revocation: "ok" | "failed" | "skipped"
+      (melhor-esforço: falha aqui não vira erro para o titular)
+   Se ainda AWAITING_AUTHORISATION: status → REJECTED, reason → "CUSTOMER_CANCELLED"
+   (não há tokens; a retenção do M4 limpa em minutos). Já REVOKED/REJECTED: 204 sem escrita.
    As escritas são condicionais ao _rev lido: um callback concorrente recebe 409
    em vez de sobrescrever a revogação
 4. Agente 1 não consegue mais buscar dados — consent check retorna REVOKED

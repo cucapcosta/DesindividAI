@@ -416,7 +416,7 @@ def test_callback_after_rejected_returns_409(client, monkeypatch, store):
 
 
 def test_callback_after_revoked_returns_409(client, monkeypatch, store):
-    """Callback depois de REVOKED → 409 CONSENT_INVALID_STATE.
+    """Callback depois de cancelado pelo DELETE → 409 CONSENT_INVALID_STATE.
     Usa fluxo real: POST → DELETE → callback com state original (F3).
     """
     # fluxo real: não forçar status no store
@@ -512,13 +512,17 @@ def test_revoke_authorised_returns_204(client, monkeypatch, store):
     _assert_tz(doc["revoked_at"], "revoked_at")
 
 
-def test_revoke_awaiting_returns_204(client, monkeypatch, store):
-    """DELETE de AWAITING → 204 + REVOKED (T5)."""
+def test_revoke_awaiting_cancels_as_rejected(client, monkeypatch, store):
+    """DELETE de AWAITING → 204 + REJECTED/CUSTOMER_CANCELLED, sem revogação de token."""
+    monkeypatch.setenv("OAUTH_REVOKE_URL", "http://[::1")  # chamada aqui seria bug
     consent_id, _ = _get_state(client, monkeypatch)
     resp = client.delete(f"/consent/{consent_id}")
     assert resp.status_code == 204
     doc = asyncio.run(store.get(consents_db(), consent_id))
-    assert doc["status"] == ConsentStatus.REVOKED.value
+    assert doc["status"] == ConsentStatus.REJECTED.value
+    assert doc["rejection_reason"] == "CUSTOMER_CANCELLED"
+    _assert_tz(doc["rejected_at"], "rejected_at")
+    assert doc["revoked_at"] is None and doc["token_revocation"] is None
 
 
 def test_revoke_idempotent(client, monkeypatch, store):
@@ -630,7 +634,7 @@ async def _status_or_code(coro):
 
 @pytest.mark.parametrize("callback_delay", [0.0, 0.01, 0.03, 0.05, 0.08])
 def test_callback_concurrent_with_delete_never_resurrects(monkeypatch, callback_delay):
-    """C3: callback e DELETE concorrentes terminam REVOKED, qualquer que seja a ordem."""
+    """C3: callback e DELETE concorrentes nunca terminam AUTHORISED, qualquer que seja a ordem."""
     monkeypatch.setenv("OPEN_FINANCE_AUTH_SANDBOX", "true")
     store = _SlowStore()
 
@@ -649,8 +653,9 @@ def test_callback_concurrent_with_delete_never_resurrects(monkeypatch, callback_
     deleted, cb, doc = asyncio.run(scenario())
     assert deleted == "204"
     assert cb in ("AUTHORISED", "CONSENT_INVALID_STATE")
-    assert doc["status"] == ConsentStatus.REVOKED.value
-    assert doc["revocation_reason"] == "CUSTOMER_REQUEST"
+    # o DELETE vence de um jeito ou de outro: cancelado (antes do callback) ou revogado (depois)
+    assert doc["status"] in (ConsentStatus.REJECTED.value, ConsentStatus.REVOKED.value)
+    assert (cb == "AUTHORISED") == (doc["status"] == ConsentStatus.REVOKED.value)
 
 
 def test_parallel_callbacks_same_state_single_winner(monkeypatch):
@@ -837,7 +842,7 @@ _CONSENT_EXPECTED_ERRORS: dict[str, dict[str, set[str]]] = {
     },
     "/consent/{consentId}": {
         "get": {"400", "404", "503"},
-        "delete": {"400", "404", "503"},
+        "delete": {"400", "404", "409", "503"},
     },
 }
 
@@ -925,3 +930,71 @@ def test_pseudonymization_key_error_returns_503(client, monkeypatch, app_env, ke
     assert resp.json()["code"] == "NOT_CONFIGURED"
     # nome da variável de config não deve vazar na resposta (F5)
     assert "PSEUDONYM_HMAC_KEY" not in resp.text
+
+
+# ===========================================================================
+# Grupo: review final
+# ===========================================================================
+
+def test_config_error_does_not_store_cpf_in_vault(client, monkeypatch, store, vault):
+    """Modo real sem configuração → 503 antes de o CPF chegar ao cofre."""
+    monkeypatch.setenv("OPEN_FINANCE_AUTH_SANDBOX", "")
+    resp = _post_consent(client)
+    assert resp.status_code == 503
+    assert vault._repo._store == {}
+
+
+def test_create_institution_cpf_with_separators_returns_400(client, monkeypatch, store):
+    """CPF com hífens/underscores no campo de instituição é recusado e não é gravado."""
+    monkeypatch.setenv("OPEN_FINANCE_AUTH_SANDBOX", "true")
+    for inst in ("529-982-247-25", "529_982_247_25"):
+        resp = _post_consent(client, institutions=[inst])
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "INVALID_REQUEST"
+    assert not store._dbs.get(consents_db())
+
+
+def test_create_more_than_20_institutions_returns_400(client, monkeypatch, vault):
+    monkeypatch.setenv("OPEN_FINANCE_AUTH_SANDBOX", "true")
+    resp = _post_consent(client, institutions=[f"b{i}" for i in range(21)])
+    assert resp.status_code == 400
+    assert vault._repo._store == {}
+
+
+def test_invalid_json_body_returns_400_with_clear_message(client):
+    resp = client.post("/consent", content="{bad", headers={"Content-Type": "application/json"})
+    assert resp.status_code == 400
+    assert resp.json() == {"code": "INVALID_REQUEST", "message": "JSON inválido.", "request_id": None}
+
+
+def test_revoke_audits_even_if_token_revocation_write_fails(client, monkeypatch, store):
+    """REVOKED gravado → consent.revoked auditado e 204, mesmo se a 2ª escrita falhar."""
+    repo = InMemoryAuditRepository()
+    monkeypatch.setattr(audit_bridge, "_get_logger", lambda: AuditLogger(repository=repo))
+    consent_id = _authorised_consent(client, monkeypatch)
+    real_put = store.put
+    calls = {"n": 0}
+
+    async def put_failing_second_revoke_write(db, doc_id, doc, *, rev=None):
+        if doc.get("token_revocation") == "skipped":
+            calls["n"] += 1
+            raise ServiceError(503, "SERVICE_UNAVAILABLE", "Cloudant indisponível.")
+        return await real_put(db, doc_id, doc, rev=rev)
+
+    monkeypatch.setattr(store, "put", put_failing_second_revoke_write)
+    assert client.delete(f"/consent/{consent_id}").status_code == 204
+    assert calls["n"] == 1
+    assert asyncio.run(store.get(consents_db(), consent_id))["status"] == ConsentStatus.REVOKED.value
+    assert [r["event_type"] for r in repo._store][-1] == "consent.revoked"
+
+
+def test_identity_vault_selection(monkeypatch):
+    """STORE_BACKEND=memory usa o cofre em memória; senão, o do M4 (Cloudant)."""
+    monkeypatch.undo()  # sem o autouse `vault`: testa a seleção real
+    sentinel = object()
+    monkeypatch.setattr(svc, "get_identity_vault", lambda: sentinel)
+    monkeypatch.setenv("STORE_BACKEND", "memory")
+    assert isinstance(svc._identity_vault(), IdentityVault)
+    assert svc._identity_vault() is svc._identity_vault()
+    monkeypatch.setenv("STORE_BACKEND", "")
+    assert svc._identity_vault() is sentinel

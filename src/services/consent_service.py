@@ -31,7 +31,6 @@ from src.core.errors import ServiceError
 from src.privacy.audit_bridge import emit
 from src.privacy.identity_vault import IdentityVault, InMemoryVaultRepository, get_identity_vault
 from src.privacy.key_provider import KeyProviderError
-from src.privacy.pseudonymization import PseudonymizationKeyError
 from src.storage.store import DocumentStore
 
 logger = logging.getLogger(__name__)
@@ -46,7 +45,7 @@ _MAX_WRITE_ATTEMPTS = 3
 
 # Código de instituição: minúsculas, dígitos (aceita código COMPE como "001"), hífen e underscore.
 _INSTITUTION_PATTERN = re.compile(r"^[a-z0-9_-]{1,32}$")
-# 11 dígitos seguidos podem ser um CPF digitado no campo errado — nunca persistir.
+# 11 dígitos (ignorando - e _) podem ser um CPF digitado no campo errado — nunca persistir.
 _CPF_LIKE = re.compile(r"\d{11}")
 
 
@@ -79,7 +78,7 @@ async def _store_identity(cpf: str) -> str:
     try:
         vault = _identity_vault()
         return await asyncio.to_thread(vault.store, cpf)
-    except (ConfigurationError, KeyProviderError, PseudonymizationKeyError) as exc:
+    except (ConfigurationError, KeyProviderError) as exc:
         raise ServiceError(503, "NOT_CONFIGURED", "Cofre de identidade não configurado.") from exc
     except (ApiException, requests.RequestException) as exc:
         raise ServiceError(503, "SERVICE_UNAVAILABLE", "Cofre de identidade indisponível.") from exc
@@ -93,11 +92,14 @@ async def _audit(event: str, *, pseudonym_id: str, **fields) -> None:
 async def _update(store: DocumentStore, consent_id: str, mutate: Callable[[dict], bool]) -> dict | None:
     """
     Relê o consentimento, aplica ``mutate`` e grava condicionado ao _rev lido; em conflito,
-    repete. ``mutate`` devolve False para não gravar. Retorna o documento gravado ou None.
+    relê e tenta de novo. ``mutate`` devolve False para não gravar (ou levanta ServiceError).
+    Retorna o documento como foi gravado, ou None se ``mutate`` recusou. 404 se não existir.
     """
     for _ in range(_MAX_WRITE_ATTEMPTS):
         doc = await store.get(consents_db(), consent_id)
-        if doc is None or not mutate(doc):
+        if doc is None:
+            raise ServiceError(404, "CONSENT_NOT_FOUND", "Consentimento não encontrado.")
+        if not mutate(doc):
             return None
         try:
             await store.put(consents_db(), consent_id, doc, rev=doc["_rev"])
@@ -193,7 +195,7 @@ async def create_consent(store: DocumentStore, body) -> ConsentResponse:
 
     # --- normalizar e validar institutions ---
     institutions = list(dict.fromkeys(inst.strip().lower() for inst in body.institutions))
-    if any(not _INSTITUTION_PATTERN.match(i) or _CPF_LIKE.search(i) for i in institutions):
+    if any(not _INSTITUTION_PATTERN.match(i) or _CPF_LIKE.search(re.sub(r"[-_]", "", i)) for i in institutions):
         raise ServiceError(400, "INVALID_REQUEST",
                            "Instituição inválida: use letras minúsculas, dígitos, hífen e underscore (máx 32).")
 
@@ -205,19 +207,18 @@ async def create_consent(store: DocumentStore, body) -> ConsentResponse:
         )
     scopes = list(dict.fromkeys(body.scopes))
 
-    # --- pseudonimização (CPF não sai daqui) ---
-    pseudonym_id = await _store_identity(body.cpf)
-
-    # --- gerar IDs e datas ---
+    # --- IDs e redirect_url antes do cofre: erro de configuração não deixa CPF órfão ---
     consent_id = str(uuid4())
     state = secrets.token_urlsafe(32)
+    redirect_url = _build_redirect_url(consent_id, state)
+
+    # --- CPF cifrado no cofre do M4 (não sai daqui) ---
+    pseudonym_id = await _store_identity(body.cpf)
+
     now = _utcnow()
     expires_at = (now + timedelta(days=body.expiration_days)).isoformat()
     awaiting_expires_at = (now + timedelta(minutes=AWAITING_EXPIRES_MINUTES)).isoformat()
     created_at = now.isoformat()
-
-    # --- montar redirect_url ---
-    redirect_url = _build_redirect_url(consent_id, state)
 
     # --- persistir (CPF nunca entra no documento) ---
     doc = {
@@ -266,13 +267,11 @@ async def create_consent(store: DocumentStore, body) -> ConsentResponse:
 
 async def authorise_callback(
     store: DocumentStore,
-    state: str | None,
+    state: str,
     code: str | None,
     error: str | None,
 ) -> ConsentStatusResponse:
     """Transiciona AWAITING_AUTHORISATION → AUTHORISED ou REJECTED."""
-    if not state:
-        raise ServiceError(400, "INVALID_REQUEST", "Parâmetro 'state' obrigatório.")
     if not code and not error:
         raise ServiceError(400, "INVALID_REQUEST", "Parâmetro 'code' ou 'error' obrigatório.")
 
@@ -286,48 +285,41 @@ async def authorise_callback(
             raise ServiceError(400, "INVALID_REQUEST",
                                "code 'sandbox' não é válido em modo real.")
 
-    expected_hash = _state_hash(state)
-    docs = await store.find(consents_db(), {"state_hash": expected_hash}, limit=1)
+    docs = await store.find(consents_db(), {"state_hash": _state_hash(state)}, limit=1)
     if not docs:
         raise ServiceError(404, "CONSENT_NOT_FOUND",
                            "Consentimento não encontrado para o state informado.")
-
-    doc = docs[0]
-    consent_id = doc["consent_id"]
-    status = doc.get("status")
-
-    if status != ConsentStatus.AWAITING_AUTHORISATION.value:
-        raise ServiceError(409, "CONSENT_INVALID_STATE",
-                           f"Consentimento com status {status} não pode ser autorizado.")
-
+    consent_id = docs[0]["consent_id"]
     now = _utcnow()
-    # Verificar expiração do prazo de autorização.
-    # Campo ausente ou inválido = tratar como vencido (B5 — falha fechada).
-    try:
-        awaiting_exp = parse_utc(doc["awaiting_expires_at"])
-    except (KeyError, ValueError, TypeError):
-        awaiting_exp = now - timedelta(seconds=1)  # ausente/inválido → tratar como vencido
+    outcome: dict = {}
 
-    if now >= awaiting_exp:
-        await _transition(store, doc, status=ConsentStatus.REJECTED.value,
-                          rejected_at=now.isoformat(), rejection_reason="AUTHORISATION_TIMEOUT")
-        await _audit("consent.rejected", pseudonym_id=doc["pseudonym_id"],
-                     consent_id=consent_id, reason="AUTHORISATION_TIMEOUT")
-        raise ServiceError(403, "CONSENT_AUTHORISATION_EXPIRED",
-                           "Prazo de autorização expirado.")
+    def decide(doc: dict) -> bool:
+        if doc.get("status") != ConsentStatus.AWAITING_AUTHORISATION.value:
+            raise ServiceError(409, "CONSENT_INVALID_STATE",
+                               f"Consentimento com status {doc.get('status')} não pode ser autorizado.")
+        # prazo ausente ou inválido = vencido (falha fechada)
+        try:
+            expired = now >= parse_utc(doc["awaiting_expires_at"])
+        except (KeyError, ValueError, TypeError):
+            expired = True
+        if expired or error:
+            outcome["reason"] = "AUTHORISATION_TIMEOUT" if expired else "ACCESS_DENIED"
+            doc.update(status=ConsentStatus.REJECTED.value, rejected_at=now.isoformat(),
+                       rejection_reason=outcome["reason"])
+        else:
+            doc.pop("state_hash", None)  # state de uso único
+            doc.update(status=ConsentStatus.AUTHORISED.value, authorised_at=now.isoformat())
+        return True
 
-    if error:
-        await _transition(store, doc, status=ConsentStatus.REJECTED.value,
-                          rejected_at=now.isoformat(), rejection_reason="ACCESS_DENIED")
+    doc = await _update(store, consent_id, decide)
+    if outcome:
         await _audit("consent.rejected", pseudonym_id=doc["pseudonym_id"],
-                     consent_id=consent_id, reason="ACCESS_DENIED")
+                     consent_id=consent_id, reason=outcome["reason"])
+        if outcome["reason"] == "AUTHORISATION_TIMEOUT":
+            raise ServiceError(403, "CONSENT_AUTHORISATION_EXPIRED", "Prazo de autorização expirado.")
         raise ServiceError(403, "CONSENT_REJECTED", "Autorização negada pelo titular.")
 
-    # sucesso: AUTHORISED; o state é de uso único e sai do documento
-    doc.pop("state_hash", None)
-    await _transition(store, doc, status=ConsentStatus.AUTHORISED.value, authorised_at=now.isoformat())
     await _audit("consent.authorised", pseudonym_id=doc["pseudonym_id"], consent_id=consent_id)
-
     return _to_status_response(doc)
 
 
@@ -345,55 +337,55 @@ async def get_consent_status(store: DocumentStore, consent_id: str) -> ConsentSt
 # ---------------------------------------------------------------------------
 
 async def revoke_consent(store: DocumentStore, consent_id: str) -> None:
-    await _load_consent(store, consent_id)  # 404 se não existir
+    """
+    AUTHORISED → REVOKED. AWAITING_AUTHORISATION (ainda sem tokens) → REJECTED com
+    CUSTOMER_CANCELLED, para a retenção do M4 limpar em minutos e não em 90 dias.
+    Já REVOKED ou REJECTED: idempotente (204 sem nova escrita).
+    """
+    now = _utcnow().isoformat()
 
     def revoke(doc: dict) -> bool:
-        # idempotente: já revogado ou rejeitado
-        if doc.get("status") in (ConsentStatus.REVOKED.value, ConsentStatus.REJECTED.value):
-            return False
-        doc.update(status=ConsentStatus.REVOKED.value, revoked_at=_utcnow().isoformat(),
-                   revocation_reason="CUSTOMER_REQUEST", revoked_by="customer", token_revocation=None)
-        return True
+        status = doc.get("status")
+        if status == ConsentStatus.AWAITING_AUTHORISATION.value:
+            doc.update(status=ConsentStatus.REJECTED.value, rejected_at=now,
+                       rejection_reason="CUSTOMER_CANCELLED")
+            return True
+        if status == ConsentStatus.AUTHORISED.value:
+            doc.update(status=ConsentStatus.REVOKED.value, revoked_at=now,
+                       revocation_reason="CUSTOMER_REQUEST", revoked_by="customer", token_revocation=None)
+            return True
+        return False
 
-    # REVOKED é gravado antes de qualquer I/O externo: demora ou falha na revogação de
-    # token não deixa o consentimento ativo. A escrita é condicional ao _rev, então um
-    # callback concorrente não sobrescreve a revogação (ele recebe 409).
-    revoked = await _update(store, consent_id, revoke)
-    if revoked is None:
+    # Escrita condicional ao _rev: um callback concorrente não sobrescreve a revogação.
+    doc = await _update(store, consent_id, revoke)
+    if doc is None:
         return
+    if doc["status"] == ConsentStatus.REJECTED.value:
+        await _audit("consent.rejected", pseudonym_id=doc["pseudonym_id"],
+                     consent_id=consent_id, reason="CUSTOMER_CANCELLED")
+        return
+
+    # A revogação já está gravada e é auditada antes de qualquer I/O externo.
+    await _audit("consent.revoked", pseudonym_id=doc["pseudonym_id"], consent_id=consent_id,
+                 revocation_reason="CUSTOMER_REQUEST", revoked_by="customer")
 
     token_revocation = await _revoke_tokens(consent_id)
 
-    def record_token_revocation(doc: dict) -> bool:
-        doc["token_revocation"] = token_revocation
+    def record_token_revocation(current: dict) -> bool:
+        current["token_revocation"] = token_revocation
         return True
 
-    await _update(store, consent_id, record_token_revocation)
-    await _audit(
-        "consent.revoked",
-        pseudonym_id=revoked["pseudonym_id"],
-        consent_id=consent_id,
-        revocation_reason="CUSTOMER_REQUEST",
-        revoked_by="customer",
-        token_revocation=token_revocation,
-    )
+    # Melhor-esforço: o consentimento já está REVOKED; falhar aqui não pode virar erro
+    # para o titular nem impedir o registro.
+    try:
+        await _update(store, consent_id, record_token_revocation)
+    except ServiceError as exc:
+        logger.warning("token_revocation=%s não gravado para %s: %s", token_revocation, consent_id, exc.code)
 
 
 # ---------------------------------------------------------------------------
 # Helpers internos
 # ---------------------------------------------------------------------------
-
-async def _transition(store: DocumentStore, doc: dict, **changes) -> None:
-    """Grava a transição só se o documento não mudou desde a leitura; senão 409."""
-    doc.update(changes)
-    try:
-        await store.put(consents_db(), doc["consent_id"], doc, rev=doc["_rev"])
-    except ServiceError as exc:
-        if exc.code != "CONFLICT":
-            raise
-        raise ServiceError(409, "CONSENT_INVALID_STATE",
-                           "Consentimento alterado por outra operação; tente novamente.") from exc
-
 
 async def _load_consent(store: DocumentStore, consent_id: str) -> dict:
     """Carrega consentimento pelo _id (= consent_id por contrato)."""

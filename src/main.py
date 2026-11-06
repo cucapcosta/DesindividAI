@@ -79,13 +79,14 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
     do FastAPI (422 com detalhe completo), preservando o contrato de M2/M3.
     """
     if request.url.path == "/consent" or request.url.path.startswith("/consent/"):
-        fields = [".".join(str(loc) for loc in err.get("loc", [])) for err in exc.errors()]
+        if any(err.get("type") == "json_invalid" for err in exc.errors()):
+            message = "JSON inválido."
+        else:
+            fields = [".".join(str(loc) for loc in err.get("loc", [])) for err in exc.errors()]
+            message = f"Campos inválidos: {', '.join(fields)}"
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
-            content=ErrorResponse(
-                code="INVALID_REQUEST",
-                message=f"Campos inválidos: {', '.join(fields)}",
-            ).model_dump(mode="json"),
+            content=ErrorResponse(code="INVALID_REQUEST", message=message).model_dump(mode="json"),
         )
     return await request_validation_exception_handler(request, exc)
 
