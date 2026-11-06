@@ -15,6 +15,8 @@ info:
     | Endpoint | Scope |
     |---|---|
     | POST /consent | `openid consent:write` |
+    | GET /consent/callback | — (retorno do Authorization Server) |
+    | GET /consent/{consentId} | `consent:write` |
     | DELETE /consent/{consentId} | `consent:write` |
     | GET /debts | `debts:read` |
     | POST /simulation | `simulation:read` |
@@ -109,6 +111,43 @@ components:
         created_at:
           type: string
           format: date-time
+
+    ConsentStatusResponse:
+      type: object
+      description: Status atual de um consentimento (sem campos internos como pseudonym_id ou state_hash)
+      properties:
+        consent_id:
+          type: string
+          description: UUID do consentimento
+          example: "c7f3a2d1-8b4e-4c6f-9a0b-123456789abc"
+        status:
+          type: string
+          enum: [AWAITING_AUTHORISATION, AUTHORISED, REJECTED, REVOKED]
+          example: AUTHORISED
+        institutions:
+          type: array
+          items:
+            type: string
+          example: ["bb", "itau"]
+        scopes:
+          type: array
+          items:
+            type: string
+          example: ["debts:read"]
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        authorised_at:
+          type: string
+          format: date-time
+          nullable: true
+        revoked_at:
+          type: string
+          format: date-time
+          nullable: true
 
     Debt:
       type: object
@@ -353,7 +392,98 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /consent/callback:
+    get:
+      operationId: consentCallback
+      summary: Callback OAuth — transição AWAITING_AUTHORISATION → AUTHORISED ou REJECTED
+      description: |
+        Recebe o retorno do Authorization Server (code ou error).
+        No modo sandbox (`OPEN_FINANCE_AUTH_SANDBOX=true`) a transição ocorre
+        automaticamente a partir da redirect_url devolvida pelo `POST /consent`.
+
+        **Limitação:** a troca `code → token` (PKCE) e a introspecção ficam no
+        IBM API Connect. O backend valida apenas o `state` e persiste o novo status.
+      tags: [Consent]
+      security: []
+      parameters:
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Valor opaco gerado no POST /consent (uso único)
+        - name: code
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Código de autorização (Authorization Server aprovou)
+        - name: error
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Código de erro (ex. `access_denied`) quando o titular nega
+      responses:
+        "200":
+          description: Autorização concluída — consentimento AUTHORISED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConsentStatusResponse'
+        "400":
+          description: "Parâmetros ausentes: state obrigatório; code ou error obrigatório"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: "CONSENT_AUTHORISATION_EXPIRED | CONSENT_REJECTED"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: State desconhecido (CONSENT_NOT_FOUND)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "409":
+          description: Consentimento em estado incompatível com a transição (CONSENT_INVALID_STATE)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /consent/{consentId}:
+    get:
+      operationId: getConsentStatus
+      summary: Status do consentimento
+      description: Retorna o status atual do consentimento para o canal acompanhar.
+      tags: [Consent]
+      security:
+        - openfinance_oauth2: ["consent:write"]
+      parameters:
+        - name: consentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Status do consentimento
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConsentStatusResponse'
+        "404":
+          description: Consentimento não encontrado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
     delete:
       operationId: revokeConsent
       summary: Revogar consentimento
@@ -361,6 +491,7 @@ paths:
         Revoga o consentimento e marca o status como `REVOKED`.
         Nenhum dado do cliente poderá ser acessado após a revogação.
         Conforme LGPD Art. 8º §5 — consentimento pode ser revogado a qualquer tempo.
+        Os dados são retidos por 90 dias antes da exclusão física (política M4).
       tags: [Consent]
       security:
         - openfinance_oauth2: ["consent:write"]
@@ -374,6 +505,12 @@ paths:
       responses:
         "204":
           description: Consentimento revogado com sucesso
+        "400":
+          description: "INVALID_REQUEST | INVALID_CPF | INVALID_SCOPE"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "404":
           description: Consentimento não encontrado
           content:
@@ -382,6 +519,12 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         "401":
           description: Token ausente ou inválido
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "503":
+          description: "SERVICE_UNAVAILABLE | NOT_CONFIGURED"
           content:
             application/json:
               schema:

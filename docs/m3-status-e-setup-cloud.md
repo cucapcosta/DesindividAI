@@ -49,7 +49,7 @@ Watson Studio uma vez pelo navegador).
 | Docs | `docs/m3-simulation-engine.md`, `docs/m3-agent2-recommendation.md` | Prontos |
 
 Decisões: cenário recomendado por regra determinística (o LLM só explica); linha BB de consolidação é
-premissa (`BB_CONSOLIDATION_CET_ANNUAL`, 30% a.a.); `REQUIRE_CONSENT=false` até o M1 persistir consentimentos;
+premissa (`BB_CONSOLIDATION_CET_ANNUAL`, 30% a.a.); `REQUIRE_CONSENT=false` por padrão — o M1 (`feat/m1-consentimento`) já persiste consentimentos, ligar `true` após o merge é decisão do time;
 modelo padrão trocado para `ibm/granite-4-h-small` (o `granite-3-8b-instruct` não existe mais na conta).
 
 ## 2. Cloud: o que já foi feito
@@ -86,8 +86,8 @@ modelo padrão trocado para `ibm/granite-4-h-small` (o `granite-3-8b-instruct` n
 3. **Enviar o trace ao watsonx.governance** (AI Factsheets, instância `GOV`).
 4. Mais testes de borda do motor (orçamento menor que os mínimos, uma dívida só).
 5. Dependências de outros membros: M2 gravar snapshot no formato de `docs/m3-simulation-engine.md`;
-   M1 persistir consentimentos para ligar `REQUIRE_CONSENT=true`.
-6. Opcional, código do M1: trocar `Field(example=...)` por `json_schema_extra` em `src/api/models.py` (avisos do Pydantic).
+   M1 persistir consentimentos para ligar `REQUIRE_CONSENT=true` — ✅ `feat/m1-consentimento` resolve isso.
+6. ~~Opcional, código do M1: trocar `Field(example=...)` por `json_schema_extra` em `src/api/models.py`~~ — ✅ resolvido em `feat/m1-consentimento`.
 
 ## 5. Retomar em outra máquina
 

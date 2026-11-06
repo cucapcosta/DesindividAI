@@ -21,7 +21,7 @@ escopo fechado e validadas com `pytest` (20 passam) e com o smoke test na cloud 
 - **Sem autenticação e sem checagem de dono (IDOR) nos endpoints.** Por desenho do PLANO, OAuth2/FAPI é responsabilidade do IBM API Connect
   (ver `docs/m1-api-connect-policies.md`). O M3 não valida o token; o gateway precisa ser a única entrada. Ao ligar o gateway, vincular
   `snapshot_id`/`simulation_id` ao titular do token.
-- **`REQUIRE_CONSENT=false` por padrão**, porque o `/consent` do M1 ainda não persiste consentimentos. Ligar quando o M1 estiver pronto.
+- **`REQUIRE_CONSENT=false` por padrão**: o M1 (`feat/m1-consentimento`) já persiste consentimentos — ligar `REQUIRE_CONSENT=true` no `.env` é decisão do time, após o merge.
 - **O trace ainda guarda o prompt completo**, necessário para auditoria. A proteção é a separação de banco; criptografia em repouso e política
   de retenção ficam com a Sub-Tarefa 4 (M4).
 - **`first_steps` envia o nome da instituição ao LLM**: informação útil ao cliente e não é dado pessoal direto, mas aumenta o potencial de

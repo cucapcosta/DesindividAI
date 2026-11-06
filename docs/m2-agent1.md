@@ -438,10 +438,10 @@ roteirizado, o repositório é em memória, e o `conftest.py` zera as credenciai
 | Merge com `feat/m3-simulacao-recomendacao`: conflitos em `main.py`, `tests/conftest.py`, `requirements.txt`, `.env.example`, `PLANO.md` | **Integração M2 × M3** (quem mergear por último) |
 | Duas camadas de Cloudant/config (`src/core`+`src/storage` do M3 × `agent1/config`+`repository`), e o client duplicado em `scripts/seed_test_consent.py` | **Integração M2 × M3** — unificar em uma |
 | Dívidas rotativas têm `remaining_installments: 0`; o motor trata como 1 parcela | **Sub-Tarefa 3 (M3)** — tratar rotativo no motor |
-| `POST /consent` não implementado (hoje: `scripts/seed_test_consent.py`) | **Sub-Tarefa 1 (M1)** |
-| Escopo validado no documento de consentimento, não no token OAuth | **Sub-Tarefa 1 (M1)** — política do API Connect |
-| `202`/`500`/`502`/`503` fora do `openapi.yaml` | **Sub-Tarefa 1 (M1)** |
-| `expires_at` do consentimento sempre ISO 8601 **com fuso** | **Sub-Tarefa 1 (M1)** — M2 já assume UTC quando falta |
+| `POST /consent` não implementado (hoje: `scripts/seed_test_consent.py`) | ~~**Sub-Tarefa 1 (M1)**~~ ✅ resolvido em `feat/m1-consentimento` — `POST /consent`, `GET /callback`, `GET /{id}`, `DELETE` implementados |
+| Escopo validado no documento de consentimento, não no token OAuth | **Sub-Tarefa 1 (M1)** — política do API Connect (pendência de configuração) |
+| `202`/`500`/`502`/`503` fora do `openapi.yaml` | ~~**Sub-Tarefa 1 (M1)**~~ ✅ resolvido em `3a2a5ac` |
+| `expires_at` do consentimento sempre ISO 8601 **com fuso** | ~~**Sub-Tarefa 1 (M1)**~~ ✅ resolvido em `feat/m1-consentimento` — datas sempre com timezone |
 | Confirmar retenção de 90 dias após o consentimento e dono da chave de pseudonimização | **Sub-Tarefa 4 (M4)** |
 | Afinidade por `consent_id` no gateway (jobs do `202` em memória) | **Sub-Tarefa 1 (M1)** — ou store compartilhado de jobs |
 | `PSEUDONYM_HMAC_KEY` vem do `.env` (deveria vir do COS/HSM) | **Sub-Tarefa 4 (M4)** |

@@ -48,9 +48,9 @@ class LanguageLevel(str, Enum):
 # ---------------------------------------------------------------------------
 
 class ConsentRequest(BaseModel):
-    cpf: str = Field(..., pattern=r"^\d{11}$", example="01234567890")
-    institutions: List[str] = Field(..., min_length=1, example=["bb", "itau"])
-    scopes: List[str] = Field(..., min_length=1, example=["debts:read"])
+    cpf: str = Field(..., pattern=r"^\d{11}$", json_schema_extra={"example": "01234567890"})
+    institutions: List[str] = Field(..., min_length=1, json_schema_extra={"example": ["bb", "itau"]})
+    scopes: List[str] = Field(..., min_length=1, json_schema_extra={"example": ["debts:read"]})
     expiration_days: int = Field(default=90, ge=1, le=365)
 
 
@@ -60,6 +60,17 @@ class ConsentResponse(BaseModel):
     redirect_url: str
     expires_at: str
     created_at: str
+
+
+class ConsentStatusResponse(BaseModel):
+    consent_id: str
+    status: ConsentStatus
+    institutions: List[str]
+    scopes: List[str]
+    created_at: Optional[str] = None
+    expires_at: Optional[str] = None
+    authorised_at: Optional[str] = None
+    revoked_at: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

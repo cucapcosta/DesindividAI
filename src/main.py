@@ -12,6 +12,8 @@ Documentação interativa (gerada automaticamente pelo FastAPI):
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, status
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -55,15 +57,34 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 # Routers
 # ---------------------------------------------------------------------------
-app.include_router(consent.router)       # M1 — POST /consent, DELETE /consent/{id}
+app.include_router(consent.router)       # M1 — POST /consent, GET/DELETE /consent/{id}
 app.include_router(debts.router)         # M2 — GET /debts
 app.include_router(simulation.router)    # M3 — POST /simulation
 app.include_router(recommendation.router)  # M3 — POST /recommendation
 
 # ---------------------------------------------------------------------------
-# Handler global para NotImplementedError
-# Retorna 501 enquanto os times não implementam os endpoints
+# Handlers de exceção
 # ---------------------------------------------------------------------------
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    """
+    Para rotas /consent*: devolve 400 INVALID_REQUEST listando só os nomes dos campos
+    inválidos (sem ecoar o valor — LGPD). Para outras rotas mantém o comportamento padrão
+    do FastAPI (422 com detalhe completo), preservando o contrato de M2/M3.
+    """
+    if request.url.path.startswith("/consent"):
+        fields = [".".join(str(loc) for loc in err.get("loc", [])) for err in exc.errors()]
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content=ErrorResponse(
+                code="INVALID_REQUEST",
+                message=f"Campos inválidos: {', '.join(fields)}",
+            ).model_dump(mode="json"),
+        )
+    return await request_validation_exception_handler(request, exc)
+
+
 @app.exception_handler(ServiceError)
 async def service_error_handler(request: Request, exc: ServiceError):
     return JSONResponse(

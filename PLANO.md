@@ -88,30 +88,31 @@
 
 ### Sub-Tarefa 1 — Fluxo de Consentimento e Gateway REST
 **Responsável:** M1
-**Status:** [x] done
+**Status:** [x] done (implementação dos endpoints — branch `feat/m1-consentimento`)
 
 #### Intent
-Definir como o cliente autoriza o acesso aos seus dados financeiros via Open Finance e como esse consentimento é validado em cada chamada ao gateway.
+Implementar os 4 endpoints de consentimento Open Finance que estavam como stubs, liberando o M2 de criar consentimentos à mão e o M3 de rodar com `REQUIRE_CONSENT=false`.
 
-#### Expected Outcomes
-- Contrato OpenAPI/Swagger documentando todos os endpoints da solução
-- Fluxo de consentimento OAuth2 desenhado (sequência de chamadas)
-- Política de autenticação configurada no IBM API Connect
-- Decisão documentada sobre ciclo de vida do token de consentimento (expiração, revogação)
+#### Entregáveis de código
+- [`src/services/consent_service.py`](src/services/consent_service.py) — regras, validação, pseudonimização, auditoria, cliente de revogação
+- [`src/api/routers/consent.py`](src/api/routers/consent.py) — 4 rotas implementadas (POST, GET /callback, GET /{id}, DELETE)
+- [`src/api/models.py`](src/api/models.py) — `ConsentStatusResponse` adicionado; `Field(example=…)` → `json_schema_extra`
+- [`src/main.py`](src/main.py) — handler de `RequestValidationError` para `/consent*` (400 sem ecoar CPF)
+- [`tests/test_consent_api.py`](tests/test_consent_api.py) — 29 testes (create, callback, status, revoke, integração M2/M3, lgpd)
+- [`openapi/openapi.yaml`](openapi/openapi.yaml) — `/consent/callback`, `GET /consent/{consentId}`, `ConsentStatusResponse`
+- [`.env.example`](.env.example) — bloco M1 (`OPEN_FINANCE_AUTH_SANDBOX`, `PUBLIC_BASE_URL`, `OPEN_FINANCE_AUTHORIZE_URL`, `OPEN_FINANCE_CLIENT_ID`, `OPEN_FINANCE_REDIRECT_URI`, `OAUTH_REVOKE_URL`)
 
-#### Todo List
-- [x] Estudar especificação Open Finance Brasil (fase 2 — dados de crédito)
-- [x] Mapear endpoints necessários: `/consent`, `/debts`, `/simulation`, `/recommendation`
-- [x] Desenhar diagrama de sequência do fluxo de consentimento OAuth2
-- [x] Definir contrato OpenAPI 3.0 com schemas de request/response para cada endpoint
-- [x] Especificar política de rate limiting, autenticação e CORS no IBM API Connect
-- [x] Documentar ciclo de vida do consentimento (TTL, revogação, re-autorização)
-
-#### Entregáveis
-- [`openapi/openapi.yaml`](openapi/openapi.yaml) — Contrato OpenAPI 3.0 completo
-- [`docs/m1-consent-flow.md`](docs/m1-consent-flow.md) — Diagrama de sequência OAuth2 FAPI
-- [`docs/m1-api-connect-policies.md`](docs/m1-api-connect-policies.md) — Políticas API Connect
-- [`docs/m1-consent-lifecycle.md`](docs/m1-consent-lifecycle.md) — Ciclo de vida do consentimento
+#### Pendências que continuam abertas
+| Item | Onde |
+|---|---|
+| FAPI completo: PKCE S256, request object JWT (PS256), mTLS/DPoP, troca `code → token` | API Connect (configuração) |
+| Introspecção do token e validação de escopo no gateway | API Connect |
+| Vincular titular do token a `snapshot_id`/`simulation_id` (IDOR registrado pelo M3) | API Connect + M3 |
+| Afinidade por `consent_id` no gateway (jobs `202` do `GET /debts` em memória) | API Connect |
+| Rate limit (`429`) e `401` | API Connect |
+| Ligar `REQUIRE_CONSENT=true` por padrão e aposentar `scripts/seed_test_consent.py` | Decisão do time após o merge |
+| Limpeza de AWAITING/REJECTED antigos (retention.py não apaga REJECTED) | Retenção do M4 |
+| Bug em `retention.py:358` — destrói cofre do titular se um consentimento antigo for apagado enquanto outro está AUTHORISED | M4 |
 
 #### Relevant Context
 - Regulação: Open Finance Brasil — [openfinancebrasil.org.br](https://openfinancebrasil.org.br)
