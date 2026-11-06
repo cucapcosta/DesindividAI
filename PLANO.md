@@ -119,6 +119,7 @@ Definir como o cliente autoriza o acesso aos seus dados financeiros via Open Fin
 - [`src/api/routers/consent.py`](src/api/routers/consent.py) — 4 rotas implementadas (POST, GET /callback, GET /{id}, DELETE)
 - [`src/api/models.py`](src/api/models.py) — `ConsentStatusResponse`; `Field(example=…)` → `json_schema_extra`; `cpf` pattern ASCII-only
 - [`src/main.py`](src/main.py) — handler de `RequestValidationError` para `/consent` e `/consent/*` (400 sem ecoar CPF)
+- [`src/core/channel_auth.py`](src/core/channel_auth.py) — validação do token IAM do canal em POST/GET/DELETE `/consent` (sem API Connect)
 - [`src/storage/store.py`](src/storage/store.py) — `put(..., rev=...)`: escrita condicional (409 `CONFLICT` se outra escrita chegou antes); sem `rev`, comportamento anterior
 - [`tests/test_consent_api.py`](tests/test_consent_api.py) — 72 casos de teste (create, callback, status, revoke, concorrência, cofre e auditoria, integração M2/M3, lgpd, openapi contract)
 - [`.env.example`](.env.example) — bloco M1 (`OPEN_FINANCE_AUTH_SANDBOX`, `PUBLIC_BASE_URL`, `OPEN_FINANCE_AUTHORIZE_URL`, `OPEN_FINANCE_CLIENT_ID`, `OPEN_FINANCE_REDIRECT_URI`, `OAUTH_REVOKE_URL`)
@@ -131,10 +132,8 @@ Definir como o cliente autoriza o acesso aos seus dados financeiros via Open Fin
 | Introspecção do token e validação de escopo no gateway | API Connect |
 | Vincular titular do token a `snapshot_id`/`simulation_id` (IDOR registrado pelo M3) | API Connect + M3 |
 | Afinidade por `consent_id` no gateway (jobs `202` do `GET /debts` em memória) | API Connect |
-| Rate limit (`429`) e `401` | API Connect |
-| Ligar `REQUIRE_CONSENT=true` por padrão e aposentar `scripts/seed_test_consent.py` | Decisão do time após o merge |
+| Rate limit (`429`); token do titular (`openfinance_oauth2`) nos endpoints de dados | API Connect / Authorization Server |
 | Contrato exato do endpoint de revogação de token do IBM API Connect (B3); revogar também no erase LGPD e na expiração (regra c) | API Connect + M4 |
-| Unificar o código 403 de consentimento não `AUTHORISED`: `CONSENT_NOT_AUTHORISED` no `GET /debts` × `CONSENT_REQUIRED` no `/simulation` e `/recommendation` (o contrato documenta os dois) | M2 + M3 |
 
 #### Relevant Context
 - Regulação: Open Finance Brasil — [openfinancebrasil.org.br](https://openfinancebrasil.org.br)
@@ -303,7 +302,7 @@ Projetar a camada de dados garantindo que informações pessoais financeiras sej
 | Pseudonimização | HMAC-SHA256 + chave mestra | Pseudonimização determinística (permite correlação interna) |
 | Retenção no Cloudant | Job de expurgo idempotente (`src/privacy/retention.py`) | Cloudant não tem TTL nativo; job substitui os índices TTL do MongoDB previstos no M1 |
 | Gateway (produção) | IBM API Connect | Padrão IBM, suporte a FAPI (Financial-grade API), políticas OAuth2 nativas |
-| Gateway (hackathon) | **Não provisionado** — contrato em `openapi/openapi.yaml`, políticas em `docs/m1-api-connect-policies.md` | API Connect fora da conta do hackathon. Sem gateway, nada valida token: o backend confia que só o gateway o chama. Canal usa client credentials (`consent:*`); titular usa authorization code + PKCE (dados) |
+| Gateway (hackathon) | **Não provisionado** — contrato em `openapi/openapi.yaml`, políticas em `docs/m1-api-connect-policies.md` | API Connect fora da conta do hackathon. O backend valida o token IAM do canal nas rotas `/consent` (`src/core/channel_auth.py`) e exige consentimento em `/debts`, `/simulation` e `/recommendation` (`REQUIRE_CONSENT=true` por padrão). O token do titular nos endpoints de dados depende de um Authorization Server, indisponível na conta |
 | Governança | watsonx.governance | Rastreabilidade de decisões de IA exigida por regulação financeira |
 | Motor de simulação | AI Service Python no watsonx.ai | Lógica financeira pura, sem dependência de LLM, reutilizável como endpoint REST |
 | Canal de engajamento | Fora do escopo | API genérica OpenAPI — qualquer canal pode integrar |

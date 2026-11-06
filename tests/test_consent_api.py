@@ -750,7 +750,7 @@ def test_require_consent_flow(client, monkeypatch, store):
     # bloqueia /simulation
     resp_after = client.post("/simulation", json={"snapshot_id": snapshot_id, "monthly_budget": 500.0})
     assert resp_after.status_code == 403
-    assert resp_after.json()["code"] == "CONSENT_REQUIRED"
+    assert resp_after.json()["code"] == "CONSENT_NOT_AUTHORISED"
 
 
 # ===========================================================================

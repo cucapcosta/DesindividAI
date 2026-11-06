@@ -40,14 +40,17 @@ async def load_snapshot(store: DocumentStore, snapshot_id: UUID) -> dict:
 async def ensure_consent(store: DocumentStore, *, consent_id: str | None, pseudonym_id: str, scope: str) -> None:
     """
     Exige consentimento vigente (AUTHORISED, com o escopo do endpoint e não expirado), mesma regra do
-    GET /debts. Só é imposto com REQUIRE_CONSENT=true: o /consent já persiste consentimentos, mas
-    ligar a exigência por padrão é decisão do time (snapshots antigos e ambiente de demonstração).
+    GET /debts. Ligado por padrão; REQUIRE_CONSENT=false desliga (só para demonstração com snapshots
+    sem consentimento).
+
+    Códigos: CONSENT_REQUIRED quando não há consentimento aplicável (inexistente ou de outro titular);
+    CONSENT_NOT_AUTHORISED, INSUFFICIENT_SCOPE e CONSENT_EXPIRED como no GET /debts.
 
     O consentimento é o do próprio snapshot (consent_id): se o titular revogar depois da coleta, a
     simulação e a recomendação deixam de ser servidas. Snapshots sem consent_id (anteriores ao
     Agente 1) caem na busca por titular.
     """
-    if not env_bool("REQUIRE_CONSENT"):
+    if not env_bool("REQUIRE_CONSENT", default=True):
         return
     if consent_id:
         found = await store.find(consents_db(), {"consent_id": consent_id}, limit=1)
@@ -59,13 +62,13 @@ async def ensure_consent(store: DocumentStore, *, consent_id: str | None, pseudo
     if consent.get("pseudonym_id") and pseudonym_id and consent["pseudonym_id"] != pseudonym_id:
         raise ServiceError(403, "CONSENT_REQUIRED", "O consentimento não pertence ao titular do snapshot.")
     if consent.get("status") != "AUTHORISED":
-        raise ServiceError(403, "CONSENT_REQUIRED", f"Consentimento com status {consent.get('status')}.")
+        raise ServiceError(403, "CONSENT_NOT_AUTHORISED", f"Consentimento com status {consent.get('status')}.")
     if scope not in (consent.get("scopes") or []):
         raise ServiceError(403, "INSUFFICIENT_SCOPE", f"Consentimento não inclui o escopo {scope}.")
     try:
         expired = parse_utc(consent["expires_at"]) <= datetime.now(timezone.utc)
     except (KeyError, TypeError, ValueError) as exc:
-        raise ServiceError(403, "CONSENT_REQUIRED", "Consentimento sem data de expiração válida.") from exc
+        raise ServiceError(403, "CONSENT_NOT_AUTHORISED", "Consentimento sem data de expiração válida.") from exc
     if expired:
         raise ServiceError(403, "CONSENT_EXPIRED", "Consentimento expirado.")
 

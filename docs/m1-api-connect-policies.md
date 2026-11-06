@@ -60,6 +60,24 @@ security:
 `GET /consent/callback` não exige token: é o retorno do Authorization Server, validado
 pelo `state` de uso único no backend.
 
+### Hackathon: validação do token do canal no backend
+
+Sem API Connect na conta, o backend valida o token do canal nas rotas de consentimento
+(`src/core/channel_auth.py`):
+
+| Item | Valor |
+|---|---|
+| Token | IAM do IBM Cloud, obtido pelo canal com a API key do Service ID dele (`POST https://iam.cloud.ibm.com/identity/token`) |
+| Assinatura | RS256, conferida pelas chaves públicas do IAM (`https://iam.cloud.ibm.com/identity/keys`, cache de 1 h; releitura por `kid` novo no máximo 1×/min) |
+| Claims | `iss = https://iam.cloud.ibm.com/identity`, `exp`, `iat`; `iam_id` ∈ `CHANNEL_IAM_IDS` |
+| Quando é exigido | Por padrão com `APP_ENV=production`; fora dela, com `REQUIRE_CHANNEL_AUTH=true` |
+| Falhas | `401 UNAUTHORIZED`; exigido sem `CHANNEL_IAM_IDS` → `503 NOT_CONFIGURED`; JWKS indisponível → `503 SERVICE_UNAVAILABLE` |
+
+Tokens IAM não carregam `consent:read`/`consent:write`: no hackathon, estar em
+`CHANNEL_IAM_IDS` equivale a ter os dois escopos. O token do titular (`openfinance_oauth2`)
+continua dependendo de um Authorization Server, indisponível na conta. Quando o API Connect
+existir, ele valida na borda e esta checagem vira defesa em profundidade.
+
 O API Connect valida o JWT Bearer token e os scopes **antes** de rotear para o backend.
 Requisições sem token ou com scope errado retornam `401 Unauthorized` ou `403 Forbidden`
 diretamente no gateway, sem atingir os agentes LangChain.

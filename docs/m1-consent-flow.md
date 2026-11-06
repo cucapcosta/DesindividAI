@@ -86,7 +86,7 @@ Cliente (App/Canal)          API Connect (Gateway)          Auth Server (FAPI)  
 
 ### 1. Criação do Consentimento (`POST /consent`)
 - O canal (app/portal) envia CPF, lista de instituições e escopos desejados.
-- O API Connect valida o token do canal (`channel_oauth2`, client credentials, escopo `consent:write`). O titular ainda não tem token: ele só é emitido depois da autorização. *(pendência de configuração)*
+- O token do canal (`channel_oauth2`, escopo `consent:write`) é validado pelo API Connect em produção; no hackathon, o backend valida o token IAM do canal (ver `docs/m1-api-connect-policies.md`). O titular ainda não tem token: ele só é emitido depois da autorização.
 - O servidor cifra o CPF no cofre de identidade do M4 (`identity_vault`, envelope encryption), que devolve o `pseudonym_id`; o CPF não vai para nenhum outro lugar.
 - Cria o registro em `consent_registry` no Cloudant com `status: AWAITING_AUTHORISATION` e o `pseudonym_id`.
 - Retorna `redirect_url` apontando para o portal Open Finance da instituição.

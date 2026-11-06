@@ -4,6 +4,7 @@ Responsável: M1
 
 Rotas finas — regras de negócio em src/services/consent_service.py.
 ServiceError levanta para o handler global em main.py.
+POST/GET/DELETE exigem o token IAM do canal (src/core/channel_auth.py); o callback não.
 """
 
 from uuid import UUID
@@ -11,6 +12,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, status
 
 from src.api.models import ConsentRequest, ConsentResponse, ConsentStatusResponse, ErrorResponse
+from src.core.channel_auth import require_channel_token
 from src.services import consent_service
 from src.storage.store import DocumentStore, get_store
 
@@ -22,9 +24,10 @@ router = APIRouter(prefix="/consent", tags=["Consent"])
     response_model=ConsentResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Criar consentimento Open Finance",
+    dependencies=[Depends(require_channel_token)],
     responses={
         400: {"model": ErrorResponse, "description": "INVALID_REQUEST | INVALID_CPF | INVALID_SCOPE"},
-        401: {"model": ErrorResponse, "description": "Token ausente ou inválido"},
+        401: {"model": ErrorResponse, "description": "Token do canal ausente, inválido ou de canal não autorizado (UNAUTHORIZED)"},
         429: {"model": ErrorResponse, "description": "Rate limit excedido"},
         503: {"model": ErrorResponse, "description": "SERVICE_UNAVAILABLE | NOT_CONFIGURED"},
     },
@@ -78,9 +81,10 @@ async def consent_callback(
     response_model=ConsentStatusResponse,
     status_code=status.HTTP_200_OK,
     summary="Status do consentimento",
+    dependencies=[Depends(require_channel_token)],
     responses={
         400: {"model": ErrorResponse, "description": "INVALID_REQUEST"},
-        401: {"model": ErrorResponse, "description": "Token ausente ou inválido"},
+        401: {"model": ErrorResponse, "description": "Token do canal ausente, inválido ou de canal não autorizado (UNAUTHORIZED)"},
         404: {"model": ErrorResponse, "description": "CONSENT_NOT_FOUND"},
         503: {"model": ErrorResponse, "description": "SERVICE_UNAVAILABLE"},
     },
@@ -97,9 +101,10 @@ async def get_consent_status(
     "/{consent_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Revogar consentimento",
+    dependencies=[Depends(require_channel_token)],
     responses={
         400: {"model": ErrorResponse, "description": "INVALID_REQUEST"},
-        401: {"model": ErrorResponse, "description": "Token ausente ou inválido"},
+        401: {"model": ErrorResponse, "description": "Token do canal ausente, inválido ou de canal não autorizado (UNAUTHORIZED)"},
         404: {"model": ErrorResponse, "description": "CONSENT_NOT_FOUND"},
         409: {"model": ErrorResponse, "description": "CONSENT_INVALID_STATE (escritas concorrentes)"},
         503: {"model": ErrorResponse, "description": "SERVICE_UNAVAILABLE"},
