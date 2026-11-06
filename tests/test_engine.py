@@ -4,7 +4,7 @@ from src.agents.agent1.analysis import analyze_debt
 from src.agents.agent1.domain import DebtSource, RawDebt
 from src.api.models import ProductType
 from src.simulation.engine import (
-    CONSOLIDATED_DEBT_ID, DEFAULT_TERM_MONTHS, DIVERGENCE_FACTOR, MAX_MONTHS, simulate,
+    CONSOLIDATED_DEBT_ID, DEFAULT_TERM_MONTHS, DIVERGENCE_FACTOR, MAX_MONTHS, minimum_payments_total, simulate,
 )
 from tests.conftest import DEBTS
 
@@ -150,3 +150,41 @@ def test_unknown_term_uses_default_in_consolidation():
 def test_malformed_debt_raises_value_error(bad):
     with pytest.raises(ValueError):
         simulate([bad], 1000)
+
+
+# --- Fix 1: orçamento abaixo dos mínimos --------------------------------------------------
+
+def test_minimum_payments_total_correct():
+    # AMORTIZING: mínimos são 600, 400, 500 → total = 1500
+    total = minimum_payments_total(AMORTIZING)
+    assert total == pytest.approx(1500.0, abs=0.01)
+
+
+def test_budget_below_minimums_warns_in_all_three_scenarios():
+    # AMORTIZING tem mínimos de 1500; orçamento 1000 está abaixo
+    scenarios = by_id(simulate(AMORTIZING, 1000))
+    for sid in ("aggressive", "consolidation", "minimum_viable"):
+        desc = scenarios[sid]["description"]
+        assert "Atenção: o orçamento" in desc, f"Aviso ausente no cenário {sid}"
+        assert "R$ 1000.00" in desc
+        assert "R$ 1500.00" in desc
+        assert "renegociar" in desc
+
+
+def test_budget_sufficient_no_warning():
+    # Orçamento 1500 cobre exatamente os mínimos de AMORTIZING (1500); não deve avisar
+    scenarios = by_id(simulate(AMORTIZING, 1500))
+    for sid in ("aggressive", "consolidation", "minimum_viable"):
+        assert "Atenção: o orçamento" not in scenarios[sid]["description"]
+
+
+def test_budget_slightly_below_warns_with_n_short():
+    # Com 1000, o motor paga: dívida 600 (maior CET) em cheio, dívida 400 parcialmente (400),
+    # dívida 500 fica sem pagamento. N_short >= 1.
+    scenarios = by_id(simulate(AMORTIZING, 1000))
+    desc = scenarios["aggressive"]["description"]
+    # N >= 1 dívida(s) sem mínimo
+    assert "dívida(s) ficariam" in desc
+    # Nenhum nome de instituição deve aparecer (segurança contra injeção)
+    for name in ("itau", "bb", "caixa"):
+        assert name not in desc.lower()

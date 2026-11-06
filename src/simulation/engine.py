@@ -90,6 +90,11 @@ def _loans(debts: list[dict]) -> list[_Loan]:
     return [l for l in (_parse_loan(d) for d in debts) if l.balance > EPS]
 
 
+def minimum_payments_total(debts: list[dict]) -> float:
+    """Soma dos pagamentos mínimos de todas as dívidas com saldo > 0 (inclui mínimos estimados pelo motor)."""
+    return sum(l.min_payment for l in _loans(debts))
+
+
 def _run(loans: list[_Loan], allocate: Allocator, max_months: int = MAX_MONTHS):
     """Simula mês a mês. Retorna (plano, juros totais, quitou?)."""
     plan: list[dict[str, float]] = []
@@ -203,6 +208,21 @@ def simulate(debts: list[dict], monthly_budget: float, bb_cet_annual: Optional[f
         if assumed else ""
     )
 
+    # Aviso de orçamento abaixo dos mínimos
+    min_total = minimum_payments_total(debts)
+    budget_warning = ""
+    if monthly_budget < min_total - EPS:
+        # Conta quantas dívidas ficam sem o mínimo no mês 1 do cenário agressivo (pior caso)
+        agg_loans = _loans(debts)
+        agg_alloc = _allocator(monthly_budget, lambda ordered: [l.id for l in ordered])
+        agg_m1 = agg_alloc(agg_loans)
+        n_short = sum(1 for l in agg_loans if agg_m1.get(l.id, 0.0) < l.min_payment - EPS)
+        budget_warning = (
+            f" Atenção: o orçamento (R$ {monthly_budget:.2f}) é menor que a soma dos pagamentos mínimos"
+            f" (R$ {min_total:.2f}); {n_short} dívida(s) ficariam sem o pagamento mínimo no mês 1,"
+            f" o que significa atraso e encargos. Considere renegociar."
+        )
+
     # 1) Agressivo
     aggressive = _run(_loans(debts), _allocator(monthly_budget, lambda ordered: [l.id for l in ordered]))
 
@@ -239,13 +259,14 @@ def simulate(debts: list[dict], monthly_budget: float, bb_cet_annual: Optional[f
     return [
         _scenario(
             "aggressive", "Agressivo",
-            "Paga os mínimos de todas as dívidas e direciona todo o orçamento restante à dívida de maior CET.",
+            "Paga os mínimos de todas as dívidas e direciona todo o orçamento restante à dívida de maior CET."
+            + budget_warning,
             aggressive, baseline_interest, note,
         ),
-        _scenario("consolidation", "Consolidação", c_desc, consolidation, baseline_interest, note),
+        _scenario("consolidation", "Consolidação", c_desc + budget_warning, consolidation, baseline_interest, note),
         _scenario(
             "minimum_viable", "Mínimo viável",
-            "Paga apenas os mínimos e usa o excedente só para quitar a dívida mais cara.",
+            "Paga apenas os mínimos e usa o excedente só para quitar a dívida mais cara." + budget_warning,
             minimum, baseline_interest, note,
         ),
     ]

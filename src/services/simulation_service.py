@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 from src.api.models import SimulationResponse
@@ -11,6 +11,9 @@ from src.core.dates import parse_utc
 from src.core.errors import ServiceError
 from src.simulation.client import run_engine
 from src.storage.store import DocumentStore
+
+# Retenção padrão para documentos de decisão sem expires_at explícito (LGPD Art. 15/16).
+DECISION_RETENTION_DAYS = 90
 
 
 def now_iso() -> str:
@@ -84,6 +87,13 @@ async def create_simulation(store: DocumentStore, snapshot_id: UUID, monthly_bud
         scenarios=scenarios,
         generated_at=now_iso(),
     )
+    # expires_at: herdar do snapshot; se ausente (snapshot legado), agora + 90 dias
+    snap_expires = snapshot.get("expires_at")
+    if snap_expires:
+        expires_at = snap_expires
+    else:
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=DECISION_RETENTION_DAYS)).isoformat()
+
     await store.put(
         decisions_db(),
         f"simulation:{response.simulation_id}",
@@ -92,6 +102,7 @@ async def create_simulation(store: DocumentStore, snapshot_id: UUID, monthly_bud
             "pseudonym_id": snapshot.get("pseudonym_id"),
             "consent_id": snapshot.get("consent_id"),
             "monthly_budget": monthly_budget,
+            "expires_at": expires_at,
             **response.model_dump(mode="json"),
         },
     )

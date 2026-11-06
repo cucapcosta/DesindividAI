@@ -12,7 +12,7 @@ from src.api.models import LanguageLevel, RecommendationResponse, ScenarioId, Si
 from src.core.errors import ServiceError
 from src.services.governance import record_trace
 from src.services.simulation_service import decisions_db, ensure_consent, load_snapshot, now_iso
-from src.simulation.engine import CONSOLIDATED_DEBT_ID
+from src.simulation.engine import CONSOLIDATED_DEBT_ID, minimum_payments_total
 from src.storage.store import DocumentStore
 
 
@@ -59,12 +59,24 @@ async def create_recommendation(
     except ServiceError:
         debts = []  # sem snapshot ainda dá para explicar; só ficam sem "primeiros passos"
 
+    # Calcular flag de orçamento abaixo dos mínimos (Fix 1c)
+    monthly_budget = sim.get("monthly_budget")
+    if debts and monthly_budget is not None:
+        min_total: float | None = minimum_payments_total(debts)
+        budget_below = monthly_budget < min_total - 0.005  # EPS
+    else:
+        # fallback: qualquer cenário com economia negativa indica orçamento insuficiente
+        min_total = None
+        budget_below = any(s.total_savings_vs_minimum < 0 for s in scenarios)
+
     try:
         result = await build_chain(llm).ainvoke(
             {
                 "scenarios": scenarios,
                 "language_level": language_level,
                 "first_steps": _first_steps(scenarios, debts),
+                "orcamento_abaixo_dos_minimos": budget_below,
+                "soma_dos_minimos": min_total,
             }
         )
     except Exception as exc:  # falha do provedor LLM
@@ -81,6 +93,8 @@ async def create_recommendation(
         recommended_scenario=result["recommended"].value,
         prompt=result["prompt_text"],
         output=result["explanation"],
+        expires_at=sim.get("expires_at"),
+        consent_id=sim.get("consent_id"),
     )
     return RecommendationResponse(
         recommendation_id=recommendation_id,

@@ -65,21 +65,36 @@ def granite_check() -> None:
 
 def api_flow() -> None:
     client = TestClient(app)  # dependências reais: Cloudant + Granite
-    sim = client.post("/simulation", json={"snapshot_id": SAMPLE_SNAPSHOT_ID, "monthly_budget": 1500})
-    if not check("POST /simulation", sim.status_code == 200, f"{sim.status_code} {sim.text[:200]}"):
-        return
-    body = sim.json()
-    check("3 cenários devolvidos", len(body["scenarios"]) == 3)
-    for level in ("simple", "technical"):
-        rec = client.post("/recommendation", json={"simulation_id": body["simulation_id"], "language_level": level})
-        if not check(f"POST /recommendation ({level})", rec.status_code == 200, f"{rec.status_code} {rec.text[:200]}"):
-            continue
-        data = rec.json()
-        check(f"explicação não vazia ({level})", len(data["explanation"].strip()) > 40)
-        trace = asyncio.run(get_store().get(decisions_db(), data["trace_id"]))
-        check(f"trace persistido ({level})", bool(trace and trace.get("output")))
-        if level == "simple":
-            print("\n--- explicação (simple) ---\n" + data["explanation"] + "\n---------------------------\n")
+    created_doc_ids: list[str] = []
+    try:
+        sim = client.post("/simulation", json={"snapshot_id": SAMPLE_SNAPSHOT_ID, "monthly_budget": 1500})
+        if not check("POST /simulation", sim.status_code == 200, f"{sim.status_code} {sim.text[:200]}"):
+            return
+        body = sim.json()
+        created_doc_ids.append(f"simulation:{body['simulation_id']}")
+        check("3 cenários devolvidos", len(body["scenarios"]) == 3)
+        for level in ("simple", "technical"):
+            rec = client.post("/recommendation", json={"simulation_id": body["simulation_id"], "language_level": level})
+            if not check(f"POST /recommendation ({level})", rec.status_code == 200, f"{rec.status_code} {rec.text[:200]}"):
+                continue
+            data = rec.json()
+            created_doc_ids.append(data["trace_id"])
+            check(f"explicação não vazia ({level})", len(data["explanation"].strip()) > 40)
+            trace = asyncio.run(get_store().get(decisions_db(), data["trace_id"]))
+            check(f"trace persistido ({level})", bool(trace and trace.get("output")))
+            if level == "simple":
+                print("\n--- explicação (simple) ---\n" + data["explanation"] + "\n---------------------------\n")
+    finally:
+        store = get_store()
+        for doc_id in created_doc_ids:
+            try:
+                deleted = asyncio.run(store.delete(decisions_db(), doc_id))
+                if deleted:
+                    print(f"[OK] limpeza {doc_id}")
+                else:
+                    print(f"[OK] limpeza {doc_id} (já não existia)")
+            except Exception as exc:
+                print(f"[FALHA] limpeza {doc_id} — {exc}")
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@ class DocumentStore(Protocol):
     async def get(self, db: str, doc_id: str) -> Optional[dict[str, Any]]: ...
     async def put(self, db: str, doc_id: str, doc: dict[str, Any]) -> None: ...
     async def find(self, db: str, selector: dict[str, Any], limit: int = 10) -> list[dict[str, Any]]: ...
+    async def delete(self, db: str, doc_id: str) -> bool: ...
 
 
 class MemoryStore:
@@ -39,6 +40,13 @@ class MemoryStore:
         docs = [d for d in self._dbs.get(db, {}).values()
                 if all(d.get(k) == v for k, v in selector.items())]
         return [dict(d) for d in docs[:limit]]
+
+    async def delete(self, db, doc_id):
+        db_store = self._dbs.get(db, {})
+        if doc_id not in db_store:
+            return False
+        del db_store[doc_id]
+        return True
 
 
 class CloudantStore:
@@ -90,6 +98,19 @@ class CloudantStore:
         resp = await self._request("POST", f"{quote(db, safe='')}/_find", json={"selector": selector, "limit": limit})
         self._check(resp)
         return resp.json().get("docs", [])
+
+    async def delete(self, db, doc_id):
+        resp = await self._request("GET", f"{quote(db, safe='')}/{quote(doc_id, safe='')}")
+        if resp.status_code == 404:
+            return False
+        self._check(resp)
+        rev = resp.json()["_rev"]
+        resp = await self._request(
+            "DELETE", f"{quote(db, safe='')}/{quote(doc_id, safe='')}",
+            params={"rev": rev},
+        )
+        self._check(resp)
+        return True
 
 
 _store: Optional[DocumentStore] = None

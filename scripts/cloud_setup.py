@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from datetime import datetime, timedelta, timezone
 
 from src.core.config import consents_db, decisions_db, env, snapshots_db
 from src.storage.store import CloudantStore
@@ -43,6 +44,7 @@ async def setup(store: CloudantStore) -> None:
     for db in sorted(dbs):
         created = await store.ensure_db(db)
         print(f"[OK] database {db}: {'criado' if created else 'já existia'}")
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
     await store.put(
         snapshots_db(),
         SAMPLE_SNAPSHOT_ID,
@@ -52,6 +54,8 @@ async def setup(store: CloudantStore) -> None:
             "snapshot_id": SAMPLE_SNAPSHOT_ID,
             "total_outstanding": sum(d["outstanding_balance"] for d in SAMPLE_DEBTS),
             "generated_at": "2026-01-01T00:00:00+00:00",
+            "expires_at": expires_at,
+            "test_fixture": True,
             "debts": SAMPLE_DEBTS,
         },
     )
