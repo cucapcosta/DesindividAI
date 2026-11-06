@@ -118,7 +118,7 @@ def real_env():
         from src.agents.recommendation_agent import clear_llm_cache
         from src.privacy.audit import get_audit_logger, get_audit_repository
         from src.privacy.identity_vault import get_vault_repository
-        from src.privacy.pseudonymization import _reset_key_cache
+        from src.privacy.pseudonymization import reset_key_cache as _reset_key_cache
         from src.privacy.retention_store import get_retention_store
 
         get_repository.cache_clear()

@@ -216,7 +216,7 @@ Projetar a camada de dados garantindo que informações pessoais financeiras sej
 - Arquitetura do Cloudant com separação de coleções sensíveis e pseudonimizadas
 - Fluxo de gestão da chave de re-identificação (hackathon: env + `KeyProvider`; produção: Secrets Manager + HSM, Trusted Profile)
 - Política de retenção e deleção de dados via job de expurgo idempotente (direito ao esquecimento — LGPD Art. 18)
-- Trilha de auditoria imutável em `audit_trail` + COS (`audit/`)
+- Trilha de auditoria append-only pela aplicação em `audit_trail` + COS (`audit/`) (o código só insere; não há update/delete; para proteção plena em produção: COS com Object Lock/WORM, hash chain e credencial exclusiva de escrita)
 - Mapeamento de dados pessoais (ROPA — Record of Processing Activities)
 
 #### Todo List
@@ -227,9 +227,9 @@ Projetar a camada de dados garantindo que informações pessoais financeiras sej
   - Coleção `consent_registry` — registro de consentimentos (sem dados financeiros)
   - Coleção `identity_vault` — CPF cifrado com DEK por titular + envelope KEK
   - Coleção `audit_trail` — eventos e traces (nunca expurgada)
-- [x] Especificar fluxo de acesso à chave: `EnvKeyProvider` (hackathon); esqueleto `SecretsManagerKeyProvider` (produção) com role IAM `SecretsReader`
+- [x] Especificar fluxo de acesso à chave: `EnvKeyProvider` (hackathon); produção deve implementar um KeyProvider sobre o Secrets Manager com role IAM `SecretsReader`
 - [x] Definir política de retenção: job de expurgo idempotente (`src/privacy/retention.py`) sobre `expires_at` / `awaiting_expires_at`
-- [x] Registrar cada operação sobre dados do titular na trilha de auditoria (`src/privacy/audit.py`); `WatsonxGovernanceSink` como esqueleto (plano / produção)
+- [x] Registrar cada operação sobre dados do titular na trilha de auditoria (`src/privacy/audit.py`); produção deve implementar um GovernanceSink para o watsonx.governance (plano)
 - [x] Documentar ROPA (mapeamento de tratamento de dados pessoais) conforme LGPD
 - [x] Definir alertas de acesso anômalo — especificados em `docs/m4-auditoria-governanca.md` (plano / produção)
 - [x] Ligar `resolve_for_serasa` ao cliente Serasa real (Parte B — `HttpSerasaClient` real usa `resolver` injetável; CPF apenas no corpo do POST)
@@ -240,7 +240,7 @@ Projetar a camada de dados garantindo que informações pessoais financeiras sej
 - [x] `vault.reveal` ligado em produção (corrigido `_default_audit` tolerante) — Parte B
 
 #### Entregáveis
-- [`src/privacy/key_provider.py`](src/privacy/key_provider.py) — `KeyProvider`, `EnvKeyProvider`, `SecretsManagerKeyProvider` (esqueleto)
+- [`src/privacy/key_provider.py`](src/privacy/key_provider.py) — `KeyProvider`, `EnvKeyProvider`
 - [`src/privacy/pseudonymization.py`](src/privacy/pseudonymization.py) — HMAC-SHA256 + `current_key_version()` + `pseudonymize_cpf_with_version()`
 - [`src/privacy/identity_vault.py`](src/privacy/identity_vault.py) — cofre AES-256-GCM com DEK por titular; `store`, `reveal` (auditado), `shred`, `resolve_for_serasa`
 - [`src/privacy/pii_guard.py`](src/privacy/pii_guard.py) — `assert_no_pii()` recursivo; detecta CPF em 4 formatos (0 falsos positivos em 5.000 textos financeiros)

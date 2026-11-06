@@ -33,7 +33,7 @@ Este documento é o Registro de Operações de Tratamento de Dados Pessoais (ROP
 | **Destinatários (compartilhamento)** | Open Finance (instituições financeiras autorizadas pelo titular); Serasa Experian (consulta de score/restrições — **Implementado (Parte B):** `HttpSerasaClient` real envia o CPF resolvido pelo cofre somente no corpo do POST, nunca em URL ou log; sandbox continua enviando apenas `pseudonym_id`); IBM Cloud (processamento e armazenamento sob DPA) |
 | **Transferência internacional** | Dados hospedados em IBM Cloud us-south (Dallas, EUA) — requer cláusula contratual padrão ou equivalente nos termos do Art. 33 LGPD / ANPD |
 | **Retenção** | Snapshot: `expires_at` herdado do snapshot (ou `now + DECISION_RETENTION_DAYS` para snapshots legados); Decisões (`decision_traces`): `expires_at` do documento, antecipado para `revoked_at + 90 dias` se o consentimento for revogado (regra a2); Consentimento REVOKED: até `revoked_at + 90 dias`; Consentimento AWAITING: 10 minutos; cofre de identidade: até crypto-shredding |
-| **Medidas de segurança** | Pseudonimização HMAC-SHA256; AES-256-GCM (DEK por titular + envelope KEK); guarda de PII antes de persistir (M4 e M3); trilha de auditoria imutável; acesso ao CPF somente via `vault.reveal()` auditado; endpoints internos protegidos por token HMAC; hashes adicionais `prompt_sha256`/`output_sha256` nos traces para integridade (texto completo mantido para auditoria; evento de auditoria carrega apenas os hashes) |
+| **Medidas de segurança** | Pseudonimização HMAC-SHA256; AES-256-GCM (DEK por titular + envelope KEK); guarda de PII antes de persistir (M4 e M3); trilha de auditoria append-only pela aplicação (o código só insere; não há update/delete — para proteção plena em produção: COS com Object Lock/WORM, hash chain entre eventos e credencial exclusiva de escrita separada da CLOUDANT_APIKEY); acesso ao CPF somente via `vault.reveal()` auditado; endpoints internos protegidos por token HMAC; hashes adicionais `prompt_sha256`/`output_sha256` nos traces para integridade (texto completo mantido para auditoria; evento de auditoria carrega apenas os hashes) |
 
 ---
 
@@ -58,7 +58,7 @@ Este documento é o Registro de Operações de Tratamento de Dados Pessoais (ROP
 | Atributo | Detalhamento |
 |---|---|
 | **Nome da atividade** | Atendimento a pedido de apagamento do titular |
-| **Finalidade** | Cumprir o direito de apagamento; remover dados do titular de todos os bancos e tornar o CPF irrecuperável |
+| **Finalidade** | Cumprir o direito de apagamento; remover dados do titular de todos os bancos e tornar o CPF irrecuperável pela aplicação (o documento corrente não tem mais o material; cópias anteriores permanecem decifráveis enquanto a KEK existir — ver nota em `identity_vault.py`) |
 | **Base legal** | LGPD Art. 18, VI — direito à eliminação dos dados pessoais tratados com o consentimento |
 | **Titulares** | Pessoas físicas que solicitaram o apagamento |
 | **Dados envolvidos** | Consentimentos, snapshots financeiros, decisões em `decision_traces` e cofre de identidade do titular |
@@ -121,7 +121,7 @@ Este documento é o Registro de Operações de Tratamento de Dados Pessoais (ROP
 | Autenticação IAM em Cloudant e COS | Implementado (Parte A) |
 | Endpoints internos protegidos por X-Internal-Token (HMAC) | Implementado (Parte A) |
 | Retry com backoff exponencial em operações Cloudant (429 too_many_requests) | Implementado (Parte B) |
-| Gestão de chaves via Secrets Manager + HSM (Key Protect) | **Plano / produção** — `SecretsManagerKeyProvider` é esqueleto |
+| Gestão de chaves via Secrets Manager + HSM (Key Protect) | **Plano / produção** — implementar um KeyProvider sobre o Secrets Manager |
 | Trusted Profile IAM (sem API key em texto plano) | **Plano / produção** |
 | Alertas de acesso anômalo (Activity Tracker) | **Plano / produção** |
 

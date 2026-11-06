@@ -213,27 +213,10 @@ class _HttpClient:
         self._api_key = api_key
         self._timeout = timeout
 
-    def _get(self, path: str) -> Any:
+    def _request(self, method: str, path: str, json_body: Optional[dict] = None) -> Any:
         try:
-            response = httpx.get(
-                f"{self._base_url}{path}",
-                headers={"Authorization": f"Bearer {self._api_key}"},
-                timeout=self._timeout,
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPStatusError as exc:
-            raise SourceUnavailableError(
-                f"{self._base_url}: HTTP {exc.response.status_code}"
-            ) from exc
-        except httpx.HTTPError:
-            raise SourceUnavailableError(f"{self._base_url}: erro de transporte") from None
-        except ValueError as exc:  # corpo não-JSON
-            raise InvalidSourceDataError(f"{self._base_url}: resposta não é JSON") from exc
-
-    def _post(self, path: str, json_body: dict) -> Any:
-        try:
-            response = httpx.post(
+            response = httpx.request(
+                method,
                 f"{self._base_url}{path}",
                 headers={"Authorization": f"Bearer {self._api_key}"},
                 json=json_body,
@@ -258,7 +241,7 @@ class HttpOpenFinanceClient(_HttpClient):
     """
 
     def fetch_contracts(self, consent: dict) -> list[dict]:
-        return self._get(f"/consents/{consent['consent_id']}/credit-operations")["data"]
+        return self._request("GET", f"/consents/{consent['consent_id']}/credit-operations")["data"]
 
 
 class HttpSerasaClient(_HttpClient):
@@ -297,21 +280,17 @@ class HttpSerasaClient(_HttpClient):
         return get_identity_vault().resolve_for_serasa
 
     def fetch_report(self, pseudonym_id: str) -> dict:
-        from src.privacy.identity_vault import VaultError
-
         try:
             cpf = self._get_resolver()(pseudonym_id)
-        except VaultError as exc:
+        except Exception as exc:
+            logger.warning(
+                "Serasa: falha ao resolver identidade do titular — %s", type(exc).__name__
+            )
             raise SourceUnavailableError(
-                "Serasa: titular sem identidade disponível no cofre"
-            ) from exc
+                "Serasa: identidade do titular indisponível"
+            ) from None
 
-        try:
-            result = self._post("/reports", {"cpf": cpf})
-        finally:
-            del cpf  # higiene: remove CPF do frame local
-
-        return result
+        return self._request("POST", "/reports", {"cpf": cpf})
 
 
 def build_open_finance_client() -> OpenFinanceClient:

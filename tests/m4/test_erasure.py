@@ -234,3 +234,69 @@ def test_erase_vault_cpf_irrecoverable_after_shred(vault, store, audit, pseudony
 
     with pytest.raises(VaultError):
         vault.reveal(pseudonym_a, purpose="LEGAL_REQUEST", actor="test")
+
+
+# ---------------------------------------------------------------------------
+# R-07 — AuditWriteError no evento inicial aborta o apagamento
+# ---------------------------------------------------------------------------
+
+class _FailingAuditAlways:
+    """Audit que levanta AuditWriteError em todas as chamadas."""
+
+    def record_event(self, event_type: str, *, pseudonym_id, actor, **fields) -> str:
+        from src.privacy.audit import AuditWriteError
+        raise AuditWriteError("Sem destino de auditoria disponível")
+
+
+class _FailingAuditOnCompleted:
+    """Audit que funciona normalmente, mas levanta AuditWriteError só no erasure.completed."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def record_event(self, event_type: str, *, pseudonym_id, actor, **fields) -> str:
+        import uuid
+        from src.privacy.audit import AuditWriteError
+        self.calls.append(event_type)
+        if event_type == "erasure.completed":
+            raise AuditWriteError("COS e Cloudant offline")
+        return str(uuid.uuid4())
+
+
+def test_audit_write_error_on_initial_event_aborts_erasure(store, vault, pseudonym_a):
+    """AuditWriteError no evento inicial → propaga; nenhum dado é apagado."""
+    from src.privacy.audit import AuditWriteError
+
+    failing_audit = _FailingAuditAlways()
+
+    with pytest.raises(AuditWriteError):
+        erase_subject(pseudonym_a, store=store, vault=vault, audit=failing_audit)
+
+    # Consentimentos NÃO foram alterados
+    consents = list(store.iter_consents({"pseudonym_id": pseudonym_a}))
+    assert all(c["status"] == "AUTHORISED" for c in consents), (
+        "Nenhum consentimento deve ter sido alterado"
+    )
+
+
+def test_audit_write_error_on_completed_returns_report_with_completion_audited_false(
+    store, vault, pseudonym_a
+):
+    """
+    AuditWriteError só no erasure.completed → apagamento feito;
+    ErasureReport.completion_audited == False.
+    """
+    failing_completed_audit = _FailingAuditOnCompleted()
+
+    report = erase_subject(pseudonym_a, store=store, vault=vault, audit=failing_completed_audit)
+
+    assert report.completion_audited is False
+    # Apagamento deve ter sido realizado normalmente
+    assert report.consents_revoked == 2
+    assert report.vault_shredded is True
+
+
+def test_erase_report_has_completion_audited_true_by_default(store, vault, audit, pseudonym_a):
+    """Quando tudo funciona, completion_audited é True."""
+    report = erase_subject(pseudonym_a, store=store, vault=vault, audit=audit)
+    assert report.completion_audited is True

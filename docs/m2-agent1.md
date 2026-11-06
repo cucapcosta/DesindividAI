@@ -326,9 +326,12 @@ db.financial_snapshots.createIndex({ expires_at: 1 }, { expireAfterSeconds: 0 })
 - **Snapshot auditado:** `persist_snapshot` registra `agent1.snapshot_persisted` em
   `audit_trail` + COS. Implementado na Parte A do M4
   ([`docs/m4-auditoria-governanca.md`](m4-auditoria-governanca.md)).
-- **Serasa consulta por CPF (pendente):** o cliente HTTP hoje envia apenas o
-  `pseudonym_id` ao sandbox. `IdentityVault.resolve_for_serasa()` existe e é testado,
-  mas a ligação ao cliente Serasa real está pendente (Parte B).
+- **Serasa consulta por CPF (implementado):** `HttpSerasaClient` reidentifica o titular
+  via `get_identity_vault().resolve_for_serasa` (finalidade `SERASA_QUERY`, auditado como
+  `vault.reveal`); o CPF vai somente no corpo JSON do `POST /reports` — nunca em URL,
+  query string, header ou log. Resolver injetável (padrão: cofre de identidade).
+  Falha ao resolver → `SourceUnavailableError` ("Serasa indisponível").
+  Sandbox (`SERASA_SANDBOX=true`) inalterado.
 
 ---
 
@@ -452,10 +455,10 @@ roteirizado, o repositório é em memória, e o `conftest.py` zera as credenciai
 | `expires_at` do consentimento sempre ISO 8601 **com fuso** | **Sub-Tarefa 1 (M1)** — M2 já assume UTC quando falta |
 | ~~Confirmar retenção de 90 dias após o consentimento e dono da chave de pseudonimização~~ | ✅ **Resolvido na Parte A do M4** — ver [`docs/m4-retencao-e-delecao.md`](m4-retencao-e-delecao.md) e [`docs/m4-chaves-e-iam.md`](m4-chaves-e-iam.md) |
 | Afinidade por `consent_id` no gateway (jobs do `202` em memória) | **Sub-Tarefa 1 (M1)** — ou store compartilhado de jobs |
-| ~~`PSEUDONYM_HMAC_KEY` vem do `.env` (deveria vir do COS/HSM)~~ | ✅ **Resolvido na Parte A do M4** — chave via `EnvKeyProvider` (hackathon); `SecretsManagerKeyProvider` como esqueleto (produção) — ver [`docs/m4-chaves-e-iam.md`](m4-chaves-e-iam.md) |
-| ~~Serviço de re-identificação para consultar o Serasa por CPF~~ (cofre + `resolve_for_serasa` implementados) | ✅ **Cofre implementado na Parte A do M4** — ver [`docs/m4-chaves-e-iam.md`](m4-chaves-e-iam.md); **ligação ao cliente Serasa real: pendente (Parte B)** |
+| ~~`PSEUDONYM_HMAC_KEY` vem do `.env` (deveria vir do COS/HSM)~~ | ✅ **Resolvido na Parte A do M4** — chave via `EnvKeyProvider` (hackathon); produção deve implementar um KeyProvider sobre o Secrets Manager — ver [`docs/m4-chaves-e-iam.md`](m4-chaves-e-iam.md) |
+| ~~Serviço de re-identificação para consultar o Serasa por CPF~~ | ✅ **Implementado na Parte B do M4** — `HttpSerasaClient` com resolver injetável (`get_identity_vault().resolve_for_serasa`, finalidade `SERASA_QUERY`, auditado como `vault.reveal`); CPF somente no corpo do `POST /reports`; falha ao resolver → `SourceUnavailableError`; sandbox inalterado — ver [`src/agents/agent1/sources.py`](../src/agents/agent1/sources.py) e [`docs/m4-chaves-e-iam.md`](m4-chaves-e-iam.md) |
 | ~~Expurgo de snapshots por `expires_at` (Cloudant sem TTL)~~ | ✅ **Resolvido na Parte A do M4** — job de expurgo idempotente em [`src/privacy/retention.py`](../src/privacy/retention.py); ver [`docs/m4-retencao-e-delecao.md`](m4-retencao-e-delecao.md) |
-| ~~Envio de `agent.tool_calls` ao watsonx.governance~~ (auditoria do snapshot) | ✅ **Resolvido na Parte A do M4** — `agent1.snapshot_persisted` em `audit_trail` + COS; ver [`docs/m4-auditoria-governanca.md`](m4-auditoria-governanca.md); `WatsonxGovernanceSink` como esqueleto (plano) |
+| ~~Envio de `agent.tool_calls` ao watsonx.governance~~ (auditoria do snapshot) | ✅ **Resolvido na Parte A do M4** — `agent1.snapshot_persisted` em `audit_trail` + COS; ver [`docs/m4-auditoria-governanca.md`](m4-auditoria-governanca.md); produção deve implementar um GovernanceSink para o watsonx.governance (plano) |
 | ~~`financial_snapshots` também recebe simulações e traces do M3~~ (decisão de separação de bancos) | ✅ **Decidido na Parte A do M4** — banco `decisions` será criado na Parte B; ver [`docs/m4-retencao-e-delecao.md`](m4-retencao-e-delecao.md) §4.2 |
 | ~~Guarda de PII no snapshot antes de persistir~~ | ✅ **Resolvido na Parte A do M4** — `assert_no_pii()` em [`src/privacy/pii_guard.py`](../src/privacy/pii_guard.py) |
 | ~~Apagamento LGPD Art. 18 (`POST /internal/erase`)~~ | ✅ **Resolvido na Parte A do M4** — ver [`docs/m4-retencao-e-delecao.md`](m4-retencao-e-delecao.md) |

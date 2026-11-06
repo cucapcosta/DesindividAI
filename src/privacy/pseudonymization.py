@@ -43,46 +43,19 @@ def _get_provider():
     return default_provider
 
 
-@lru_cache(maxsize=1)
-def _master_key_cached() -> bytes:
+@lru_cache(maxsize=8)
+def _master_key_cached(version: str) -> bytes:
+    """Cache de chave keyed pela versão — invalida automaticamente ao mudar de versão."""
     from .key_provider import KeyProviderError
     try:
-        _, key = _get_provider().get("pseudonym")
+        _, key = _get_provider().get("pseudonym", version)
     except KeyProviderError as exc:
         raise PseudonymizationKeyError(str(exc)) from exc
     return key
 
 
-def _master_key() -> bytes:
-    """
-    Retorna a chave ativa de pseudonimização.
-
-    Delegação em duas camadas:
-        1. lru_cache em _master_key_cached (evita re-leitura do ambiente).
-        2. EnvKeyProvider também tem cache interno por (purpose, version).
-
-    O atributo cache_clear é exposto aqui (aponta para _master_key_cached.cache_clear
-    e também limpa o provider) para que o teste existente que chama
-    p._master_key.cache_clear() continue funcionando.
-    """
-    return _master_key_cached()
-
-
-def _clear_all_key_caches() -> None:
-    """Limpa lru_cache de _master_key_cached E o cache interno do provider."""
-    _master_key_cached.cache_clear()
-    provider = _get_provider()
-    if hasattr(provider, "_reset_key_cache"):
-        provider._reset_key_cache()
-
-
-# Expõe cache_clear diretamente em _master_key para compatibilidade com testes
-# existentes que chamam `p._master_key.cache_clear()`.
-_master_key.cache_clear = _clear_all_key_caches  # type: ignore[attr-defined]
-
-
-def current_key_version() -> str:
-    """Versão da chave de pseudonimização atualmente ativa."""
+def _active_version() -> str:
+    """Versão ativa de pseudonimização segundo o provider."""
     from .key_provider import KeyProviderError
     try:
         version, _ = _get_provider().get("pseudonym")
@@ -91,12 +64,31 @@ def current_key_version() -> str:
     return version
 
 
-def _reset_key_cache() -> None:
+def _master_key() -> bytes:
     """
-    Invalida todos os caches de chave (lru_cache + provider interno).
-    USO EXCLUSIVO EM TESTES (tests/m4/).
+    Retorna a chave ativa de pseudonimização, keyed pela versão ativa.
+
+    A versão é consultada no provider a cada chamada (o provider tem seu próprio
+    cache interno por (purpose, version)); a chave em bytes fica no lru_cache
+    de _master_key_cached keyed pela string de versão — assim, ao trocar a versão
+    ativa (monkeypatch env + reset do provider), o cache por versão antiga não
+    interfere: a nova versão simplesmente não está em cache e é lida do provider.
     """
-    _clear_all_key_caches()
+    ver = _active_version()
+    return _master_key_cached(ver)
+
+
+def current_key_version() -> str:
+    """Versão da chave de pseudonimização atualmente ativa."""
+    return _active_version()
+
+
+def reset_key_cache() -> None:
+    """Invalida todos os caches de chave (lru_cache + provider interno)."""
+    _master_key_cached.cache_clear()
+    provider = _get_provider()
+    if hasattr(provider, "_reset_key_cache"):
+        provider._reset_key_cache()
 
 
 class PseudonymizationKeyError(RuntimeError):
@@ -125,8 +117,12 @@ def pseudonymize_cpf_with_version(cpf: str) -> tuple[str, str]:
 
     Use quando o documento precisar registrar qual versão da chave gerou o
     pseudônimo (campo `key_version` no identity_vault e nos snapshots novos).
+
+    Usa o mesmo caminho de chave que pseudonymize_cpf (via _master_key / provider)
+    para garantir consistência após rotação.
     """
-    version, key = _get_provider().get("pseudonym")
+    version = _active_version()
+    key = _master_key_cached(version)
     return _hmac_hex(key, f"cpf:{normalize_cpf(cpf)}"), version
 
 

@@ -29,7 +29,7 @@ Este documento cataloga todos os campos pessoais e financeiros tratados pelo sis
 | `created_at` | Data de criação do registro | ISO-8601Z | Sem dado pessoal |
 | `shredded_at` | Data do crypto-shredding | ISO-8601Z ou `null` | Preenchido em `vault.shred()`; tombstone permanece |
 
-> **Após `shred()`:** os campos `wrapped_dek`, `dek_nonce`, `cpf_ciphertext` e `nonce` são removidos. O CPF torna-se irrecuperável, inclusive em backups.
+> **Após `shred()`:** os campos `wrapped_dek`, `dek_nonce`, `cpf_ciphertext` e `nonce` são removidos do documento corrente. O CPF torna-se irrecuperável pela aplicação (o documento corrente não tem mais o material). Cópias anteriores (revisões até a compactação do Cloudant, backups e réplicas) permanecem decifráveis enquanto a KEK global existir. Para irrecuperabilidade inclusive em backups (produção): DEK por titular em Key Protect/HSM, destruída no shred.
 
 ---
 

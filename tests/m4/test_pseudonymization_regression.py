@@ -28,9 +28,9 @@ _KEY = bytes.fromhex("ab" * 32)
 # ---------------------------------------------------------------------------
 @pytest.fixture(autouse=True)
 def _isolate_key_cache():
-    p._reset_key_cache()
+    p.reset_key_cache()
     yield
-    p._reset_key_cache()
+    p.reset_key_cache()
 
 
 # ---------------------------------------------------------------------------

@@ -54,6 +54,9 @@ class RunContext:
     serasa: SerasaClient
     model_id: Optional[str] = None
     audit: Optional[Any] = None  # objeto com record_event; default None → M2 intacto
+    # Versão da chave que gerou o pseudonym_id (injetada por run_agent1 a partir do
+    # consentimento ou do cofre). None → fallback para current_key_version() + warning.
+    pseudonym_key_version: Optional[str] = None
 
     open_finance_debts: Optional[list[RawDebt]] = None
     serasa_report: Optional[SerasaReport] = None   # None = get_serasa_data não chamada
@@ -174,7 +177,16 @@ def persist_snapshot(ctx: RunContext) -> dict:
 
         # M4: marcar versão da chave e validar ausência de PII antes de salvar.
         # PIIViolation propaga: a tool falha e o snapshot NUNCA é salvo.
-        snapshot["key_version"] = current_key_version()
+        # Usar a versão registrada no consentimento/cofre (injetada via RunContext);
+        # fallback para a versão ativa somente se não disponível (com aviso).
+        if ctx.pseudonym_key_version is not None:
+            snapshot["key_version"] = ctx.pseudonym_key_version
+        else:
+            snapshot["key_version"] = current_key_version()
+            logger.warning(
+                "persist_snapshot: pseudonym_key_version não disponível no contexto; "
+                "usando versão ativa da chave como fallback"
+            )
         assert_no_pii(snapshot)
 
         ctx.repository.save_snapshot(snapshot)

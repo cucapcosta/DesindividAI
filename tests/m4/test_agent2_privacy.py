@@ -274,3 +274,49 @@ def test_audit_record_event_raises_endpoints_still_200(client, store, monkeypatc
 
     rec_resp = _recommend(client, simulation_id)
     assert rec_resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# R-21: guard_or_raise é async; record_event roda fora do thread do loop
+# ---------------------------------------------------------------------------
+
+def test_guard_or_raise_pii_blocked_emits_via_to_thread(monkeypatch):
+    """
+    Ao detectar PIIViolation, guard_or_raise deve:
+    1. Emitir o evento via asyncio.to_thread (não bloquear o event loop diretamente).
+    2. Levantar ServiceError(500, "PII_BLOCKED").
+
+    Confirma que record_event foi chamado num thread diferente do thread do loop.
+    """
+    import asyncio
+    import threading
+    from src.privacy.audit_bridge import guard_or_raise
+    from src.core.errors import ServiceError
+
+    call_threads: list[int] = []
+    loop_thread_id: list[int] = []
+
+    class _ThreadTrackingLogger:
+        def record_event(self, event_type, *, pseudonym_id, actor, **fields):
+            call_threads.append(threading.get_ident())
+            return "trace-fake"
+
+    monkeypatch.setattr("src.privacy.audit_bridge._get_logger", lambda: _ThreadTrackingLogger())
+
+    async def _run():
+        loop_thread_id.append(threading.get_ident())
+        doc = {"pseudonym_id": "abc", "cpf": "529.982.247-25"}   # chave proibida 'cpf'
+        with pytest.raises(ServiceError) as exc_info:
+            await guard_or_raise(doc, context="test.pii_check")
+        assert exc_info.value.status_code == 500
+        assert exc_info.value.code == "PII_BLOCKED"
+
+    asyncio.run(_run())
+
+    # record_event deve ter sido chamado exatamente uma vez
+    assert len(call_threads) == 1, f"record_event deveria ter sido chamado 1 vez, foi {len(call_threads)}"
+    # record_event deve ter rodado num thread diferente do thread do event loop
+    assert call_threads[0] != loop_thread_id[0], (
+        "record_event deveria rodar em thread separado do loop (via asyncio.to_thread)"
+    )
+

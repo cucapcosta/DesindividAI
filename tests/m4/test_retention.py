@@ -1502,3 +1502,744 @@ def test_ensure_indexes_429_intermittent_succeeds(monkeypatch):
 
     # Deve ter chamado post_index pelo menos 7 vezes (7 índices, com retries extras)
     assert client.post_index.call_count >= 7
+
+
+# ---------------------------------------------------------------------------
+# R-01 — cofre NÃO destruído quando apenas um dos documentos é apagado
+# ---------------------------------------------------------------------------
+
+def test_r01_revoked_consent_deleted_but_authorised_consent_survives_vault():
+    """
+    R-01 (1): titular com consentimento REVOKED vencido (regra d) + consentimento
+    AUTHORISED válido → cofre NÃO destruído.
+    """
+    pid = "pid-r01-consents"
+    revoked_at = NOW - timedelta(days=100)  # > 90 dias → regra d apaga
+
+    revoked_consent = make_consent(
+        status="REVOKED",
+        pseudonym_id=pid,
+        revoked_at=revoked_at,
+        revocation_reason="CUSTOMER_REQUEST",
+        expires_at=PAST,
+        doc_id="c-revoked-r01",
+    )
+    authorised_consent = make_consent(
+        status="AUTHORISED",
+        pseudonym_id=pid,
+        expires_at=FAR_FUTURE,
+        doc_id="c-authorised-r01",
+    )
+    vault_doc = make_vault_doc(pseudonym_id=pid, created_at=NOW - timedelta(hours=48))
+
+    store = InMemoryRetentionStore(
+        consents=[revoked_consent, authorised_consent],
+        vault=[vault_doc],
+    )
+    audit = FakeAudit()
+    vault = FakeVault(pseudonym_ids=[pid])
+
+    report = run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+
+    assert report.consents_revoked_deleted == 1, "Consentimento REVOKED vencido deve ser apagado"
+    assert report.vault_shredded == 0, (
+        "Cofre NÃO deve ser destruído: ainda existe consentimento AUTHORISED válido"
+    )
+    assert pid not in vault.shredded
+
+
+def test_r01_expired_snapshot_deleted_but_valid_snapshot_survives_vault():
+    """
+    R-01 (2): titular com snapshot vencido (regra a) + snapshot válido →
+    cofre NÃO destruído.
+    """
+    pid = "pid-r01-snapshots"
+
+    expired_snap = make_snapshot(
+        pseudonym_id=pid,
+        consent_id="cid-expired-snap",
+        expires_at=PAST,
+        snapshot_id="snap-expired-r01",
+    )
+    valid_snap = make_snapshot(
+        pseudonym_id=pid,
+        consent_id="cid-valid-snap",
+        expires_at=FAR_FUTURE,
+        snapshot_id="snap-valid-r01",
+    )
+    vault_doc = make_vault_doc(pseudonym_id=pid, created_at=NOW - timedelta(hours=48))
+
+    store = InMemoryRetentionStore(
+        snapshots=[expired_snap, valid_snap],
+        vault=[vault_doc],
+    )
+    audit = FakeAudit()
+    vault = FakeVault(pseudonym_ids=[pid])
+
+    report = run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+
+    assert report.snapshots_deleted == 1, "Snapshot vencido deve ser apagado"
+    assert report.vault_shredded == 0, (
+        "Cofre NÃO deve ser destruído: ainda existe snapshot válido"
+    )
+    assert pid not in vault.shredded
+
+
+def test_r01_dry_run_revoked_consent_and_valid_consent_vault_not_shredded():
+    """
+    R-01 (3a): em dry_run, consentimento REVOKED vencido + consentimento AUTHORISED válido
+    → cofre NÃO destruído.
+    """
+    pid = "pid-r01-dry-consents"
+    revoked_at = NOW - timedelta(days=100)
+
+    revoked_consent = make_consent(
+        status="REVOKED",
+        pseudonym_id=pid,
+        revoked_at=revoked_at,
+        revocation_reason="CUSTOMER_REQUEST",
+        expires_at=PAST,
+        doc_id="c-revoked-dry-r01",
+    )
+    authorised_consent = make_consent(
+        status="AUTHORISED",
+        pseudonym_id=pid,
+        expires_at=FAR_FUTURE,
+        doc_id="c-authorised-dry-r01",
+    )
+    vault_doc = make_vault_doc(pseudonym_id=pid, created_at=NOW - timedelta(hours=48))
+
+    store = InMemoryRetentionStore(
+        consents=[revoked_consent, authorised_consent],
+        vault=[vault_doc],
+    )
+    audit = FakeAudit()
+    vault = FakeVault(pseudonym_ids=[pid])
+
+    report = run_retention(now=NOW, dry_run=True, store=store, vault=vault, audit=audit.record_event)
+
+    assert report.dry_run is True
+    assert report.consents_revoked_deleted == 1
+    assert report.vault_shredded == 0, (
+        "dry_run: cofre NÃO deve ser marcado para destruição quando existe consentimento válido"
+    )
+    assert pid not in vault.shredded
+
+
+def test_r01_dry_run_expired_snapshot_and_valid_snapshot_vault_not_shredded():
+    """
+    R-01 (3b): em dry_run, snapshot vencido + snapshot válido → cofre NÃO destruído.
+    """
+    pid = "pid-r01-dry-snapshots"
+
+    expired_snap = make_snapshot(
+        pseudonym_id=pid,
+        consent_id="cid-exp-snap-dry",
+        expires_at=PAST,
+        snapshot_id="snap-exp-dry-r01",
+    )
+    valid_snap = make_snapshot(
+        pseudonym_id=pid,
+        consent_id="cid-val-snap-dry",
+        expires_at=FAR_FUTURE,
+        snapshot_id="snap-val-dry-r01",
+    )
+    vault_doc = make_vault_doc(pseudonym_id=pid, created_at=NOW - timedelta(hours=48))
+
+    store = InMemoryRetentionStore(
+        snapshots=[expired_snap, valid_snap],
+        vault=[vault_doc],
+    )
+    audit = FakeAudit()
+    vault = FakeVault(pseudonym_ids=[pid])
+
+    report = run_retention(now=NOW, dry_run=True, store=store, vault=vault, audit=audit.record_event)
+
+    assert report.dry_run is True
+    assert report.snapshots_deleted == 1
+    assert report.vault_shredded == 0, (
+        "dry_run: cofre NÃO deve ser marcado para destruição quando existe snapshot válido"
+    )
+    assert pid not in vault.shredded
+
+
+def test_r01_all_documents_deleted_vault_shredded():
+    """
+    R-01 (4): titular cujos ÚNICOS documentos são apagados → cofre destruído
+    (comportamento atual mantido).
+    """
+    pid = "pid-r01-all-gone"
+    revoked_at = NOW - timedelta(days=100)
+
+    revoked_consent = make_consent(
+        status="REVOKED",
+        pseudonym_id=pid,
+        revoked_at=revoked_at,
+        revocation_reason="CUSTOMER_REQUEST",
+        expires_at=PAST,
+        doc_id="c-only-r01",
+    )
+    vault_doc = make_vault_doc(pseudonym_id=pid, created_at=NOW - timedelta(hours=48))
+
+    store = InMemoryRetentionStore(
+        consents=[revoked_consent],
+        vault=[vault_doc],
+    )
+    audit = FakeAudit()
+    vault = FakeVault(pseudonym_ids=[pid])
+
+    report = run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+
+    assert report.consents_revoked_deleted == 1
+    assert report.vault_shredded == 1, "Cofre DEVE ser destruído: único documento foi apagado"
+    assert pid in vault.shredded
+
+
+# ---------------------------------------------------------------------------
+# R-09 — tolerância a erros por documento
+# ---------------------------------------------------------------------------
+
+class ErrorOnDocStore(InMemoryRetentionStore):
+    """
+    Store que levanta RuntimeError em delete_consent para um _id específico.
+    """
+
+    def __init__(self, fail_id: str, **kwargs):
+        super().__init__(**kwargs)
+        self._fail_id = fail_id
+
+    def delete_consent(self, doc: dict) -> None:
+        if doc.get("_id") == self._fail_id:
+            raise RuntimeError("simulated 409 conflict")
+        super().delete_consent(doc)
+
+
+def test_r09_delete_consent_error_increments_errors_count():
+    """
+    delete_consent levantando RuntimeError para 1 documento específico:
+    - errors == 1
+    - o contador daquela regra NÃO conta esse doc
+    - os demais documentos de outras regras são processados normalmente
+    - retention.run é emitido com errors=1
+    """
+    pid_fail = "pid-fail"
+    pid_ok = "pid-ok"
+
+    # doc que vai falhar na regra b (AWAITING expirado)
+    consent_fail = make_consent(
+        status="AWAITING_AUTHORISATION",
+        pseudonym_id=pid_fail,
+        awaiting_expires_at=PAST,
+        doc_id="c-fail",
+    )
+    # doc que vai ser processado normalmente na regra d (REVOKED vencido)
+    consent_ok = make_consent(
+        status="REVOKED",
+        pseudonym_id=pid_ok,
+        revoked_at=NOW - timedelta(days=100),
+        revocation_reason="CUSTOMER_REQUEST",
+        expires_at=PAST,
+        doc_id="c-ok",
+    )
+
+    store = ErrorOnDocStore(
+        fail_id="c-fail",
+        consents=[consent_fail, consent_ok],
+    )
+    audit = FakeAudit()
+    vault = FakeVault()
+
+    report = run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+
+    # Erro contado
+    assert report.errors == 1
+    # O doc que falhou NÃO é contado na regra b
+    assert report.consents_awaiting_deleted == 0
+    # O doc ok é contado na regra d
+    assert report.consents_revoked_deleted == 1
+    # retention.run emitido com errors=1
+    run_events = audit.events_of_type("retention.run")
+    assert len(run_events) == 1
+    assert run_events[0]["errors"] == 1
+
+
+def test_r09_delete_consent_error_vault_not_shredded():
+    """
+    Quando delete_consent falha para um doc REVOKED, o _id NÃO é adicionado a
+    deleted_consent_ids, logo o titular continua ativo e o cofre NÃO é destruído.
+    """
+    pid = "pid-fail-vault"
+
+    consent_fail = make_consent(
+        status="REVOKED",
+        pseudonym_id=pid,
+        revoked_at=NOW - timedelta(days=100),
+        revocation_reason="CUSTOMER_REQUEST",
+        expires_at=PAST,
+        doc_id="c-fail-vault",
+    )
+    vault_doc = make_vault_doc(pseudonym_id=pid, created_at=NOW - timedelta(hours=48))
+
+    store = ErrorOnDocStore(
+        fail_id="c-fail-vault",
+        consents=[consent_fail],
+        vault=[vault_doc],
+    )
+    audit = FakeAudit()
+    vault = FakeVault(pseudonym_ids=[pid])
+
+    report = run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+
+    assert report.errors == 1
+    assert report.consents_revoked_deleted == 0
+    # Cofre NÃO destruído: o consentimento ainda existe (delete falhou)
+    assert report.vault_shredded == 0
+    assert pid not in vault.shredded
+
+
+class ErrorOnShredVault(FakeVault):
+    """Vault que levanta RuntimeError no shred."""
+
+    def shred(self, pseudonym_id: str) -> bool:
+        raise RuntimeError("vault shred error")
+
+
+def test_r09_vault_shred_error_increments_errors():
+    """
+    vault.shred levantando → errors conta, vault_shredded NÃO conta,
+    job termina normalmente, retention.run emitido.
+    """
+    pid = "pid-shred-fail"
+    vault_doc = make_vault_doc(pseudonym_id=pid, created_at=NOW - timedelta(hours=48))
+
+    store = InMemoryRetentionStore(vault=[vault_doc])
+    audit = FakeAudit()
+    vault = ErrorOnShredVault(pseudonym_ids=[pid])
+
+    report = run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+
+    assert report.errors == 1
+    assert report.vault_shredded == 0
+    # retention.run deve ter sido emitido mesmo com erro
+    run_events = audit.events_of_type("retention.run")
+    assert len(run_events) == 1
+    assert run_events[0]["errors"] == 1
+
+
+def test_r09_errors_zero_when_no_failures():
+    """Execução sem falhas → errors == 0."""
+    snap = make_snapshot(expires_at=PAST)
+    store = InMemoryRetentionStore(snapshots=[snap])
+    audit = FakeAudit()
+    vault = FakeVault()
+
+    report = run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+
+    assert report.errors == 0
+    run_events = audit.events_of_type("retention.run")
+    assert run_events[0]["errors"] == 0
+
+
+def test_r09_dry_run_no_errors():
+    """Em dry_run nada é escrito, portanto errors == 0 mesmo com store problemático."""
+    # Mesmo com um store que falharia, em dry_run não há chamadas de escrita
+    consent_fail = make_consent(
+        status="AWAITING_AUTHORISATION",
+        pseudonym_id="pid-dry-fail",
+        awaiting_expires_at=PAST,
+        doc_id="c-dry-fail",
+    )
+    store = ErrorOnDocStore(fail_id="c-dry-fail", consents=[consent_fail])
+    audit = FakeAudit()
+    vault = FakeVault()
+
+    report = run_retention(now=NOW, dry_run=True, store=store, vault=vault, audit=audit.record_event)
+
+    assert report.dry_run is True
+    assert report.errors == 0
+    assert report.consents_awaiting_deleted == 1  # contado mesmo em dry_run
+
+
+# ---------------------------------------------------------------------------
+# R-09 — try/except/finally: iter_vault levantando RuntimeError → aborted=True
+# ---------------------------------------------------------------------------
+
+class ErrorIterVaultStore(InMemoryRetentionStore):
+    """Store cuja iter_vault levanta RuntimeError após os dados normais serem processados."""
+
+    def iter_vault(self, selector: dict) -> Iterator[dict]:
+        raise RuntimeError("simulated vault iter failure")
+
+
+def test_r09_iter_vault_raises_runtime_error_aborted():
+    """
+    Caminho de aborto: iter_vault levanta RuntimeError durante _apply_rules.
+    - run_retention deve re-levantar o RuntimeError.
+    - retention.run deve ter sido emitido (via finally) com aborted=True.
+    - Os contadores das regras já executadas (a, a2, b, c, d) ficam preenchidos.
+    """
+    # Adiciona um snapshot e um consentimento para que as regras anteriores sejam
+    # de fato executadas antes do iter_vault ser chamado (regra e).
+    snap = make_snapshot(expires_at=PAST)
+    consent_rev = make_consent(
+        status="REVOKED",
+        pseudonym_id="pid-abort-rev",
+        revoked_at=NOW - timedelta(days=100),
+        revocation_reason="CUSTOMER_REQUEST",
+        expires_at=PAST,
+    )
+
+    store = ErrorIterVaultStore(snapshots=[snap], consents=[consent_rev])
+    audit = FakeAudit()
+    vault = FakeVault()
+
+    with pytest.raises(RuntimeError, match="simulated vault iter failure"):
+        run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+
+    # retention.run deve ter sido emitido com aborted=True
+    run_events = audit.events_of_type("retention.run")
+    assert len(run_events) == 1, "retention.run deve ser emitido mesmo em aborto"
+    evt = run_events[0]
+    assert evt["aborted"] is True, "aborted deve ser True quando iter_vault levanta"
+
+    # Contadores das regras anteriores devem ter sido preenchidos
+    assert evt["snapshots_deleted"] == 1, "regra a executou antes do aborto"
+    assert evt["consents_revoked_deleted"] == 1, "regra d executou antes do aborto"
+
+
+def test_r09_normal_run_aborted_false():
+    """Caminho normal (sem exceção): retention.run emitido com aborted=False."""
+    snap = make_snapshot(expires_at=PAST)
+    store = InMemoryRetentionStore(snapshots=[snap])
+    audit = FakeAudit()
+    vault = FakeVault()
+
+    run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+
+    run_events = audit.events_of_type("retention.run")
+    assert len(run_events) == 1
+    assert run_events[0]["aborted"] is False
+
+
+# ---------------------------------------------------------------------------
+# R-16 — Regra b2: consentimentos REJECTED expirados → apagar
+# ---------------------------------------------------------------------------
+
+AWAITING_TIMEOUT = timedelta(minutes=10)
+
+
+def make_consent_rejected(
+    *,
+    pseudonym_id: str = "pid-rej",
+    created_at: datetime,
+    doc_id: str | None = None,
+) -> dict:
+    did = doc_id or str(uuid.uuid4())
+    return {
+        "_id": did,
+        "consent_id": did,
+        "pseudonym_id": pseudonym_id,
+        "status": "REJECTED",
+        "created_at": iso(created_at),
+    }
+
+
+def test_rule_b2_rejected_expired_deleted():
+    """Consentimento REJECTED com created_at + 10 min < now → deletar."""
+    created_at = NOW - timedelta(minutes=20)  # 20 min atrás > 10 min timeout
+    doc = make_consent_rejected(created_at=created_at)
+    store = InMemoryRetentionStore(consents=[doc])
+    audit = FakeAudit()
+    vault = FakeVault()
+
+    report = run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+
+    assert report.consents_rejected_deleted == 1
+    assert list(store.iter_consents({})) == []
+
+
+def test_rule_b2_rejected_not_expired_kept():
+    """Consentimento REJECTED com created_at + 10 min no futuro → manter."""
+    created_at = NOW - timedelta(minutes=5)  # só 5 min atrás
+    doc = make_consent_rejected(created_at=created_at)
+    store = InMemoryRetentionStore(consents=[doc])
+    audit = FakeAudit()
+    vault = FakeVault()
+
+    report = run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+
+    assert report.consents_rejected_deleted == 0
+    assert len(list(store.iter_consents({}))) == 1
+
+
+def test_rule_b2_rejected_dry_run():
+    """dry_run=True conta o REJECTED expirado mas NÃO o apaga."""
+    created_at = NOW - timedelta(minutes=20)
+    doc = make_consent_rejected(created_at=created_at)
+    store = InMemoryRetentionStore(consents=[doc])
+    audit = FakeAudit()
+    vault = FakeVault()
+
+    report = run_retention(now=NOW, dry_run=True, store=store, vault=vault, audit=audit.record_event)
+
+    assert report.consents_rejected_deleted == 1
+    assert len(list(store.iter_consents({}))) == 1  # documento ainda existe
+
+
+def test_rule_b2_rejected_error_increments_errors():
+    """Erro ao apagar REJECTED: errors += 1, consents_rejected_deleted não incrementa."""
+    created_at = NOW - timedelta(minutes=20)
+    doc = make_consent_rejected(created_at=created_at, doc_id="rej-fail")
+    store = ErrorOnDocStore(fail_id="rej-fail", consents=[doc])
+    audit = FakeAudit()
+    vault = FakeVault()
+
+    report = run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+
+    assert report.errors == 1
+    assert report.consents_rejected_deleted == 0
+
+
+def test_rule_b2_rejected_no_created_at_skipped_invalid():
+    """Consentimento REJECTED sem created_at → skipped_invalid."""
+    doc = {
+        "_id": "rej-nodate",
+        "consent_id": "rej-nodate",
+        "pseudonym_id": "pid-rej-nodate",
+        "status": "REJECTED",
+        # sem created_at
+    }
+    store = InMemoryRetentionStore(consents=[doc])
+    audit = FakeAudit()
+    vault = FakeVault()
+
+    report = run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+
+    assert report.skipped_invalid >= 1
+    assert report.consents_rejected_deleted == 0
+
+
+def test_rule_b2_rejected_in_retention_run_event():
+    """consents_rejected_deleted deve aparecer no evento retention.run."""
+    created_at = NOW - timedelta(minutes=20)
+    doc = make_consent_rejected(created_at=created_at)
+    store = InMemoryRetentionStore(consents=[doc])
+    audit = FakeAudit()
+    vault = FakeVault()
+
+    run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+
+    run_events = audit.events_of_type("retention.run")
+    assert len(run_events) == 1
+    assert run_events[0].get("consents_rejected_deleted") == 1
+
+
+def test_rule_b2_rejected_vault_destroyed_when_only_consent():
+    """
+    Cofre com único consentimento REJECTED expirado → consentimento apagado (b2),
+    cofre destruído (e).
+    """
+    pid = "pid-rej-only"
+    created_at = NOW - timedelta(minutes=20)
+    doc = make_consent_rejected(pseudonym_id=pid, created_at=created_at)
+    vault_doc = make_vault_doc(pseudonym_id=pid, created_at=NOW - timedelta(hours=48))
+
+    store = InMemoryRetentionStore(consents=[doc], vault=[vault_doc])
+    audit = FakeAudit()
+    vault = FakeVault(pseudonym_ids=[pid])
+
+    report = run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+
+    assert report.consents_rejected_deleted == 1
+    assert report.vault_shredded == 1, "Cofre deve ser destruído — único consentimento era REJECTED expirado"
+    assert pid in vault.shredded
+
+
+def test_rule_e_unknown_status_skipped_invalid_and_does_not_protect_vault():
+    """
+    Consentimento com status desconhecido → skipped_invalid + 1 e NÃO protege o cofre.
+    Se for o único consentimento do titular, o cofre pode ser destruído.
+    """
+    pid = "pid-unknown-status"
+    doc = {
+        "_id": "unk-status-1",
+        "consent_id": "unk-status-1",
+        "pseudonym_id": pid,
+        "status": "PENDING_REVIEW",  # status desconhecido
+        "created_at": iso(PAST),
+    }
+    vault_doc = make_vault_doc(pseudonym_id=pid, created_at=NOW - timedelta(hours=48))
+
+    store = InMemoryRetentionStore(consents=[doc], vault=[vault_doc])
+    audit = FakeAudit()
+    vault = FakeVault(pseudonym_ids=[pid])
+
+    report = run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+
+    assert report.skipped_invalid >= 1, "Status desconhecido deve incrementar skipped_invalid"
+    assert report.vault_shredded == 1, (
+        "Cofre deve ser destruído: status desconhecido NÃO conta como consentimento ativo"
+    )
+    assert pid in vault.shredded
+
+
+def test_rule_e_unknown_status_alongside_valid_consent_protects_vault():
+    """
+    Titular com status desconhecido (skipped) + consentimento AUTHORISED → cofre mantido.
+    """
+    pid = "pid-mixed-status"
+    doc_unknown = {
+        "_id": "unk-status-2",
+        "consent_id": "unk-status-2",
+        "pseudonym_id": pid,
+        "status": "PENDING_REVIEW",
+        "created_at": iso(PAST),
+    }
+    doc_valid = make_consent(
+        status="AUTHORISED",
+        pseudonym_id=pid,
+        expires_at=FAR_FUTURE,
+        doc_id="auth-valid-2",
+    )
+    vault_doc = make_vault_doc(pseudonym_id=pid, created_at=NOW - timedelta(hours=48))
+
+    store = InMemoryRetentionStore(consents=[doc_unknown, doc_valid], vault=[vault_doc])
+    audit = FakeAudit()
+    vault = FakeVault(pseudonym_ids=[pid])
+
+    report = run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+
+    assert report.vault_shredded == 0, "Cofre NÃO deve ser destruído: existe consentimento AUTHORISED válido"
+    assert pid not in vault.shredded
+
+
+# ---------------------------------------------------------------------------
+# R-17 — Regra a2: fallback por pseudonym_id para decisões sem consent_id
+# ---------------------------------------------------------------------------
+
+def test_rule_a2_decision_no_consent_id_fallback_by_pseudonym_id():
+    """
+    Decisão sem consent_id cujo titular tem consentimento REVOKED antigo
+    (revoked_at + 90d < now) → apagada via fallback por pseudonym_id.
+    """
+    pid = "pid-a2-fallback"
+    revoked_at = NOW - timedelta(days=120)  # 120 > 90 → revoked_at+90d < now
+
+    revoked_consent = make_consent(
+        status="REVOKED",
+        pseudonym_id=pid,
+        expires_at=PAST,
+        revoked_at=revoked_at,
+        revocation_reason="CUSTOMER_REQUEST",
+        consent_id="cid-a2-rev",
+    )
+    # Decisão com pseudonym_id correto mas SEM consent_id
+    dec = {
+        "_id": "dec:no-cid",
+        "type": "simulation",
+        "pseudonym_id": pid,
+        # sem consent_id
+        "expires_at": iso(FAR_FUTURE),  # expires_at no futuro
+    }
+
+    store = InMemoryRetentionStore(consents=[revoked_consent], decisions=[dec])
+    audit = FakeAudit()
+    vault = FakeVault()
+
+    report = run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+
+    # revoked_at + 90d = 120-90=30 dias atrás < now → min(FAR_FUTURE, 30_days_ago) < now → apagar
+    assert report.decisions_deleted == 1, (
+        "Decisão sem consent_id deve ser apagada via fallback por pseudonym_id "
+        "quando revoked_at + 90d < now"
+    )
+    assert list(store.iter_decisions({})) == []
+
+
+def test_rule_a2_decision_no_consent_id_revoked_recent_not_deleted():
+    """
+    Decisão sem consent_id com titular REVOKED recentemente (revoked_at + 90d > now)
+    → NÃO apagada (mesmo sem consent_id, o limite não foi atingido).
+    """
+    pid = "pid-a2-fallback-recent"
+    revoked_at = NOW - timedelta(days=10)  # revogado há 10 dias → +90d ainda no futuro
+
+    revoked_consent = make_consent(
+        status="REVOKED",
+        pseudonym_id=pid,
+        expires_at=FAR_FUTURE,
+        revoked_at=revoked_at,
+        revocation_reason="CUSTOMER_REQUEST",
+        consent_id="cid-a2-rev-recent",
+    )
+    dec = {
+        "_id": "dec:no-cid-recent",
+        "type": "trace",
+        "pseudonym_id": pid,
+        # sem consent_id
+        "expires_at": iso(FAR_FUTURE),
+    }
+
+    store = InMemoryRetentionStore(consents=[revoked_consent], decisions=[dec])
+    audit = FakeAudit()
+    vault = FakeVault()
+
+    report = run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+
+    assert report.decisions_deleted == 0
+    assert len(list(store.iter_decisions({}))) == 1
+
+
+def test_rule_a2_decision_no_consent_id_no_revoked_consent_uses_expires_at():
+    """
+    Decisão sem consent_id e sem consentimento REVOKED correspondente:
+    usa apenas expires_at. Se expires_at no passado → apagada.
+    """
+    pid = "pid-a2-no-revoked"
+    dec = {
+        "_id": "dec:no-cid-no-rev",
+        "type": "simulation",
+        "pseudonym_id": pid,
+        # sem consent_id
+        "expires_at": iso(PAST),
+    }
+
+    store = InMemoryRetentionStore(decisions=[dec])
+    audit = FakeAudit()
+    vault = FakeVault()
+
+    report = run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+
+    assert report.decisions_deleted == 1
+    assert list(store.iter_decisions({})) == []
+
+
+def test_rule_a2_decision_no_consent_id_authorised_consent_uses_expires_at_only():
+    """
+    Decisão sem consent_id com titular AUTHORISED (não REVOKED):
+    o fallback por pseudonym_id NÃO se aplica — usa apenas expires_at.
+    Se expires_at no futuro → NÃO apagada.
+    """
+    pid = "pid-a2-authorised"
+    auth_consent = make_consent(
+        status="AUTHORISED",
+        pseudonym_id=pid,
+        expires_at=FAR_FUTURE,
+        consent_id="cid-a2-auth",
+    )
+    dec = {
+        "_id": "dec:no-cid-auth",
+        "type": "simulation",
+        "pseudonym_id": pid,
+        # sem consent_id
+        "expires_at": iso(FAR_FUTURE),
+    }
+
+    store = InMemoryRetentionStore(consents=[auth_consent], decisions=[dec])
+    audit = FakeAudit()
+    vault = FakeVault()
+
+    report = run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+
+    assert report.decisions_deleted == 0
+    assert len(list(store.iter_decisions({}))) == 1

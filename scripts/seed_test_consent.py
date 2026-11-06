@@ -59,8 +59,37 @@ def create() -> None:
     print(consent_id)
 
 
-def delete(consent_id: str) -> None:
-    service = client()
+def _count_consents_for_pseudonym(service, pseudonym_id: str, exclude_consent_id: str) -> int:
+    """Conta consentimentos restantes com o mesmo pseudonym_id (excluindo o que acabou de ser apagado)."""
+    result = service.post_find(
+        db=CONSENTS_DB,
+        selector={"pseudonym_id": pseudonym_id},
+        fields=["_id"],
+    ).get_result()["docs"]
+    return sum(1 for d in result if d["_id"] != exclude_consent_id)
+
+
+def delete(
+    consent_id: str,
+    *,
+    cloudant_client=None,
+    vault=None,
+) -> None:
+    """Remove um consentimento de teste e, opcionalmente, o cofre do titular.
+
+    O cofre só é destruído se não restar nenhum outro consentimento com o mesmo
+    pseudonym_id após a remoção deste.
+
+    Parâmetros opcionais para injeção em testes:
+        cloudant_client — callable que retorna o cliente Cloudant (padrão: client)
+        vault           — IdentityVault já instanciado (padrão: get_identity_vault())
+    """
+    if cloudant_client is None:
+        cloudant_client = client
+    if vault is None:
+        vault = get_identity_vault()
+
+    service = cloudant_client()
     snapshots = service.post_find(
         db=SNAPSHOTS_DB, selector={"consent_id": consent_id}, fields=["_id", "_rev"]
     ).get_result()["docs"]
@@ -70,14 +99,24 @@ def delete(consent_id: str) -> None:
     consent = service.get_document(db=CONSENTS_DB, doc_id=consent_id).get_result()
     if not consent.get("test_fixture"):
         sys.exit(f"{consent_id} não foi criado por este script — recusando apagar.")
+    pseudonym_id = consent["pseudonym_id"]
     service.delete_document(db=CONSENTS_DB, doc_id=consent_id, rev=consent["_rev"])
 
-    # M4: destruir o cofre do titular de teste (crypto-shredding).
-    vault_shredded = get_identity_vault().shred(consent["pseudonym_id"])
-    print(
-        f"removidos: consentimento {consent_id} e {len(snapshots)} snapshot(s); "
-        f"cofre destruído: {vault_shredded}"
-    )
+    # M4: destruir o cofre do titular APENAS se não restar nenhum outro consentimento
+    # com o mesmo pseudonym_id (o SANDBOX_CPF é compartilhado por todos os consentimentos
+    # de teste — apagar o cofre enquanto houver outros consentimentos ativos seria incorreto).
+    remaining = _count_consents_for_pseudonym(service, pseudonym_id, consent_id)
+    if remaining > 0:
+        print(
+            f"removidos: consentimento {consent_id} e {len(snapshots)} snapshot(s); "
+            f"cofre mantido ({remaining} consentimento(s) restante(s) para o mesmo titular)"
+        )
+    else:
+        vault_shredded = vault.shred(pseudonym_id)
+        print(
+            f"removidos: consentimento {consent_id} e {len(snapshots)} snapshot(s); "
+            f"cofre destruído: {vault_shredded}"
+        )
 
 
 if __name__ == "__main__":

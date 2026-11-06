@@ -105,7 +105,7 @@ async def create_simulation(store: DocumentStore, snapshot_id: UUID, monthly_bud
         "expires_at": expires_at,
         **response.model_dump(mode="json"),
     }
-    guard_or_raise(doc, context="agent2.simulation_created")
+    await guard_or_raise(doc, context="agent2.simulation_created")
     await store.put(decisions_db(), f"simulation:{response.simulation_id}", doc)
     await emit(
         "agent2.simulation_created",

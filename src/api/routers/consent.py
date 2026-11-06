@@ -66,20 +66,28 @@ async def revoke_consent(consent_id: UUID) -> None:
     Revoga o consentimento e invalida os tokens OAuth associados.
     Conforme LGPD Art. 8º §5 — revogação sem ônus ao titular.
 
+    Os dados do titular ficam retidos por revoked_at + 90 dias (regra d em
+    docs/m4-retencao-e-delecao.md) e são removidos automaticamente pelo job de
+    retenção — não chamar /internal/erase em toda revogação.
+    /internal/erase (LGPD Art. 18, VI) é exclusivo para pedido explícito de
+    eliminação acionado pela equipe de privacidade.
+
     TODO (M1):
         1. Buscar consent_id no Cloudant → consent_registry
         2. Atualizar status → REVOKED, revoked_at = now (ISO UTC),
-           revocation_reason = "USER_REQUEST"
+           revocation_reason = motivo informado pelo titular
+           (valores: "CUSTOMER_REQUEST" | "FRAUD" | "LGPD_ERASURE" | "EXPIRED"
+            — ver schema em docs/m1-consent-lifecycle.md)
         3. Chamar IBM API Connect OAuth Provider: POST /oauth/revoke
         4. get_audit_logger().record_event(
                "consent.revoked",            # NOTE: adicionar "consent.revoked" a
                pseudonym_id=consent["pseudonym_id"],  # _ALLOWED_EVENT_TYPES em audit.py
                actor="consent_api",
                consent_id=str(consent_id),
-               revocation_reason="USER_REQUEST",
+               revocation_reason="CUSTOMER_REQUEST",  # ou valor informado
            )
-        5. Apagamento total do titular (LGPD Art. 18): POST /internal/erase/{pseudonym_id}
-           (implementado no M4 — ver src/api/routers/internal.py)
-        6. Retornar 204 No Content
+        5. Retornar 204 No Content
+        (NÃO chamar /internal/erase — dados ficam até revoked_at + 90 dias
+         e saem pelo job de retenção; /internal/erase é só para LGPD Art. 18, VI)
     """
     raise NotImplementedError

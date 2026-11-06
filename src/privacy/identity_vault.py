@@ -20,29 +20,32 @@ Documento no banco identity_vault (_id = pseudonym_id):
 }
 
 Após shred(), wrapped_dek, dek_nonce, cpf_ciphertext e nonce são removidos
-do documento (tombstone); shredded_at é preenchido. O CPF se torna
-irrecuperável (crypto-shredding).
+do documento corrente com um put (tombstone); shredded_at é preenchido.
+O CPF torna-se irrecuperável pela aplicação (o documento corrente não tem mais
+o material criptográfico). Cópias anteriores do documento (revisões até a
+compactação do Cloudant, backups e réplicas) permanecem decifráveis enquanto
+a KEK global existir. Para irrecuperabilidade inclusive em backups (produção):
+DEK por titular em Key Protect/HSM, destruída no shred.
 
 Ligação com o Serasa:
   resolve_for_serasa() chama reveal(purpose="SERASA_QUERY", actor="agent1").
-  O HttpSerasaClient em src/agents/agent1/sources.py deve chamar este método
-  em vez de receber o CPF diretamente — ver docs/m4-chaves-e-iam.md.
+  O HttpSerasaClient em src/agents/agent1/sources.py chama este método (resolver
+  injetável; padrão get_identity_vault().resolve_for_serasa); o CPF vai somente
+  no corpo do POST /reports, nunca em URL ou log. Sandbox inalterado.
 """
 
 from __future__ import annotations
 
 import base64
 import logging
-import os
 import secrets
-from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Callable, Optional, Protocol
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from .key_provider import KeyProvider, default_provider
-from .pseudonymization import normalize_cpf, pseudonymize_cpf_with_version
+from src.core.clock import utcnow_iso as _utcnow_iso
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +58,6 @@ def _b64e(data: bytes) -> str:
 
 def _b64d(data: str) -> bytes:
     return base64.b64decode(data)
-
-
-def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +75,6 @@ class VaultError(RuntimeError):
 class VaultRepository(Protocol):
     def get(self, pseudonym_id: str) -> Optional[dict]: ...
     def put(self, doc: dict) -> None: ...
-    def delete(self, pseudonym_id: str) -> None: ...
 
 
 class InMemoryVaultRepository:
@@ -92,10 +90,6 @@ class InMemoryVaultRepository:
     def put(self, doc: dict) -> None:
         self._store[doc["_id"]] = dict(doc)
 
-    def delete(self, pseudonym_id: str) -> None:
-        self._store.pop(pseudonym_id, None)
-
-
 class CloudantVaultRepository:
     """
     Repositório Cloudant para o identity_vault.
@@ -104,15 +98,10 @@ class CloudantVaultRepository:
     Banco configurado em CLOUDANT_DB_IDENTITY_VAULT (padrão "identity_vault").
     get() retorna None em 404.
     put() faz upsert via put_document (_id = pseudonym_id).
-    delete() remove o documento pelo _id; silencia 404.
     """
 
-    def __init__(self, url: str, apikey: str, db: str = "identity_vault") -> None:
-        from ibm_cloud_sdk_core.authenticators import IAMAuthenticator
-        from ibmcloudant.cloudant_v1 import CloudantV1
-
-        self._client = CloudantV1(authenticator=IAMAuthenticator(apikey))
-        self._client.set_service_url(url)
+    def __init__(self, client, db: str = "identity_vault") -> None:
+        self._client = client
         self._db = db
 
     def get(self, pseudonym_id: str) -> Optional[dict]:
@@ -136,40 +125,22 @@ class CloudantVaultRepository:
             document=Document.from_dict(doc),
         )
 
-    def delete(self, pseudonym_id: str) -> None:
-        from ibm_cloud_sdk_core import ApiException
-
-        try:
-            result = self._client.get_document(
-                db=self._db, doc_id=pseudonym_id
-            ).get_result()
-            self._client.delete_document(
-                db=self._db,
-                doc_id=pseudonym_id,
-                rev=result["_rev"],
-            )
-        except ApiException as exc:
-            if exc.code == 404:
-                return
-            raise
-
-
 @lru_cache(maxsize=1)
 def get_vault_repository() -> VaultRepository:
     """
     Factory com @lru_cache — padrão do M2 (get_repository()).
     Em produção, requer CLOUDANT_URL e CLOUDANT_APIKEY.
     """
-    from src.agents.agent1.config import ConfigurationError
+    from src.core.cloudant import build_cloudant_client
+    from src.core.config import ConfigurationError, vault_db
 
-    url = os.getenv("CLOUDANT_URL", "")
-    apikey = os.getenv("CLOUDANT_APIKEY", "")
-    if not url or not apikey:
+    try:
+        client = build_cloudant_client()
+    except ConfigurationError:
         raise ConfigurationError(
             "CLOUDANT_URL e CLOUDANT_APIKEY são obrigatórios para CloudantVaultRepository."
         )
-    db = os.getenv("CLOUDANT_DB_IDENTITY_VAULT", "identity_vault")
-    return CloudantVaultRepository(url=url, apikey=apikey, db=db)
+    return CloudantVaultRepository(client=client, db=vault_db())
 
 
 # ---------------------------------------------------------------------------
@@ -215,8 +186,13 @@ class IdentityVault:
             _rev quando houver; registra previously_shredded_at.
           - Inexistente → cria normalmente.
         """
-        cpf_normalized = normalize_cpf(cpf)
-        pseudonym_id, key_version = pseudonymize_cpf_with_version(cpf)
+        from .pseudonymization import _active_version, _master_key_cached, _hmac_hex, normalize_cpf as _norm
+        cpf_normalized = _norm(cpf)
+        # Usar o KeyProvider do cofre para gerar o pseudonym_id, garantindo
+        # consistência quando um provider fake/diferente é injetado.
+        pseudo_version, pseudo_key = self._kp.get("pseudonym")
+        pseudonym_id = _hmac_hex(pseudo_key, f"cpf:{cpf_normalized}")
+        key_version = pseudo_version
         kek_version, kek = self._kp.get("vault_kek")
 
         existing = self._repo.get(pseudonym_id)
@@ -366,11 +342,17 @@ class IdentityVault:
 
     def shred(self, pseudonym_id: str) -> bool:
         """
-        Destroi o material criptográfico do titular (crypto-shredding).
+        Remove o material criptográfico do documento corrente (crypto-shredding).
 
-        Remove wrapped_dek, dek_nonce, cpf_ciphertext e nonce; preenche
-        shredded_at. Idempotente: retorna True se algo mudou, False se já
-        estava destruído ou inexistente.
+        Remove wrapped_dek, dek_nonce, cpf_ciphertext e nonce com um put;
+        preenche shredded_at (tombstone). O CPF torna-se irrecuperável pela
+        aplicação. Cópias anteriores (revisões do Cloudant até a compactação,
+        backups e réplicas) permanecem decifráveis enquanto a KEK global existir.
+        Para irrecuperabilidade inclusive em backups (produção): DEK por titular
+        em Key Protect/HSM, destruída no shred.
+
+        Idempotente: retorna True se algo mudou, False se já estava destruído
+        ou inexistente.
         """
         doc = self._repo.get(pseudonym_id)
         if doc is None:
@@ -419,16 +401,12 @@ def _default_audit() -> Callable[..., None]:
     Import local de src.privacy.audit para evitar import circular
     (audit → pii_guard; identity_vault → key_provider, pseudonymization).
     """
-    try:
-        from src.privacy.audit import get_audit_logger  # local — evita import circular
+    from src.privacy.audit import get_audit_logger_or_none  # local — evita import circular
 
-        return get_audit_logger().record_event
-    except Exception as exc:
-        logger.warning(
-            "get_audit_logger() falhou; vault usará no-op para auditoria: %s",
-            type(exc).__name__,
-        )
-        return lambda event_type, **kw: None
+    audit_logger = get_audit_logger_or_none()
+    if audit_logger is not None:
+        return audit_logger.record_event
+    return lambda event_type, **kw: None
 
 
 def get_identity_vault() -> IdentityVault:

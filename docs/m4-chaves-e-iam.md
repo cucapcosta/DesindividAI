@@ -42,7 +42,7 @@ O sistema usa duas famílias de chaves, gerenciadas pela interface [`KeyProvider
 
 ### 2.2 Produção — Plano (não implementado)
 
-A classe `SecretsManagerKeyProvider` em [`src/privacy/key_provider.py`](../src/privacy/key_provider.py) é um **esqueleto**. O fluxo previsto:
+Em produção, implementar um `KeyProvider` sobre o IBM Cloud Secrets Manager em [`src/privacy/key_provider.py`](../src/privacy/key_provider.py). O fluxo previsto:
 
 1. Autenticação via **Trusted Profile IAM** (sem API key em texto plano).
 2. Obtenção do segredo pelo nome `desendividai/<purpose>/<version>` usando `ibm-platform-services` (`SecretsManagerV2`).

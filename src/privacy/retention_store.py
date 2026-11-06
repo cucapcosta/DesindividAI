@@ -18,7 +18,6 @@ Cloudant:
 from __future__ import annotations
 
 import logging
-import os
 import time as _time
 from functools import lru_cache
 from typing import Callable, Iterator, Optional, Protocol, TypeVar
@@ -129,10 +128,7 @@ class InMemoryRetentionStore:
 
     def update_consent(self, doc: dict) -> None:
         key = doc.get("_id") or doc.get("consent_id", "")
-        if key in self._consents:
-            self._consents[key] = dict(doc)
-        else:
-            self._consents[key] = dict(doc)
+        self._consents[key] = dict(doc)
 
     def delete_consent(self, doc: dict) -> None:
         key = doc.get("_id") or doc.get("consent_id", "")
@@ -207,18 +203,13 @@ class CloudantRetentionStore:
 
     def __init__(
         self,
-        url: str,
-        apikey: str,
+        client,
         consents_db: str = "consent_registry",
         snapshots_db: str = "financial_snapshots",
         vault_db: str = "identity_vault",
         decisions_db: str = "decision_traces",
     ) -> None:
-        from ibm_cloud_sdk_core.authenticators import IAMAuthenticator
-        from ibmcloudant.cloudant_v1 import CloudantV1
-
-        self._client = CloudantV1(authenticator=IAMAuthenticator(apikey))
-        self._client.set_service_url(url)
+        self._client = client
         self._consents_db = consents_db
         self._snapshots_db = snapshots_db
         self._vault_db = vault_db
@@ -317,12 +308,9 @@ def ensure_databases(client) -> None:
     412 = já existe → ignorar silenciosamente.
     """
     from ibm_cloud_sdk_core import ApiException
+    from src.core.config import audit_db, vault_db
 
-    vault_db = os.getenv("CLOUDANT_DB_IDENTITY_VAULT", "identity_vault")
-    audit_db = os.getenv("CLOUDANT_DB_AUDIT", "audit_trail")
-    decisions_db = _decisions_db()
-
-    for db in (vault_db, audit_db, decisions_db):
+    for db in (vault_db(), audit_db(), _decisions_db()):
         try:
             _with_429_retry(lambda d=db: client.put_database(db=d).get_result())
             logger.info("ensure_databases: banco criado: %s", db)
@@ -337,41 +325,34 @@ def ensure_indexes(client) -> None:
     """
     Cria índices Mango idempotentes nos bancos do M4.
     Índices do M2 (by-pseudonym, by-expiry) já existem; aqui só os do M4.
-    409 = já existe → ignorar.
     """
-    from ibm_cloud_sdk_core import ApiException
+    from src.core.config import audit_db, consents_db as _consents_db
 
-    consents_db = os.getenv("CLOUDANT_DB_CONSENTS", "consent_registry")
-    audit_db = os.getenv("CLOUDANT_DB_AUDIT", "audit_trail")
+    _consents = _consents_db()
+    _audit = audit_db()
     decisions_db = _decisions_db()
 
     indexes: list[tuple[str, list[str], str]] = [
         # (db, fields, name)
-        (consents_db, ["status", "awaiting_expires_at"], "by-status-awaiting-expires"),
-        (consents_db, ["expires_at"], "by-expires-at"),
-        (consents_db, ["pseudonym_id", "status"], "by-pseudonym-status"),
-        (audit_db, ["pseudonym_id", "recorded_at"], "by-pseudonym-recorded"),
-        (audit_db, ["event_type", "recorded_at"], "by-event-recorded"),
+        (_consents, ["status", "awaiting_expires_at"], "by-status-awaiting-expires"),
+        (_consents, ["expires_at"], "by-expires-at"),
+        (_consents, ["pseudonym_id", "status"], "by-pseudonym-status"),
+        (_audit, ["pseudonym_id", "recorded_at"], "by-pseudonym-recorded"),
+        (_audit, ["event_type", "recorded_at"], "by-event-recorded"),
         (decisions_db, ["pseudonym_id"], "by-pseudonym"),
         (decisions_db, ["type", "expires_at"], "by-type-expires"),
     ]
 
     for db, fields, name in indexes:
-        try:
-            _with_429_retry(
-                lambda d=db, f=fields, n=name: client.post_index(
-                    db=d,
-                    index={"fields": f},
-                    name=n,
-                    type="json",
-                ).get_result()
-            )
-            logger.debug("ensure_indexes: índice criado/verificado: %s/%s", db, name)
-        except ApiException as exc:
-            if exc.code == 409:
-                logger.debug("ensure_indexes: índice já existe: %s/%s", db, name)
-            else:
-                raise
+        _with_429_retry(
+            lambda d=db, f=fields, n=name: client.post_index(
+                db=d,
+                index={"fields": f},
+                name=n,
+                type="json",
+            ).get_result()
+        )
+        logger.debug("ensure_indexes: índice criado/verificado: %s/%s", db, name)
 
 
 # ---------------------------------------------------------------------------
@@ -384,19 +365,19 @@ def get_retention_store() -> RetentionStore:
     Factory com @lru_cache — padrão do M2.
     Requer CLOUDANT_URL e CLOUDANT_APIKEY.
     """
-    from src.agents.agent1.config import ConfigurationError
+    from src.core.cloudant import build_cloudant_client
+    from src.core.config import ConfigurationError, consents_db, snapshots_db, vault_db
 
-    url = os.getenv("CLOUDANT_URL", "")
-    apikey = os.getenv("CLOUDANT_APIKEY", "")
-    if not url or not apikey:
+    try:
+        client = build_cloudant_client()
+    except ConfigurationError:
         raise ConfigurationError(
             "CLOUDANT_URL e CLOUDANT_APIKEY são obrigatórios para CloudantRetentionStore."
         )
     return CloudantRetentionStore(
-        url=url,
-        apikey=apikey,
-        consents_db=os.getenv("CLOUDANT_DB_CONSENTS", "consent_registry"),
-        snapshots_db=os.getenv("CLOUDANT_DB_SNAPSHOTS", "financial_snapshots"),
-        vault_db=os.getenv("CLOUDANT_DB_IDENTITY_VAULT", "identity_vault"),
+        client=client,
+        consents_db=consents_db(),
+        snapshots_db=snapshots_db(),
+        vault_db=vault_db(),
         decisions_db=_decisions_db(),
     )

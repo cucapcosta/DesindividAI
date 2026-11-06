@@ -5,16 +5,30 @@ Destinos:
   1. Cloudant (audit_trail) — sempre presente em produção.
   2. COS — opcional; ativo quando COS_ACCESS_KEY_ID, COS_SECRET_ACCESS_KEY e
      COS_BUCKET_NAME estiverem configurados.
-  3. GovernanceSink — NoopGovernanceSink por padrão; WatsonxGovernanceSink é
-     esqueleto para integração futura com AI Factsheets / watsonx.governance.
+  3. GovernanceSink — NoopGovernanceSink por padrão. Em produção, implementar
+     um GovernanceSink para o watsonx.governance (AI Factsheets).
 
 Todos os registros passam pela guarda de PII (assert_no_pii) antes de serem
 gravados. Se a guarda falhar, um evento substituto `audit.pii_blocked` é
 gravado em seu lugar — o registro original nunca chega a nenhum destino.
 
 Falhas de gravação (Cloudant, COS, governance) são registradas como
-logger.error estruturado (event_type, trace_id, destino, tipo da exceção)
-e nunca derrubam o fluxo chamador; record_event sempre retorna o trace_id.
+logger.error estruturado (event_type, trace_id, destino, tipo da exceção).
+
+Se pelo menos um destino persistir com sucesso, record_event retorna o trace_id.
+Se NENHUM destino persistir (Cloudant e COS ambos falharam), _dispatch levanta
+AuditWriteError. O fluxo chamador é responsável por tratar esse erro conforme
+sua política (ver erasure.py, retention.py).
+
+Garantias de integridade da trilha:
+  A trilha é append-only pela aplicação (o código só insere; não há update/delete).
+  Para proteção adicional em produção:
+    - COS com Object Lock/retention (WORM) para as cópias JSON.
+    - Hash chain entre eventos (a implementar em produção).
+    - Credencial exclusiva de escrita separada da CLOUDANT_APIKEY usada para
+      apagar snapshots (não usar a mesma chave IAM para auditoria e expurgo).
+  Sem essas medidas de produção, a trilha pode ser alterada por quem tiver acesso
+  direto ao Cloudant ou COS.
 
 Compatibilidade com IdentityVault:
   vault = IdentityVault(repo, audit=audit_logger.record_event)
@@ -31,7 +45,20 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Callable, Optional, Protocol
 
+from src.core.clock import utcnow_iso as _utcnow_iso
+
 from .pii_guard import PIIViolation, assert_no_pii
+
+
+# ---------------------------------------------------------------------------
+# Exceção de falha total de auditoria
+# ---------------------------------------------------------------------------
+
+class AuditWriteError(RuntimeError):
+    """
+    Levantada por _dispatch quando nenhum destino de auditoria (Cloudant, COS)
+    persiste o registro. A mensagem não contém dados pessoais.
+    """
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +101,8 @@ class InMemoryAuditRepository:
         self._store = []
 
     def put(self, doc: dict) -> None:
-        # Remove existing doc with same _id, then append (upsert semantics)
+        # Simulação de inserção simples: substitui documento com o mesmo _id em memória.
+        # No Cloudant real, put_document sem _rev num _id já existente devolve 409 Conflict.
         self._store = [d for d in self._store if d.get("_id") != doc.get("_id")]
         self._store.append(dict(doc))
 
@@ -95,16 +123,12 @@ class CloudantAuditRepository:
     Usa o SDK ibmcloudant síncrono + IAMAuthenticator.
     Banco configurado em CLOUDANT_DB_AUDIT (padrão "audit_trail").
     _id = trace_id.
-    put() faz upsert via put_document.
+    put() insere o documento via put_document.
     find() usa post_find (Mango).
     """
 
-    def __init__(self, url: str, apikey: str, db: str = "audit_trail") -> None:
-        from ibm_cloud_sdk_core.authenticators import IAMAuthenticator
-        from ibmcloudant.cloudant_v1 import CloudantV1
-
-        self._client = CloudantV1(authenticator=IAMAuthenticator(apikey))
-        self._client.set_service_url(url)
+    def __init__(self, client, db: str = "audit_trail") -> None:
+        self._client = client
         self._db = db
 
     def put(self, doc: dict) -> None:
@@ -131,16 +155,16 @@ def get_audit_repository() -> AuditRepository:
     Factory com @lru_cache — padrão do M2.
     Requer CLOUDANT_URL e CLOUDANT_APIKEY.
     """
-    from src.agents.agent1.config import ConfigurationError
+    from src.core.cloudant import build_cloudant_client
+    from src.core.config import ConfigurationError, audit_db
 
-    url = os.getenv("CLOUDANT_URL", "")
-    apikey = os.getenv("CLOUDANT_APIKEY", "")
-    if not url or not apikey:
+    try:
+        client = build_cloudant_client()
+    except ConfigurationError:
         raise ConfigurationError(
             "CLOUDANT_URL e CLOUDANT_APIKEY são obrigatórios para CloudantAuditRepository."
         )
-    db = os.getenv("CLOUDANT_DB_AUDIT", "audit_trail")
-    return CloudantAuditRepository(url=url, apikey=apikey, db=db)
+    return CloudantAuditRepository(client=client, db=audit_db())
 
 
 # ---------------------------------------------------------------------------
@@ -250,37 +274,9 @@ class NoopGovernanceSink:
         pass
 
 
-class WatsonxGovernanceSink:
-    """
-    Esqueleto para integração com watsonx.governance (AI Factsheets).
-
-    Quando implementado, este sink deve:
-      - Registrar cada evento de auditoria como uma entrada no model use case
-        da instância watsonx.governance associada ao projeto.
-      - Usar trace_id como chave de correlação entre eventos de auditoria e
-        as chamadas do modelo (agent.tool_calls do Agente 1).
-      - Enviar agent.tool_calls (campo "tool_calls" do registro) para rastrear
-        quais ferramentas o Agente 1 invocou em cada sessão.
-      - Autenticar via IAMAuthenticator com IBM_CLOUD_API_KEY.
-
-    Configuração esperada (a definir na Parte B):
-      WATSONX_GOVERNANCE_URL, WATSONX_PROJECT_ID
-    """
-
-    def send(self, record: dict) -> None:
-        raise NotImplementedError(
-            "WatsonxGovernanceSink não está implementado. "
-            "Integração com AI Factsheets / watsonx.governance será adicionada na Parte B."
-        )
-
-
 # ---------------------------------------------------------------------------
 # AuditLogger principal
 # ---------------------------------------------------------------------------
-
-def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
 
 class AuditLogger:
     """
@@ -406,13 +402,22 @@ class AuditLogger:
         return trace_id
 
     def _dispatch(self, record: dict) -> None:
-        """Envia o registro para todos os destinos; erros são logados, nunca propagados."""
+        """
+        Envia o registro para todos os destinos; erros são logados.
+
+        Se NENHUM destino de persistência (Cloudant e COS) gravar com sucesso,
+        levanta AuditWriteError (sem dados pessoais na mensagem).
+        Governance não conta como destino de persistência para este critério.
+        """
         trace_id = record.get("trace_id", "")
         event_type = record.get("event_type", "")
+
+        persisted = 0
 
         # 1. Cloudant
         try:
             self._repo.put(record)
+            persisted += 1
         except Exception as exc:
             exc_type = type(exc).__name__
             logger.error(
@@ -430,6 +435,7 @@ class AuditLogger:
         if self._cos is not None:
             try:
                 self._cos.send(record)
+                persisted += 1
             except Exception as exc:
                 exc_type = type(exc).__name__
                 logger.error(
@@ -443,7 +449,7 @@ class AuditLogger:
                     },
                 )
 
-        # 3. Governance
+        # 3. Governance (não conta como destino de persistência)
         try:
             self._gov.send(record)
         except Exception as exc:
@@ -459,6 +465,12 @@ class AuditLogger:
                 },
             )
 
+        if persisted == 0:
+            raise AuditWriteError(
+                f"Nenhum destino de auditoria disponível "
+                f"(event_type={event_type} trace_id={trace_id})"
+            )
+
 
 # ---------------------------------------------------------------------------
 # Factory
@@ -472,3 +484,19 @@ def get_audit_logger() -> AuditLogger:
     repo = get_audit_repository()
     cos = get_cos_sink()
     return AuditLogger(repository=repo, cos_sink=cos)
+
+
+def get_audit_logger_or_none() -> Optional["AuditLogger"]:
+    """
+    Retorna o AuditLogger ou None se get_audit_logger() levantar qualquer
+    exceção (ex.: ConfigurationError quando CLOUDANT_URL/APIKEY ausentes).
+    Registra logger.warning apenas com o tipo da exceção (sem dados de configuração ou PII).
+    """
+    try:
+        return get_audit_logger()
+    except Exception as exc:
+        logger.warning(
+            "get_audit_logger() falhou; auditoria indisponível: %s",
+            type(exc).__name__,
+        )
+        return None

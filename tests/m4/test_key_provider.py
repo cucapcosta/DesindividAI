@@ -163,3 +163,50 @@ def test_reset_key_cache_clears_cache(monkeypatch):
     p._reset_key_cache()
     _, key2 = p.get("pseudonym")
     assert key2 == bytes.fromhex(key_hex_v2)
+
+
+# ---------------------------------------------------------------------------
+# R-19(a) — KEK deve ter EXATAMENTE 32 bytes
+# ---------------------------------------------------------------------------
+
+def test_vault_kek_exactly_32_bytes_accepted(monkeypatch):
+    """KEK com exatamente 32 bytes (256 bits) é aceita."""
+    key_hex = "cd" * 32  # 32 bytes
+    monkeypatch.setenv("VAULT_KEK_V1", key_hex)
+    monkeypatch.setenv("VAULT_KEK_ACTIVE_VERSION", "v1")
+    p = make_provider()
+    version, key = p.get("vault_kek")
+    assert version == "v1"
+    assert len(key) == 32
+
+
+@pytest.mark.parametrize("n_bytes", [16, 31, 33, 64])
+def test_vault_kek_wrong_size_raises(monkeypatch, n_bytes):
+    """KEK com tamanho diferente de 32 bytes levanta KeyProviderError."""
+    key_hex = "ab" * n_bytes
+    monkeypatch.setenv("VAULT_KEK_V1", key_hex)
+    monkeypatch.setenv("VAULT_KEK_ACTIVE_VERSION", "v1")
+    p = make_provider()
+    with pytest.raises(KeyProviderError):
+        p.get("vault_kek")
+
+
+def test_vault_kek_error_message_does_not_contain_key_value(monkeypatch):
+    """Mensagem do KeyProviderError para KEK errada NÃO contém o valor hex da chave."""
+    key_hex = "ab" * 33  # 33 bytes — tamanho errado
+    monkeypatch.setenv("VAULT_KEK_V1", key_hex)
+    monkeypatch.setenv("VAULT_KEK_ACTIVE_VERSION", "v1")
+    p = make_provider()
+    with pytest.raises(KeyProviderError) as exc_info:
+        p.get("vault_kek")
+    assert key_hex not in str(exc_info.value), "Mensagem não deve conter o valor da chave"
+
+
+def test_pseudonym_key_allows_larger_than_32_bytes(monkeypatch):
+    """Chave de pseudônimo pode ter mais de 32 bytes (mínimo 32, sem limite superior)."""
+    key_hex = "ab" * 64  # 64 bytes — deve ser aceita para pseudônimo
+    monkeypatch.setenv("PSEUDONYM_HMAC_KEY", key_hex)
+    monkeypatch.setenv("PSEUDONYM_KEY_ACTIVE_VERSION", "v1")
+    p = make_provider()
+    version, key = p.get("pseudonym")
+    assert len(key) == 64

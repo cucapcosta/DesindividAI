@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hmac
 import os
+import re
 from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, status
@@ -21,6 +22,8 @@ from fastapi.responses import JSONResponse
 from src.api.models import ErrorResponse
 
 router = APIRouter(prefix="/internal", tags=["Internal"])
+
+_PSEUDONYM_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +116,7 @@ def get_audit():
 @router.post(
     "/erase/{pseudonym_id}",
     summary="Apagar dados do titular (LGPD Art. 18)",
+    include_in_schema=False,
     responses={
         200: {"description": "Relatório de apagamento"},
         401: {"model": ErrorResponse},
@@ -123,7 +127,6 @@ def get_audit():
 def erase_subject_endpoint(
     pseudonym_id: str = Path(
         ...,
-        pattern=r"^[0-9a-f]{64}$",
         description="pseudonym_id do titular — 64 hex chars (SHA-256). CPFs são rejeitados (422).",
     ),
     _token: None = Depends(require_internal_token),
@@ -136,15 +139,34 @@ def erase_subject_endpoint(
     destrói o cofre de identidade (crypto-shredding).
 
     Idempotente: segunda chamada retorna contagens zero.
+
+    Se o evento inicial de auditoria não puder ser gravado (AuditWriteError),
+    retorna 503 AUDIT_UNAVAILABLE e nenhum dado é apagado.
     """
+    # Validação manual — sem ecoar o valor recebido na resposta de erro
+    if not _PSEUDONYM_ID_RE.match(pseudonym_id):
+        return _json_error(
+            422,
+            "INVALID_PSEUDONYM_ID",
+            "pseudonym_id deve ter exatamente 64 caracteres hexadecimais.",
+        )
+
+    from src.privacy.audit import AuditWriteError
     from src.privacy.erasure import erase_subject
 
-    report = erase_subject(
-        pseudonym_id,
-        store=store,
-        vault=vault,
-        audit=audit,
-    )
+    try:
+        report = erase_subject(
+            pseudonym_id,
+            store=store,
+            vault=vault,
+            audit=audit,
+        )
+    except AuditWriteError:
+        return _json_error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "AUDIT_UNAVAILABLE",
+            "Trilha de auditoria indisponível; operação abortada.",
+        )
     return JSONResponse(status_code=status.HTTP_200_OK, content=asdict(report))
 
 
@@ -155,6 +177,7 @@ def erase_subject_endpoint(
 @router.post(
     "/retention/run",
     summary="Executar job de retenção",
+    include_in_schema=False,
     responses={
         200: {"description": "Relatório de retenção"},
         401: {"model": ErrorResponse},

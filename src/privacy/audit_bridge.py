@@ -2,11 +2,11 @@
 Ponte async → sync entre o M3 (código async) e a trilha de auditoria do M4 (SDK síncrono).
 
 Regras:
-- Nenhuma função aqui levanta exceção — falhas de auditoria são logadas e ignoradas.
 - _get_logger() é uma função separada para permitir monkeypatch nos testes.
-- emit() chama record_event via asyncio.to_thread para não bloquear o event loop.
-- guard_or_raise() verifica PII e lança ServiceError(500) se encontrar; também dispara
-  um evento audit.pii_blocked de forma fire-and-forget síncrona e tolerante.
+- emit() chama record_event via asyncio.to_thread para não bloquear o event loop;
+  nunca propaga exceção (falhas são logadas e ignoradas).
+- guard_or_raise() verifica PII: se limpo, retorna None; se violar, dispara
+  audit.pii_blocked de forma tolerante e levanta ServiceError(500, "PII_BLOCKED").
 """
 
 from __future__ import annotations
@@ -30,15 +30,8 @@ def _get_logger():
     Retorna None (sem propagar) se get_audit_logger() lançar qualquer exceção
     (ConfigurationError, ImportError, etc.). Função separada para monkeypatch nos testes.
     """
-    try:
-        from src.privacy.audit import get_audit_logger
-        return get_audit_logger()
-    except Exception as exc:
-        logger.warning(
-            "audit_bridge: auditoria indisponível. exc=%s",
-            type(exc).__name__,
-        )
-        return None
+    from src.privacy.audit import get_audit_logger_or_none
+    return get_audit_logger_or_none()
 
 
 async def emit(
@@ -104,11 +97,10 @@ def _emit_sync_fire_and_forget(
         )
 
 
-def guard_or_raise(doc: dict, *, context: str) -> None:
+async def guard_or_raise(doc: dict, *, context: str) -> None:
     """
     Chama assert_no_pii(doc). Se detectar PIIViolation:
-    - Emite evento "audit.pii_blocked" com blocked_event_type=context e
-      violation_path=exc.path (fire-and-forget, tolerante).
+    - Emite evento "audit.pii_blocked" via await emit(...) (asyncio.to_thread, tolerante).
     - Levanta ServiceError(500, "PII_BLOCKED", ...) com mensagem genérica
       (nunca contém o valor violador).
 
@@ -127,7 +119,7 @@ def guard_or_raise(doc: dict, *, context: str) -> None:
             if isinstance(raw_pid, str) and _HEX64_RE.match(raw_pid)
             else None
         )
-        _emit_sync_fire_and_forget(
+        await emit(
             "audit.pii_blocked",
             pseudonym_id=safe_pid,
             actor="agent2",

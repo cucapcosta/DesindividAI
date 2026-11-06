@@ -11,13 +11,19 @@ erase_subject() implementa o passo 3c do M1 (docs/m1-consent-lifecycle.md):
 
 Idempotente: segunda chamada retorna contagens zero.
 Nunca loga CPF.
+
+Falha de auditoria:
+  - Se o evento (a) falhar (AuditWriteError) → propagar; nada é apagado.
+  - Se o evento (e) falhar → apagamento já realizado; ErasureReport.completion_audited=False.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Optional
+
+from src.core.clock import to_iso as _to_iso
 
 
 @dataclass
@@ -27,11 +33,7 @@ class ErasureReport:
     decisions_deleted: int
     vault_shredded: bool
     trace_id: str
-
-
-def _utcnow_iso(now: Optional[datetime] = None) -> str:
-    dt = now or datetime.now(timezone.utc)
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    completion_audited: bool = True
 
 
 def erase_subject(
@@ -54,10 +56,15 @@ def erase_subject(
         now          — instante de referência; padrão: utcnow().
 
     Retorna ErasureReport com as contagens e o trace_id do evento inicial.
-    """
-    now_iso = _utcnow_iso(now)
 
-    # (a) Evento de início
+    Levanta AuditWriteError se o evento inicial (a) não puder ser gravado;
+    nesse caso nenhum dado é apagado.
+    """
+    from src.privacy.audit import AuditWriteError  # local — evita import circular nos testes
+
+    now_iso = _to_iso(now)
+
+    # (a) Evento de início — se falhar, propaga; NADA é apagado.
     trace_id: str = audit.record_event(
         "consent.erasure_requested",
         pseudonym_id=pseudonym_id,
@@ -90,17 +97,21 @@ def erase_subject(
     # (d) Crypto-shredding do cofre
     vault_shredded: bool = vault.shred(pseudonym_id)
 
-    # (e) Evento de conclusão
-    audit.record_event(
-        "erasure.completed",
-        pseudonym_id=pseudonym_id,
-        actor="internal_api",
-        consents_revoked=consents_revoked,
-        snapshots_deleted=snapshots_deleted,
-        decisions_deleted=decisions_deleted,
-        vault_shredded=vault_shredded,
-        request_trace_id=trace_id,
-    )
+    # (e) Evento de conclusão — falha aqui não desfaz o apagamento já feito.
+    completion_audited = True
+    try:
+        audit.record_event(
+            "erasure.completed",
+            pseudonym_id=pseudonym_id,
+            actor="internal_api",
+            consents_revoked=consents_revoked,
+            snapshots_deleted=snapshots_deleted,
+            decisions_deleted=decisions_deleted,
+            vault_shredded=vault_shredded,
+            request_trace_id=trace_id,
+        )
+    except AuditWriteError:
+        completion_audited = False
 
     return ErasureReport(
         consents_revoked=consents_revoked,
@@ -108,4 +119,5 @@ def erase_subject(
         decisions_deleted=decisions_deleted,
         vault_shredded=vault_shredded,
         trace_id=trace_id,
+        completion_audited=completion_audited,
     )

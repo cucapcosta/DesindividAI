@@ -292,8 +292,9 @@ def test_cos_failure_does_not_propagate(caplog):
     assert "cos" in caplog.text.lower()
 
 
-def test_both_destinations_fail_returns_trace_id_and_logs_two_errors(caplog):
-    """Cloudant e COS ambos falhando → retorna trace_id e loga 2 erros."""
+def test_both_destinations_fail_raises_audit_write_error(caplog):
+    """Cloudant e COS ambos falhando → levanta AuditWriteError e loga 2 erros."""
+    from src.privacy.audit import AuditWriteError
 
     class FailingRepo:
         def put(self, doc):
@@ -311,18 +312,39 @@ def test_both_destinations_fail_returns_trace_id_and_logs_two_errors(caplog):
 
     import logging
     with caplog.at_level(logging.ERROR, logger="src.privacy.audit"):
-        trace_id = al.record_event(
+        with pytest.raises(AuditWriteError):
+            al.record_event(
+                "vault.reveal",
+                pseudonym_id="cpf:abc",
+                actor="agent1",
+                ok=True,
+            )
+
+    # Dois erros logados (cloudant e cos)
+    error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(error_records) >= 2
+
+
+def test_cloudant_fails_no_cos_raises_audit_write_error():
+    """Cloudant falha e COS ausente → AuditWriteError (nenhum destino persistiu)."""
+    from src.privacy.audit import AuditWriteError
+
+    class FailingRepo:
+        def put(self, doc):
+            raise RuntimeError("Cloudant offline")
+
+        def find(self, selector, limit=25):
+            return []
+
+    al = _make_logger(repo=FailingRepo(), cos_sink=None)
+
+    with pytest.raises(AuditWriteError):
+        al.record_event(
             "vault.reveal",
             pseudonym_id="cpf:abc",
             actor="agent1",
             ok=True,
         )
-
-    assert isinstance(trace_id, str) and len(trace_id) == 36
-
-    # Dois erros logados (cloudant e cos)
-    error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
-    assert len(error_records) >= 2
 
 
 # ---------------------------------------------------------------------------
@@ -574,8 +596,11 @@ def test_reserved_fields_raise_value_error():
 # ---------------------------------------------------------------------------
 
 def test_log_message_contains_context_fields(caplog):
-    """Mensagem de erro deve incluir destino=, trace_id=, event_type= e exc=."""
+    """Mensagem de erro deve incluir destino=, trace_id=, event_type= e exc=.
+    Sem COS e com Cloudant falhando → AuditWriteError levantado (R-07).
+    """
     import logging
+    from src.privacy.audit import AuditWriteError
 
     class FailingRepo:
         def put(self, doc):
@@ -587,11 +612,12 @@ def test_log_message_contains_context_fields(caplog):
     al = _make_logger(repo=FailingRepo())
 
     with caplog.at_level(logging.ERROR, logger="src.privacy.audit"):
-        al.record_event(
-            "vault.reveal",
-            pseudonym_id="cpf:abc",
-            actor="agent1",
-        )
+        with pytest.raises(AuditWriteError):
+            al.record_event(
+                "vault.reveal",
+                pseudonym_id="cpf:abc",
+                actor="agent1",
+            )
 
     error_msgs = [r.message for r in caplog.records if r.levelno >= logging.ERROR]
     assert error_msgs, "Nenhum erro logado"

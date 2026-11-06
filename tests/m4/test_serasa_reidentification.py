@@ -45,12 +45,12 @@ def _make_vault(audit=None):
     return IdentityVault(repository=repo, key_provider=kp, audit=audit), repo
 
 
-def _ok_post_response(url, **kwargs):
-    """Fake POST que devolve um relatório Serasa mínimo."""
+def _ok_request_response(method, url, **kwargs):
+    """Fake request que devolve um relatório Serasa mínimo."""
     return httpx.Response(
         200,
         json={"score_band": "A", "negative_records": []},
-        request=httpx.Request("POST", url),
+        request=httpx.Request(method, url),
     )
 
 
@@ -62,17 +62,17 @@ def test_cpf_in_json_body_not_in_url(monkeypatch):
     """O CPF deve aparecer no corpo JSON e nunca na URL da requisição."""
     captured: dict = {}
 
-    def fake_post(url, *, headers=None, json=None, timeout=None, **kwargs):
+    def fake_request(method, url, *, headers=None, json=None, timeout=None, **kwargs):
         captured["url"] = url
         captured["headers"] = headers or {}
         captured["json"] = json or {}
         return httpx.Response(
             200,
             json={"score_band": "A", "negative_records": []},
-            request=httpx.Request("POST", url),
+            request=httpx.Request(method, url),
         )
 
-    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(httpx, "request", fake_request)
 
     client = HttpSerasaClient(
         "https://serasa.example",
@@ -100,7 +100,7 @@ def test_cpf_in_json_body_not_in_url(monkeypatch):
 
 def test_vault_reveal_event_emitted(monkeypatch):
     """Após fetch_report bem-sucedido, vault.reveal é auditado com ok=True."""
-    monkeypatch.setattr(httpx, "post", _ok_post_response)
+    monkeypatch.setattr(httpx, "request", _ok_request_response)
 
     events: list[dict] = []
 
@@ -159,10 +159,10 @@ def test_shredded_holder_raises_source_unavailable_without_leaking(monkeypatch):
 def test_http_500_message_does_not_contain_cpf(monkeypatch):
     """Falha HTTP 500 → SourceUnavailableError; mensagem não contém o CPF."""
 
-    def fake_post(url, **kwargs):
-        return httpx.Response(500, request=httpx.Request("POST", url))
+    def fake_request(method, url, **kwargs):
+        return httpx.Response(500, request=httpx.Request(method, url))
 
-    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(httpx, "request", fake_request)
 
     client = HttpSerasaClient(
         "https://serasa.example",
@@ -187,3 +187,52 @@ def test_build_serasa_client_sandbox(monkeypatch):
     monkeypatch.setenv("SERASA_SANDBOX", "true")
     client = build_serasa_client()
     assert isinstance(client, SandboxSerasaClient)
+
+
+# ---------------------------------------------------------------------------
+# R-03 — ConfigurationError e RuntimeError no resolver → SourceUnavailableError
+# ---------------------------------------------------------------------------
+
+def test_resolver_configuration_error_raises_source_unavailable():
+    """ConfigurationError no resolver → SourceUnavailableError; mensagem sem CPF."""
+    from src.core.config import ConfigurationError
+
+    def bad_resolver(_: str):
+        raise ConfigurationError("cofre não configurado")
+
+    client = HttpSerasaClient(
+        "https://serasa.example",
+        "api-key",
+        resolver=bad_resolver,
+    )
+
+    with pytest.raises(SourceUnavailableError) as exc_info:
+        client.fetch_report("pseudo-cfg")
+
+    msg = str(exc_info.value)
+    assert "identidade do titular indisponível" in msg
+    assert _CPF_DIGITS not in msg
+    assert _CPF not in msg
+    # Mensagem não deve conter informação de causa (from None)
+    assert "cofre não configurado" not in msg
+
+
+def test_resolver_runtime_error_raises_source_unavailable():
+    """RuntimeError genérico no resolver → SourceUnavailableError; mensagem sem CPF."""
+
+    def bad_resolver(_: str):
+        raise RuntimeError("conexão recusada")
+
+    client = HttpSerasaClient(
+        "https://serasa.example",
+        "api-key",
+        resolver=bad_resolver,
+    )
+
+    with pytest.raises(SourceUnavailableError) as exc_info:
+        client.fetch_report("pseudo-rt")
+
+    msg = str(exc_info.value)
+    assert "identidade do titular indisponível" in msg
+    assert _CPF_DIGITS not in msg
+    assert _CPF not in msg

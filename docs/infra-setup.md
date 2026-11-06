@@ -94,7 +94,7 @@ curl -X PUT "$CLOUDANT_URL/consent_registry" \
 curl -X PUT "$CLOUDANT_URL/identity_vault" \
   -H "Authorization: Bearer $IAM_TOKEN"
 
-# audit_trail — trilha de auditoria imutável
+# audit_trail — append-only pela aplicação
 curl -X PUT "$CLOUDANT_URL/audit_trail" \
   -H "Authorization: Bearer $IAM_TOKEN"
 ```

@@ -726,3 +726,140 @@ def test_get_identity_vault_audit_callback_raises_reveal_still_returns(monkeypat
     # Audit vai levantar, mas reveal deve retornar normalmente
     recovered = vault.reveal(pid, purpose="SERASA_QUERY", actor="agent1")
     assert recovered == _CPF_DIGITS
+
+
+
+# ---------------------------------------------------------------------------
+# R-19(b) — Todos os caminhos de pseudonimização convergem após rotação
+# ---------------------------------------------------------------------------
+
+def test_r19b_all_paths_reflect_new_version_after_rotation(monkeypatch):
+    """
+    Após trocar PSEUDONYM_KEY_ACTIVE_VERSION e resetar o provider, todos os
+    caminhos públicos (pseudonymize_cpf, pseudonymize_cpf_with_version,
+    current_key_version) refletem a nova versão e usam a nova chave.
+    """
+    import hashlib
+    import hmac as _hmac
+
+    from src.privacy import pseudonymization as pm
+    from src.privacy.key_provider import EnvKeyProvider, default_provider
+
+    # Configurar v1 e v2 como chaves distintas
+    key_v1_hex = "aa" * 32
+    key_v2_hex = "bb" * 32
+    monkeypatch.setenv("PSEUDONYM_HMAC_KEY", key_v1_hex)
+    monkeypatch.setenv("PSEUDONYM_HMAC_KEY_V2", key_v2_hex)
+    monkeypatch.setenv("PSEUDONYM_KEY_ACTIVE_VERSION", "v1")
+
+    pm.reset_key_cache()
+
+    cpf = "529.982.247-25"
+    cpf_digits = "52998224725"
+
+    # --- Verificar v1 ---
+    expected_v1 = _hmac.new(bytes.fromhex(key_v1_hex), f"cpf:{cpf_digits}".encode(), hashlib.sha256).hexdigest()
+    assert pm.pseudonymize_cpf(cpf) == expected_v1
+    assert pm.pseudonymize_cpf_with_version(cpf)[0] == expected_v1
+    assert pm.pseudonymize_cpf_with_version(cpf)[1] == "v1"
+    assert pm.current_key_version() == "v1"
+
+    # --- Rotacionar para v2 ---
+    monkeypatch.setenv("PSEUDONYM_KEY_ACTIVE_VERSION", "v2")
+    pm.reset_key_cache()
+
+    expected_v2 = _hmac.new(bytes.fromhex(key_v2_hex), f"cpf:{cpf_digits}".encode(), hashlib.sha256).hexdigest()
+    assert pm.pseudonymize_cpf(cpf) == expected_v2, \
+        "pseudonymize_cpf deve refletir a nova versão após rotação"
+    pseudo_id, version = pm.pseudonymize_cpf_with_version(cpf)
+    assert pseudo_id == expected_v2, \
+        "pseudonymize_cpf_with_version deve refletir a nova versão após rotação"
+    assert version == "v2"
+    assert pm.current_key_version() == "v2"
+
+    # --- Todos os caminhos convergem (retornam o mesmo pseudônimo) ---
+    assert pm.pseudonymize_cpf(cpf) == pseudo_id, \
+        "pseudonymize_cpf e pseudonymize_cpf_with_version devem concordar"
+
+
+# ---------------------------------------------------------------------------
+# R-19(c) — IdentityVault usa o KeyProvider injetado para gerar pseudonym_id
+# ---------------------------------------------------------------------------
+
+def _make_vault_with_fake_provider(key_hex: str, kek_hex: str | None = None):
+    """
+    Cria um IdentityVault com um EnvKeyProvider fake cujas chaves são fixas.
+    """
+    import os
+    from unittest.mock import patch
+
+    class FixedKeyProvider:
+        """Provider que retorna chaves fixas sem ler o ambiente."""
+        def __init__(self, pseudo_key: bytes, kek_key: bytes):
+            self._pseudo = pseudo_key
+            self._kek = kek_key
+
+        def get(self, purpose, version=None):
+            if purpose == "pseudonym":
+                return ("v1", self._pseudo)
+            if purpose == "vault_kek":
+                return ("v1", self._kek)
+            raise ValueError(f"purpose desconhecido: {purpose!r}")
+
+    pseudo_key = bytes.fromhex(key_hex)
+    kek_key = bytes.fromhex(kek_hex or "cd" * 32)
+    repo = InMemoryVaultRepository()
+    provider = FixedKeyProvider(pseudo_key, kek_key)
+    vault = IdentityVault(repository=repo, key_provider=provider)
+    return vault, repo, pseudo_key
+
+
+def test_r19c_vault_store_uses_injected_provider():
+    """
+    Cofre com provider fake (chave diferente) → pseudonym_id = HMAC com a chave do fake.
+    """
+    import hashlib
+    import hmac as _hmac
+
+    fake_key_hex = "ff" * 32  # chave diferente do default
+    cpf = "529.982.247-25"
+    cpf_digits = "52998224725"
+
+    vault, repo, pseudo_key = _make_vault_with_fake_provider(fake_key_hex)
+    pid = vault.store(cpf)
+
+    expected = _hmac.new(pseudo_key, f"cpf:{cpf_digits}".encode(), hashlib.sha256).hexdigest()
+    assert pid == expected, (
+        f"pseudonym_id ({pid[:16]}...) deve ser HMAC com a chave do provider injetado; "
+        f"esperado: {expected[:16]}..."
+    )
+
+
+def test_r19c_vault_store_different_providers_produce_different_pseudonym_ids():
+    """
+    Dois cofres com providers de chaves diferentes produzem pseudonym_ids distintos.
+    """
+    cpf = "529.982.247-25"
+
+    vault_a, _, _ = _make_vault_with_fake_provider("aa" * 32)
+    vault_b, _, _ = _make_vault_with_fake_provider("bb" * 32)
+
+    pid_a = vault_a.store(cpf)
+    pid_b = vault_b.store(cpf)
+
+    assert pid_a != pid_b, (
+        "Cofres com chaves diferentes devem gerar pseudonym_ids diferentes"
+    )
+
+
+def test_r19c_vault_store_and_reveal_consistent():
+    """
+    store() com provider fake → reveal() funciona com o mesmo provider.
+    """
+    cpf = "529.982.247-25"
+    cpf_digits = "52998224725"
+
+    vault, repo, _ = _make_vault_with_fake_provider("ee" * 32)
+    pid = vault.store(cpf)
+    recovered = vault.reveal(pid, purpose="SERASA_QUERY", actor="test")
+    assert recovered == cpf_digits

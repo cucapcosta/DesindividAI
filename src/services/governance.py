@@ -38,7 +38,7 @@ async def record_trace(store: DocumentStore, **payload) -> str:
     if output_sha256 is not None:
         doc["output_sha256"] = output_sha256
 
-    guard_or_raise(doc, context="agent2.recommendation_generated")
+    await guard_or_raise(doc, context="agent2.recommendation_generated")
     await store.put(decisions_db(), trace_id, doc)
     await emit(
         "agent2.recommendation_generated",

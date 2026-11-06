@@ -13,8 +13,9 @@ record_event(event_type, *, pseudonym_id, actor, **fields)
         ├─ 2. Guarda de PII (assert_no_pii) — se violar → audit.pii_blocked
         ├─ 3. Cloudant (audit_trail)        ← sempre em produção
         ├─ 4. COS (audit/{AAAA}/{MM}/{DD}/{trace_id}.json)  ← se credenciais presentes
-        └─ 5. GovernanceSink                ← NoopGovernanceSink (Parte A);
-                                              WatsonxGovernanceSink (Plano)
+        └─ 5. GovernanceSink                ← NoopGovernanceSink (ativo);
+                                              produção: implementar GovernanceSink
+                                              para o watsonx.governance (Plano)
 ```
 
 Falhas em qualquer destino (3, 4 ou 5) são registradas como `logger.error` estruturado **sem PII** e **nunca propagam** para o fluxo chamador. `record_event` sempre retorna um `trace_id` (UUID4).
@@ -86,6 +87,9 @@ Definidos em [`src/privacy/audit.py`](../src/privacy/audit.py), constante `_ALLO
 - Autenticação: IAM via `IAMAuthenticator` (SDK `ibmcloudant`).
 - `_id = trace_id` — identificador único do evento.
 - **Nunca expurgado** pelo job de retenção.
+- A trilha é **append-only pela aplicação** (o código só insere; não há update/delete).
+  Requisito de produção: usar credencial exclusiva de escrita separada da `CLOUDANT_APIKEY`
+  usada para apagar snapshots.
 
 ### 5.2 IBM Cloud Object Storage — COS (Implementado)
 
@@ -97,13 +101,15 @@ Definidos em [`src/privacy/audit.py`](../src/privacy/audit.py), constante `_ALLO
 - Classe: `CosAuditSink` em [`src/privacy/audit.py`](../src/privacy/audit.py).
 - **Sem credenciais** (testes, dev): `get_cos_sink()` retorna `None` silenciosamente; apenas o Cloudant é usado.
 - O client `ibm_boto3` é **injetável** nos testes (sem rede real).
+- Requisito de produção: COS com **Object Lock/retention (WORM)** nas cópias JSON; hash chain
+  entre eventos para detectar adulteração.
 
 ### 5.3 GovernanceSink — Noop / watsonx.governance
 
 | Implementação | Estado | Descrição |
 |---|---|---|
 | `NoopGovernanceSink` | **Ativo (Parte A)** | Descarta silenciosamente todos os registros |
-| `WatsonxGovernanceSink` | **Plano / produção** | Esqueleto — ver seção 6 |
+| GovernanceSink para watsonx.governance | **Plano / produção** | A implementar — ver seção 6 |
 
 ---
 
@@ -121,7 +127,7 @@ O M3 usa `async` em toda a sua camada de serviço. O SDK de auditoria do M4 (`re
 
 ## 7. Plano — watsonx.governance e AI Factsheets
 
-> Este bloco é **plano / produção**: a integração não está implementada. `WatsonxGovernanceSink` é um esqueleto em [`src/privacy/audit.py`](../src/privacy/audit.py) que levanta `NotImplementedError`.
+> Este bloco é **plano / produção**: a integração não está implementada. Em produção, implementar um `GovernanceSink` para o watsonx.governance em [`src/privacy/audit.py`](../src/privacy/audit.py).
 
 **Objetivo:** registrar cada sessão do Agente 1 como um evento de uso do modelo no AI Factsheets, permitindo rastreabilidade fim a fim da cadeia decisória.
 
@@ -134,7 +140,7 @@ O M3 usa `async` em toda a sua camada de serviço. O SDK de auditoria do M4 (`re
 
 **Fluxo previsto:**
 
-1. `WatsonxGovernanceSink.send(record)` recebe o registro de auditoria já sanitizado (sem PII).
+1. O GovernanceSink de produção (a implementar) recebe o registro de auditoria já sanitizado (sem PII) em `send(record)`.
 2. O `trace_id` é usado como **chave de correlação** entre o evento de auditoria e a entrada no AI Factsheets.
 3. O campo `tool_calls` do evento `agent1.snapshot_persisted` alimenta o rastreamento de quais ferramentas o modelo invocou.
 4. Os campos `prompt_sha256`/`output_sha256` do evento `agent2.recommendation_generated` permitem correlacionar o trace com a inferência no watsonx.ai, sem expor o texto.

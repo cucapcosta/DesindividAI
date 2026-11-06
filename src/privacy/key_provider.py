@@ -6,16 +6,15 @@ Interface `KeyProvider` (Protocol):
 
 Implementações:
     EnvKeyProvider    — lê do ambiente; adequado para hackathon e testes.
-    SecretsManagerKeyProvider — esqueleto para produção (Secrets Manager + HSM).
 
 Produção:
-    O fluxo de produção usa IBM Cloud Secrets Manager com HSM dedicado e
-    Trusted Profile IAM para acesso sem API key em texto plano. O provider
-    autentica via `ibm-platform-services` (IAM), obtém o segredo pelo nome
-    `desendividai/<purpose>/v<N>`, mantém um cache curto (< 5 min) para
-    reduzir latência e suporta rotação sem reinício: incrementar
-    PSEUDONYM_KEY_ACTIVE_VERSION ou VAULT_KEK_ACTIVE_VERSION faz o provider
-    carregar a nova versão na próxima chamada após o cache expirar.
+    O fluxo de produção deve implementar um KeyProvider sobre o IBM Cloud
+    Secrets Manager com HSM dedicado e Trusted Profile IAM (sem API key em
+    texto plano). O provider autentica via `ibm-platform-services` (IAM),
+    obtém o segredo pelo nome `desendividai/<purpose>/v<N>`, mantém um cache
+    curto (< 5 min) para reduzir latência e suporta rotação sem reinício:
+    incrementar PSEUDONYM_KEY_ACTIVE_VERSION ou VAULT_KEK_ACTIVE_VERSION faz
+    o provider carregar a nova versão na próxima chamada após o cache expirar.
     O role IAM necessário é `SecretsReader` no grupo de recursos do projeto.
     Nunca armazenar chaves no COS — o texto "COS + envelope encryption" em
     docs anteriores está desatualizado (ver docs/m4-chaves-e-iam.md).
@@ -126,44 +125,17 @@ class EnvKeyProvider:
         except ValueError as exc:
             raise KeyProviderError(f"{var} deve estar em hexadecimal") from exc
 
-        if len(key) < 32:
+        if purpose == "vault_kek":
+            if len(key) != 32:
+                raise KeyProviderError(
+                    f"{var} deve ter exatamente 256 bits (32 bytes) para uso como KEK AES-256-GCM; "
+                    f"comprimento atual: {len(key)} bytes"
+                )
+        elif len(key) < 32:
             raise KeyProviderError(f"{var} deve ter ao menos 256 bits (32 bytes)")
 
         self._cache[cache_key] = key
         return resolved, key
-
-
-# ---------------------------------------------------------------------------
-# SecretsManagerKeyProvider — esqueleto de produção
-# ---------------------------------------------------------------------------
-
-class SecretsManagerKeyProvider:
-    """
-    Esqueleto do provider de produção — IBM Cloud Secrets Manager + HSM.
-
-    Fluxo de produção (não implementado aqui):
-        1. Autenticar via Trusted Profile IAM (sem API key em texto plano);
-           role necessária: `SecretsReader` no grupo de recursos do projeto.
-        2. Obter o segredo pelo nome `desendividai/<purpose>/<version>` usando
-           `ibm-platform-services` (SecretsManagerV2).
-        3. Cache curto (< 5 min) com invalidação por versão para suportar
-           rotação sem reinício.
-        4. Rotação: incrementar PSEUDONYM_KEY_ACTIVE_VERSION ou
-           VAULT_KEK_ACTIVE_VERSION → provider carrega a nova versão na
-           próxima chamada após expiração do cache.
-        5. Nunca armazenar chaves no COS.
-        6. O HSM garante que a chave nunca sai do perímetro seguro em texto
-           plano; operações criptográficas ocorrem dentro do HSM.
-
-    Para habilitar em produção, instanciar com as credenciais do Secrets Manager
-    e implementar o método `get` conforme o SDK `ibm-platform-services`.
-    """
-
-    def get(self, purpose: Purpose, version: str | None = None) -> tuple[str, bytes]:
-        raise NotImplementedError(
-            "SecretsManagerKeyProvider não está implementado. "
-            "Use EnvKeyProvider para desenvolvimento/hackathon."
-        )
 
 
 # ---------------------------------------------------------------------------

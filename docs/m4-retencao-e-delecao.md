@@ -52,7 +52,7 @@ POST /internal/retention/run?dry_run=false
 
 ## 3. Crypto-shredding
 
-O **crypto-shredding** é a técnica usada para tornar irrecuperável o CPF de um titular, mesmo em backups ou snapshots de banco criados antes da deleção.
+O **crypto-shredding** é a técnica usada para tornar o CPF irrecuperável pela aplicação após a deleção.
 
 **Como funciona:**
 
@@ -60,10 +60,14 @@ O **crypto-shredding** é a técnica usada para tornar irrecuperável o CPF de u
 2. O CPF é cifrado com AES-256-GCM usando a DEK (AAD = `pseudonym_id`).
 3. A DEK é cifrada (envelope) pela **KEK (Key Encryption Key)** global (`VAULT_KEK_VN`).
 4. No `shred(pseudonym_id)`:
-   - Os campos `wrapped_dek`, `dek_nonce`, `cpf_ciphertext` e `nonce` são **removidos** do documento.
+   - Os campos `wrapped_dek`, `dek_nonce`, `cpf_ciphertext` e `nonce` são **removidos** do documento corrente com um put.
    - `shredded_at` é preenchido com a data/hora UTC.
    - O **tombstone** permanece no banco como evidência da existência e deleção do registro.
-5. Sem a DEK, o `cpf_ciphertext` é irreversível — mesmo que alguém acesse um backup anterior, não consegue decifrar.
+5. O CPF torna-se irrecuperável pela aplicação (o documento corrente não tem mais o material).
+   Cópias anteriores do documento (revisões do Cloudant até a compactação, backups e réplicas)
+   permanecem decifráveis enquanto a KEK global existir.
+   Para irrecuperabilidade inclusive em backups (produção): DEK por titular em Key Protect/HSM,
+   destruída no shred.
 
 ```
 Antes do shred:                    Após o shred:

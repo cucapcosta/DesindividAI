@@ -66,7 +66,9 @@ def _make_facts(
             },
         ]
     if primeiros_passos is None:
-        primeiros_passos = ["Mês 1: pagar R$ 1.500,00 em itau (CREDIT_CARD)"]
+        # Formato real de _first_steps (src/services/recommendation_service.py):
+        # f"Mês 1: pagar R$ {p.amount:.2f} em <institution> (<product_type>)"
+        primeiros_passos = ["Mês 1: pagar R$ 1500.00 em itau (CREDIT_CARD)"]
 
     return json.dumps(
         {
@@ -100,7 +102,7 @@ def _make_facts_with_savings() -> str:
                     "economia_vs_pagar_so_o_minimo": 49336.69,
                 },
             ],
-            "primeiros_passos": ["Mês 1: pagar R$ 1.200,00 em bb (PERSONAL_LOAN)"],
+            "primeiros_passos": ["Mês 1: pagar R$ 1200.00 em bb (PERSONAL_LOAN)"],
         },
         ensure_ascii=False,
     )
@@ -398,3 +400,304 @@ class TestFallbackExplanation:
     def test_invalid_json_returns_fallback_message(self):
         result = fallback_explanation("not-json", LanguageLevel.SIMPLE)
         assert "Não foi possível" in result or len(result) > 0
+
+
+# ---------------------------------------------------------------------------
+# _fmt_brl — R-10 parametrized
+# ---------------------------------------------------------------------------
+
+from src.agents.explanation_guard import _fmt_brl  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (1999.995,     "R$ 2.000,00"),
+        (1999.994,     "R$ 1.999,99"),
+        (-12.5,        "-R$ 12,50"),
+        (0,            "R$ 0,00"),
+        (1234567.891,  "R$ 1.234.567,89"),
+        (0.005,        "R$ 0,01"),
+        (594.43,       "R$ 594,43"),
+    ],
+)
+def test_fmt_brl_parametrized(value: float, expected: str) -> None:
+    assert _fmt_brl(value) == expected, (
+        f"_fmt_brl({value!r}) = {_fmt_brl(value)!r}, expected {expected!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# R-22(d): parse_brl_amounts — sinal negativo e milhão/milhões
+# ---------------------------------------------------------------------------
+
+class TestParseBrlAmountsR22d:
+    def test_negative_prefix(self):
+        assert abs(parse_brl_amounts("-R$ 1.234,56")[0] - (-1234.56)) < 0.001
+
+    def test_negative_after_symbol(self):
+        assert abs(parse_brl_amounts("R$ -1.234,56")[0] - (-1234.56)) < 0.001
+
+    def test_milhao(self):
+        result = parse_brl_amounts("R$ 1,2 milhão")
+        assert len(result) == 1
+        assert abs(result[0] - 1_200_000.0) < 0.001
+
+    def test_milhoes(self):
+        result = parse_brl_amounts("R$ 2 milhões")
+        assert len(result) == 1
+        assert abs(result[0] - 2_000_000.0) < 0.001
+
+    def test_milh_tilde(self):
+        result = parse_brl_amounts("R$ 1 milhão")
+        assert len(result) == 1
+        assert abs(result[0] - 1_000_000.0) < 0.001
+
+
+# ---------------------------------------------------------------------------
+# R-22(a): _SAVINGS_RE — negações ampliadas
+# ---------------------------------------------------------------------------
+
+from src.agents.explanation_guard import _is_savings_claim  # noqa: E402
+
+
+class TestSavingsClaimR22a:
+    def _facts_below(self):
+        return _make_facts(budget_below=True, soma_dos_minimos=2345.67)
+
+    # ---- Negações que NÃO devem ser issue ----
+    @pytest.mark.parametrize("text", [
+        "não haverá economia; a soma dos mínimos é R$ 2.345,67",
+        "Não há economia possível com R$ 2.345,67.",
+        "não terá economia com este plano de R$ 2.345,67.",
+        "não vai economizar R$ 2.345,67 neste cenário.",
+        "não gera economia de R$ 2.345,67.",
+        "sem economia; o mínimo é R$ 2.345,67.",
+        "nenhuma economia; pague R$ 2.345,67.",
+        "Nao economiza R$ 2.345,67.",
+        "Não economiza nada com R$ 2.345,67.",
+    ])
+    def test_negacao_nao_e_issue(self, text):
+        facts_json = self._facts_below()
+        issues = explanation_issues(text, facts_json, budget_below=True)
+        assert "SAVINGS_CLAIM_BELOW_MINIMUMS" not in issues, (
+            f"Frase negada não deveria disparar SAVINGS_CLAIM: {text!r}"
+        )
+
+    # ---- Afirmações positivas que SÃO issue ----
+    @pytest.mark.parametrize("text", [
+        "economiza R$ 5.000 em juros.",
+        "você vai economizar R$ 3.000 com este plano.",
+        "a economia é R$ 2.345,67.",
+    ])
+    def test_afirmacao_positiva_e_issue(self, text):
+        facts_json = _make_facts(budget_below=True, soma_dos_minimos=500.0)
+        issues = explanation_issues(text, facts_json, budget_below=True)
+        assert "SAVINGS_CLAIM_BELOW_MINIMUMS" in issues, (
+            f"Afirmação positiva deveria disparar SAVINGS_CLAIM: {text!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# R-22(b): tolerância adaptativa para valores arredondados
+# ---------------------------------------------------------------------------
+
+class TestToleranceR22b:
+    def test_mil_suffix_rounds_accepted(self):
+        """R$ 57 mil (57000) deve ser ACEITO quando o fato é 56.667,67.
+        Ambos arredondam para o milhar 57.000, então a tolerância por arredondamento aceita."""
+        facts_json = _make_facts(
+            cenarios=[{
+                "id": "consolidation", "nome": "C", "descricao": "d",
+                "prazo_meses": 60, "juros_totais": 56667.67,
+                "economia_vs_pagar_so_o_minimo_disponivel": False,
+            }]
+        )
+        # round(57000/1000)*1000 = 57000; round(56667.67/1000)*1000 = 57000 → match → ACEITO
+        text = "custa cerca de R$ 57 mil em juros"
+        issues = explanation_issues(text, facts_json, budget_below=False)
+        assert "UNGROUNDED_AMOUNT" not in issues
+
+    def test_60_mil_ungrounded_for_56667(self):
+        """R$ 60 mil (60000) deve ser UNGROUNDED quando o fato é 56.667,67.
+        round(60000/1000)*1000=60000; round(56667.67/1000)*1000=57000 → não match → UNGROUNDED."""
+        facts_json = _make_facts(
+            cenarios=[{
+                "id": "consolidation", "nome": "C", "descricao": "d",
+                "prazo_meses": 60, "juros_totais": 56667.67,
+                "economia_vs_pagar_so_o_minimo_disponivel": False,
+            }]
+        )
+        text = "Juros de R$ 60 mil."
+        issues = explanation_issues(text, facts_json, budget_below=False)
+        assert "UNGROUNDED_AMOUNT" in issues
+
+    def test_multiple_of_1000_wide_tolerance(self):
+        """R$ 57.000 aceito quando fato é 56.700 (diferença 300 < 0.5% de 57000=285? não.
+        Mas 57000 com fato 57100 → diff=100 < 285 → OK."""
+        facts_json = _make_facts(
+            cenarios=[{
+                "id": "consolidation", "nome": "C", "descricao": "d",
+                "prazo_meses": 60, "juros_totais": 57100.0,
+                "economia_vs_pagar_so_o_minimo_disponivel": False,
+            }]
+        )
+        # 57000 com fato 57100: diff=100, tolerância=285 → ACEITO
+        text = "Juros de R$ 57.000."
+        issues = explanation_issues(text, facts_json, budget_below=False)
+        assert "UNGROUNDED_AMOUNT" not in issues
+
+    def test_non_round_value_uses_1_tolerance(self):
+        """Valor não-arredondado usa tolerância de R$ 1."""
+        facts_json = _make_facts(
+            cenarios=[{
+                "id": "consolidation", "nome": "C", "descricao": "d",
+                "prazo_meses": 60, "juros_totais": 56667.67,
+                "economia_vs_pagar_so_o_minimo_disponivel": False,
+            }]
+        )
+        # 56668.68 está a 1.01 de 56667.67 → UNGROUNDED (tolerância = 1.0)
+        text = "Juros de R$ 56.668,68."
+        issues = explanation_issues(text, facts_json, budget_below=False)
+        assert "UNGROUNDED_AMOUNT" in issues
+
+
+# ---------------------------------------------------------------------------
+# R-22(c): grounded_amounts exclui prazo_meses
+# ---------------------------------------------------------------------------
+
+class TestGroundedAmountsR22c:
+    def test_prazo_meses_not_in_grounded(self):
+        """prazo_meses=13 NÃO deve estar em grounded_amounts."""
+        facts = json.dumps({
+            "cenarios": [{
+                "id": "a", "nome": "A", "descricao": "d",
+                "prazo_meses": 13,
+                "juros_totais": 5000.0,
+            }],
+            "primeiros_passos": [],
+        })
+        grounded = grounded_amounts(facts)
+        assert 13.0 not in grounded, "prazo_meses não deve estar no conjunto fundamentado"
+        assert 5000.0 in grounded
+
+    def test_prazo_as_rs_is_ungrounded(self):
+        """R$ 13 é UNGROUNDED quando 13 só existe como prazo_meses (não como valor monetário)."""
+        facts = json.dumps({
+            "cenarios": [{
+                "id": "a", "nome": "A", "descricao": "d",
+                "prazo_meses": 13,
+                "juros_totais": 5000.0,
+            }],
+            "primeiros_passos": [],
+        })
+        text = "O plano quita em R$ 13 de juros totais."
+        issues = explanation_issues(text, facts, budget_below=False)
+        assert "UNGROUNDED_AMOUNT" in issues
+
+    def test_monetary_values_still_grounded(self):
+        """juros_totais e economia_vs_pagar_so_o_minimo continuam fundamentados."""
+        facts = json.dumps({
+            "soma_dos_minimos": 1200.0,
+            "cenarios": [{
+                "id": "a", "nome": "A", "descricao": "d",
+                "prazo_meses": 60,
+                "juros_totais": 5000.0,
+                "economia_vs_pagar_so_o_minimo": 2000.0,
+            }],
+            "primeiros_passos": [],
+        })
+        grounded = grounded_amounts(facts)
+        assert 5000.0 in grounded
+        assert 2000.0 in grounded
+        assert 1200.0 in grounded
+        assert 60.0 not in grounded
+
+
+# ---------------------------------------------------------------------------
+# R-22(e): _fmt_prazo e fallback com prazo correto
+# ---------------------------------------------------------------------------
+
+from src.agents.explanation_guard import _fmt_prazo  # noqa: E402
+
+
+class TestFmtPrazoR22e:
+    @pytest.mark.parametrize("meses, expected", [
+        (7,  "7 meses"),
+        (12, "12 meses (1 ano)"),
+        (24, "24 meses (2 anos)"),
+        (30, "30 meses (2 anos e 6 meses)"),
+        (13, "13 meses (1 ano e 1 mês)"),
+        (36, "36 meses (3 anos)"),
+    ])
+    def test_fmt_prazo(self, meses, expected):
+        assert _fmt_prazo(meses) == expected, f"_fmt_prazo({meses}) = {_fmt_prazo(meses)!r}"
+
+
+class TestFallbackPrazoR22e:
+    def _make_facts_prazo(self, prazo_meses):
+        return json.dumps({
+            "cenario_recomendado": "consolidation",
+            "orcamento_abaixo_dos_minimos": False,
+            "cenarios": [{
+                "id": "consolidation", "nome": "Consolidação", "descricao": "d",
+                "prazo_meses": prazo_meses,
+                "juros_totais": 5000.0,
+                "economia_vs_pagar_so_o_minimo": 1000.0,
+            }],
+            "primeiros_passos": ["Mês 1: pagar R$ 594.43 em bb (PERSONAL_LOAN)"],
+        })
+
+    def test_fallback_30_meses(self):
+        result = fallback_explanation(self._make_facts_prazo(30), LanguageLevel.SIMPLE)
+        assert "2 anos e 6 meses" in result, f"Esperado '2 anos e 6 meses' em: {result}"
+
+    def test_fallback_12_meses(self):
+        result = fallback_explanation(self._make_facts_prazo(12), LanguageLevel.SIMPLE)
+        assert "1 ano" in result
+        assert "2 anos" not in result
+
+    def test_fallback_24_meses(self):
+        result = fallback_explanation(self._make_facts_prazo(24), LanguageLevel.SIMPLE)
+        assert "2 anos" in result
+        assert "meses" not in result.replace("24 meses", "")  # não deve ter "X meses" extra
+
+    def test_fallback_7_meses(self):
+        result = fallback_explanation(self._make_facts_prazo(7), LanguageLevel.SIMPLE)
+        # Menos de 12 meses: apenas "7 meses" sem parênteses com anos
+        assert "7 meses" in result
+        import re
+        assert not re.search(r"\bano(s)?\b", result), (
+            f"'ano(s)' não deveria aparecer como palavra isolada para prazo < 12: {result}"
+        )
+
+    def test_fallback_normalizes_primeiros_passos_to_br(self):
+        """Valores EN no primeiros_passos devem ser convertidos para BR no fallback."""
+        result = fallback_explanation(self._make_facts_prazo(12), LanguageLevel.SIMPLE)
+        # "R$ 594.43" (EN) deve virar "R$ 594,43" (BR)
+        assert "R$ 594,43" in result, f"Esperado 'R$ 594,43' em: {result}"
+
+
+# ---------------------------------------------------------------------------
+# #5: _fmt_step não deve produzir "pagarR$" (espaço antes de R$ preservado)
+# ---------------------------------------------------------------------------
+
+from src.agents.explanation_guard import _fmt_step  # noqa: E402
+
+
+class TestFmtStep:
+    def test_no_missing_space_before_rs(self):
+        """Garante que _fmt_step não consome o espaço antes de R$."""
+        step = "Mês 1: pagar R$ 594.43 em bb (PERSONAL_LOAN)"
+        result = _fmt_step(step)
+        assert "pagarR$" not in result, f"Espaço antes de R$ sumiu: {result!r}"
+        assert "pagar R$ 594,43" in result, f"Valor esperado ausente: {result!r}"
+
+    def test_large_amount_no_missing_space(self):
+        """Garante preservação do espaço com valor grande."""
+        step = "Mês 1: pagar R$ 4275.85 em nova linha de consolidação BB"
+        result = _fmt_step(step)
+        assert "pagarR$" not in result, f"Espaço antes de R$ sumiu: {result!r}"
+        assert "R$ 4.275,85" in result, f"Valor formatado incorretamente: {result!r}"
+
+
