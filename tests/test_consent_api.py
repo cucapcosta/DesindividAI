@@ -10,6 +10,7 @@ CPF de teste válido: 52998224725
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -20,6 +21,7 @@ import pytest
 from src.api.models import ConsentStatus
 from src.core.config import consents_db, snapshots_db
 import src.services.consent_service as svc
+from src.services.consent_service import _is_valid_cpf
 
 CPF_VALID = "52998224725"
 CPF_BAD_DV = "52998224726"      # dígito verificador errado
@@ -29,6 +31,14 @@ CPF_REPEATED = "11111111111"    # sequência repetida
 # ===========================================================================
 # Helpers
 # ===========================================================================
+
+def _assert_tz(value: str, label: str = "") -> None:
+    """Assert that an ISO-8601 string contains explicit timezone info (F1)."""
+    dt = datetime.fromisoformat(value)
+    assert dt.tzinfo is not None, (
+        f"Campo {label!r} sem fuso horário: {value!r}"
+    )
+
 
 def _post_consent(client, **overrides):
     body = {
@@ -92,17 +102,14 @@ def test_create_doc_stored_with_id_as_key(client, monkeypatch, store):
 def test_create_dates_have_timezone(client, monkeypatch, store):
     monkeypatch.setenv("OPEN_FINANCE_AUTH_SANDBOX", "true")
     body = _created(client)
-    from src.core.dates import parse_utc
-    created = parse_utc(body["created_at"])
-    expires = parse_utc(body["expires_at"])
-    assert created.tzinfo is not None
-    assert expires.tzinfo is not None
+    _assert_tz(body["created_at"], "created_at")
+    _assert_tz(body["expires_at"], "expires_at")
     # also check stored doc dates
     doc = asyncio.run(store.get(consents_db(), body["consent_id"]))
     for field in ("created_at", "expires_at", "awaiting_expires_at"):
-        dt = parse_utc(doc[field])
-        assert dt.tzinfo is not None, f"{field} no documento sem fuso"
-    delta = expires - created
+        _assert_tz(doc[field], field)
+    from src.core.dates import parse_utc
+    delta = parse_utc(body["expires_at"]) - parse_utc(body["created_at"])
     assert delta.days == 90  # default expiration_days
 
 
@@ -166,7 +173,7 @@ def test_create_no_sandbox_no_url_returns_503(client, monkeypatch):
     assert resp.json()["code"] == "NOT_CONFIGURED"
 
 
-def test_create_real_mode_redirect_url(client, monkeypatch):
+def test_create_real_mode_redirect_url(client, monkeypatch, store):
     monkeypatch.setenv("OPEN_FINANCE_AUTH_SANDBOX", "")
     monkeypatch.setenv("OPEN_FINANCE_AUTHORIZE_URL", "https://auth.example.com/authorize")
     monkeypatch.setenv("OPEN_FINANCE_CLIENT_ID", "my-client")
@@ -178,7 +185,15 @@ def test_create_real_mode_redirect_url(client, monkeypatch):
     qs = parse_qs(urlparse(url).query)
     assert qs["client_id"] == ["my-client"]
     assert qs["redirect_uri"] == ["https://api.example.com/consent/callback"]
-    assert len(qs["state"][0]) > 0
+    state = qs["state"][0]
+    assert len(state) > 0
+    # state_hash gravado deve ser sha256(state) (F7)
+    consent_id = resp.json()["consent_id"]
+    doc = asyncio.run(store.get(consents_db(), consent_id))
+    expected_hash = hashlib.sha256(state.encode()).hexdigest()
+    assert doc["state_hash"] == expected_hash, (
+        f"state_hash no doc ({doc['state_hash']!r}) != sha256(state) ({expected_hash!r})"
+    )
 
 
 def test_create_real_mode_missing_client_id_returns_503(client, monkeypatch):
@@ -243,13 +258,23 @@ def test_create_invalid_scope_message_does_not_echo_value(client, monkeypatch):
     assert bad_scope not in resp.json()["message"]
 
 
-def test_create_cpf_unicode_digits_returns_400(client, monkeypatch):
-    """CPF com dígitos unicode (largura total) → 400 INVALID_CPF (B4)."""
+@pytest.mark.parametrize("cpf_input", [
+    "５２９９８２２４７２５",   # fullwidth digits (B4)
+    "٥٢٩٩٨٢٢٤٧٢٥",         # Arabic-Indic digits (F6)
+])
+def test_create_cpf_unicode_digits_returns_400(client, monkeypatch, cpf_input):
+    """CPF com dígitos não-ASCII é barrado pelo pattern do modelo → 400 INVALID_REQUEST (B4/F6)."""
     monkeypatch.setenv("OPEN_FINANCE_AUTH_SANDBOX", "true")
-    # ５２９９８２２４７２５ — fullwidth digits, same value as CPF_VALID
-    fw = "５２９９８２２４７２５"
-    resp = _post_consent(client, cpf=fw)
+    resp = _post_consent(client, cpf=cpf_input)
     assert resp.status_code == 400
+    assert resp.json()["code"] == "INVALID_REQUEST"
+
+
+def test_is_valid_cpf_rejects_non_ascii_digits():
+    """_is_valid_cpf deve retornar False para dígitos não-ASCII (F6)."""
+    assert not _is_valid_cpf("٥٢٩٩٨٢٢٤٧٢٥")    # Arabic-Indic
+    assert not _is_valid_cpf("５２９９８２２４７２５")  # fullwidth
+    assert _is_valid_cpf(CPF_VALID)               # controle positivo
 
 
 # ===========================================================================
@@ -266,9 +291,8 @@ def test_callback_code_authorises(client, monkeypatch, store):
     # state_hash deve ter sido removido do documento
     doc = asyncio.run(store.get(consents_db(), consent_id))
     assert "state_hash" not in doc
-    # data com fuso no documento
-    from src.core.dates import parse_utc
-    assert parse_utc(doc["authorised_at"]).tzinfo is not None
+    # data com fuso no documento (F1)
+    _assert_tz(doc["authorised_at"], "authorised_at")
 
 
 def test_callback_consumed_state_returns_404(client, monkeypatch):
@@ -300,9 +324,8 @@ def test_callback_expired_awaiting(client, monkeypatch, store):
     updated = asyncio.run(store.get(consents_db(), consent_id))
     assert updated["status"] == ConsentStatus.REJECTED.value          # T6
     assert updated["rejection_reason"] == "AUTHORISATION_TIMEOUT"
-    # data com fuso (T6)
-    from src.core.dates import parse_utc
-    assert parse_utc(updated["rejected_at"]).tzinfo is not None
+    # data com fuso (T6/F1)
+    _assert_tz(updated["rejected_at"], "rejected_at")
 
 
 def test_callback_missing_awaiting_expires_treated_as_expired(client, monkeypatch, store):
@@ -339,28 +362,39 @@ def test_callback_missing_code_and_error_returns_400(client, monkeypatch):
 
 
 def test_callback_after_rejected_returns_409(client, monkeypatch, store):
-    """Callback depois de REJECTED → 409 CONSENT_INVALID_STATE (T5)."""
+    """Callback depois de REJECTED → 409 CONSENT_INVALID_STATE.
+    O documento inteiro deve permanecer inalterado (F2).
+    """
     consent_id, state = _get_state(client, monkeypatch)
     # forçar REJECTED direto no store
     doc = asyncio.run(store.get(consents_db(), consent_id))
     doc["status"] = ConsentStatus.REJECTED.value
     asyncio.run(store.put(consents_db(), consent_id, doc))
+    # snapshot antes do callback
+    before = asyncio.run(store.get(consents_db(), consent_id)).copy()
     resp = client.get("/consent/callback", params={"state": state, "code": "sandbox"})
     assert resp.status_code == 409
     assert resp.json()["code"] == "CONSENT_INVALID_STATE"
-    # documento não alterado
-    unchanged = asyncio.run(store.get(consents_db(), consent_id))
-    assert unchanged["status"] == ConsentStatus.REJECTED.value
+    # documento inteiro não alterado (F2)
+    after = asyncio.run(store.get(consents_db(), consent_id))
+    assert after == before
 
 
 def test_callback_after_revoked_returns_409(client, monkeypatch, store):
-    """Callback depois de REVOKED → 409 (T5)."""
+    """Callback depois de REVOKED → 409 CONSENT_INVALID_STATE.
+    Usa fluxo real: POST → DELETE → callback com state original (F3).
+    """
+    # fluxo real: não forçar status no store
     consent_id, state = _get_state(client, monkeypatch)
-    doc = asyncio.run(store.get(consents_db(), consent_id))
-    doc["status"] = ConsentStatus.REVOKED.value
-    asyncio.run(store.put(consents_db(), consent_id, doc))
+    client.delete(f"/consent/{consent_id}")
+    # snapshot do doc após revogação
+    before = asyncio.run(store.get(consents_db(), consent_id)).copy()
     resp = client.get("/consent/callback", params={"state": state, "code": "sandbox"})
     assert resp.status_code == 409
+    assert resp.json()["code"] == "CONSENT_INVALID_STATE"
+    # documento não alterado pelo callback
+    after = asyncio.run(store.get(consents_db(), consent_id))
+    assert after == before
 
 
 def test_callback_sandbox_rejects_non_sandbox_code(client, monkeypatch):
@@ -409,7 +443,7 @@ def test_status_unknown_id_returns_404(client):
 def test_callback_route_not_captured_as_consent_id(client, monkeypatch):  # T1 hardened
     """
     /callback deve ser capturado pelo handler de callback (state desconhecido → 404 CONSENT_NOT_FOUND),
-    não pelo /{consent_id} (que retornaria 422 por UUID inválido).
+    não pelo /{consent_id} (que retornaria 400 INVALID_REQUEST por UUID inválido — S4).
     """
     monkeypatch.setenv("OPEN_FINANCE_AUTH_SANDBOX", "true")
     # state desconhecido → 404
@@ -437,8 +471,8 @@ def test_revoke_authorised_returns_204(client, monkeypatch, store):
     assert doc["revocation_reason"] == "CUSTOMER_REQUEST"
     assert doc["revoked_by"] == "customer"
     # data com fuso (T6)
-    from src.core.dates import parse_utc
-    assert parse_utc(doc["revoked_at"]).tzinfo is not None
+    # data com fuso (T6/F1)
+    _assert_tz(doc["revoked_at"], "revoked_at")
 
 
 def test_revoke_awaiting_returns_204(client, monkeypatch, store):
@@ -639,6 +673,13 @@ def test_lgpd_full_flow_no_cpf_anywhere(client, monkeypatch, store, caplog):
         r5 = _post_consent(client, cpf=CPF_BAD_DV)
         all_responses.append(r5.text)
 
+        # 6. POST com CPF formatado — cai no RequestValidationError handler (F4)
+        r6 = _post_consent(client, cpf="529.982.247-25")
+        assert r6.status_code == 400
+        assert r6.json()["code"] == "INVALID_REQUEST"
+        assert "529.982.247-25" not in r6.text
+        all_responses.append(r6.text)
+
     cpf_formats = [
         CPF_VALID,
         "529.982.247-25",   # com pontuação
@@ -756,16 +797,31 @@ def test_openapi_consent_responses_match_yaml_and_code(client):
 
 
 # ===========================================================================
-# Grupo: configuração de produção  (C2)
+# Grupo: configuração de produção  (C2, F5)
 # ===========================================================================
 
-def test_pseudonymization_key_error_returns_503(client, monkeypatch):
-    """PseudonymizationKeyError → 503 NOT_CONFIGURED, não 500 (C2)."""
+@pytest.mark.parametrize("setup", [
+    # (a) APP_ENV=production sem chave
+    {"APP_ENV": "production", "del_key": True,  "set_key": None},
+    # (b) chave não-hex
+    {"APP_ENV": "development", "del_key": False, "set_key": "not-hex-value"},
+])
+def test_pseudonymization_key_error_returns_503(client, monkeypatch, setup):
+    """PseudonymizationKeyError → 503 NOT_CONFIGURED em qualquer cenário de chave inválida (C2/F5)."""
     import src.privacy.pseudonymization as ps
     monkeypatch.setenv("OPEN_FINANCE_AUTH_SANDBOX", "true")
+    if setup["APP_ENV"]:
+        monkeypatch.setenv("APP_ENV", setup["APP_ENV"])
     ps._master_key.cache_clear()
-    monkeypatch.setenv("PSEUDONYM_HMAC_KEY", "not-hex-value")
-    resp = _post_consent(client)
-    ps._master_key.cache_clear()
+    try:
+        if setup["del_key"]:
+            monkeypatch.delenv("PSEUDONYM_HMAC_KEY", raising=False)
+        else:
+            monkeypatch.setenv("PSEUDONYM_HMAC_KEY", setup["set_key"])
+        resp = _post_consent(client)
+    finally:
+        ps._master_key.cache_clear()
     assert resp.status_code == 503
     assert resp.json()["code"] == "NOT_CONFIGURED"
+    # nome da variável de config não deve vazar na resposta (F5)
+    assert "PSEUDONYM_HMAC_KEY" not in resp.text
