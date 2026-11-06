@@ -826,6 +826,7 @@ def _make_cloudant_store(client: FakeCloudantClient) -> CloudantRetentionStore:
     store._consents_db = "consent_registry"
     store._snapshots_db = "financial_snapshots"
     store._vault_db = "identity_vault"
+    store._decisions_db = "decision_traces"
     return store
 
 
@@ -1101,4 +1102,252 @@ def test_dry_run_counts_match_real_run():
 
     assert dry_dict == real_dict, (
         f"dry_run e execução real divergem:\n  dry_run:  {dry_dict}\n  real_run: {real_dict}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helpers para documentos de decisão
+# ---------------------------------------------------------------------------
+
+def make_decision(
+    *,
+    doc_type: str = "simulation",
+    pseudonym_id: str = "pid-dec-1",
+    consent_id: str = "cid-dec-1",
+    expires_at: datetime,
+    doc_id: str | None = None,
+) -> dict:
+    did = doc_id or f"{doc_type}:{str(uuid.uuid4())}"
+    return {
+        "_id": did,
+        "type": doc_type,
+        "pseudonym_id": pseudonym_id,
+        "consent_id": consent_id,
+        "expires_at": iso(expires_at),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Regra a2 — Decisões (simulation / trace)
+# ---------------------------------------------------------------------------
+
+def test_rule_a2_decision_expired_deleted():
+    """Decisão com expires_at no passado deve ser deletada."""
+    dec = make_decision(doc_type="simulation", expires_at=PAST)
+    store = InMemoryRetentionStore(decisions=[dec])
+    audit = FakeAudit()
+    vault = FakeVault()
+
+    report = run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+
+    assert report.decisions_deleted == 1
+    assert list(store.iter_decisions({})) == []
+
+
+def test_rule_a2_decision_not_expired_kept():
+    """Decisão com expires_at no futuro NÃO deve ser deletada."""
+    dec = make_decision(doc_type="trace", expires_at=FAR_FUTURE)
+    store = InMemoryRetentionStore(decisions=[dec])
+    audit = FakeAudit()
+    vault = FakeVault()
+
+    report = run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+
+    assert report.decisions_deleted == 0
+    assert len(list(store.iter_decisions({}))) == 1
+
+
+def test_rule_a2_decision_revoked_consent_antecipates_limit():
+    """
+    Consentimento REVOKED há 95 dias antecipa o limite para
+    min(expires_at_futuro, revoked_at + 90d). Como revoked_at + 90d < now → apagar.
+    """
+    consent_id = "cid-dec-rev"
+    revoked_at = NOW - timedelta(days=95)  # 95 dias atrás → revoked_at+90d = 5 dias atrás
+    consent = make_consent(
+        status="REVOKED",
+        consent_id=consent_id,
+        pseudonym_id="pid-dec-rev",
+        expires_at=FAR_FUTURE,
+        revoked_at=revoked_at,
+        revocation_reason="CUSTOMER_REQUEST",
+    )
+    dec = make_decision(
+        doc_type="simulation",
+        pseudonym_id="pid-dec-rev",
+        consent_id=consent_id,
+        expires_at=FAR_FUTURE,
+    )
+    store = InMemoryRetentionStore(consents=[consent], decisions=[dec])
+    audit = FakeAudit()
+    vault = FakeVault()
+
+    report = run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+
+    # revoked_at+90d = 95-90=5 dias atrás < now → apagar
+    assert report.decisions_deleted == 1
+    assert list(store.iter_decisions({})) == []
+
+
+def test_rule_a2_decision_no_expires_at_skipped_invalid():
+    """Decisão sem expires_at → skipped_invalid; logger.warning só com _id."""
+    dec = {
+        "_id": "sim:no-exp",
+        "type": "simulation",
+        "pseudonym_id": "pid-noexp",
+        "consent_id": "cid-noexp",
+        # sem expires_at
+    }
+    store = InMemoryRetentionStore(decisions=[dec])
+    audit = FakeAudit()
+    vault = FakeVault()
+
+    report = run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+
+    assert report.skipped_invalid >= 1
+    assert report.decisions_deleted == 0
+    # Documento mantido
+    assert len(list(store.iter_decisions({}))) == 1
+
+
+def test_rule_a2_other_type_ignored():
+    """Documento de outro type (não simulation nem trace) no banco de decisões é ignorado."""
+    dec = {
+        "_id": "other:123",
+        "type": "other_type",
+        "pseudonym_id": "pid-other",
+        "consent_id": "cid-other",
+        "expires_at": iso(PAST),  # vencido, mas type ignorado
+    }
+    store = InMemoryRetentionStore(decisions=[dec])
+    audit = FakeAudit()
+    vault = FakeVault()
+
+    report = run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+
+    assert report.decisions_deleted == 0
+    assert len(list(store.iter_decisions({}))) == 1
+
+
+def test_rule_a2_dry_run_counts_but_does_not_delete():
+    """dry_run=True conta a decisão vencida mas NÃO a apaga."""
+    dec = make_decision(doc_type="trace", expires_at=PAST)
+    store = InMemoryRetentionStore(decisions=[dec])
+    audit = FakeAudit()
+    vault = FakeVault()
+
+    report = run_retention(now=NOW, dry_run=True, store=store, vault=vault, audit=audit.record_event)
+
+    assert report.decisions_deleted == 1
+    # Documento ainda existe (dry_run)
+    assert len(list(store.iter_decisions({}))) == 1
+
+
+def test_rule_a2_idempotent_second_run_zero():
+    """Segunda execução após a primeira → decisions_deleted = 0."""
+    dec = make_decision(doc_type="simulation", expires_at=PAST)
+    store = InMemoryRetentionStore(decisions=[dec])
+    audit = FakeAudit()
+    vault = FakeVault()
+
+    report1 = run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+    assert report1.decisions_deleted == 1
+
+    report2 = run_retention(now=NOW, store=store, vault=vault, audit=audit.record_event)
+    assert report2.decisions_deleted == 0
+
+
+# ---------------------------------------------------------------------------
+# Cloudant iter_decisions / delete_decision
+# ---------------------------------------------------------------------------
+
+def test_cloudant_store_iter_decisions():
+    """iter_decisions deve retornar documentos do banco de decisões."""
+    docs = [
+        {"_id": "sim:1", "_rev": "1-aaa", "type": "simulation", "pseudonym_id": "pid-d", "expires_at": iso(FAR_FUTURE)},
+        {"_id": "trace:1", "_rev": "1-bbb", "type": "trace", "pseudonym_id": "pid-d", "expires_at": iso(FAR_FUTURE)},
+    ]
+    client = FakeCloudantClient({"decision_traces": docs})
+    store = _make_cloudant_store(client)
+
+    result = list(store.iter_decisions({}))
+    assert len(result) == 2
+
+
+def test_cloudant_store_delete_decision_uses_rev():
+    """delete_decision deve usar o _rev ao chamar delete_document."""
+    doc = {
+        "_id": "sim:del",
+        "_rev": "2-xyzabc",
+        "type": "simulation",
+        "pseudonym_id": "pid-del-dec",
+        "expires_at": iso(PAST),
+    }
+    client = FakeCloudantClient({"decision_traces": [doc]})
+    store = _make_cloudant_store(client)
+
+    store.delete_decision(doc)
+
+    assert len(client.delete_calls) == 1
+    dc = client.delete_calls[0]
+    assert dc["db"] == "decision_traces"
+    assert dc["doc_id"] == "sim:del"
+    assert dc["rev"] == "2-xyzabc"
+
+
+# ---------------------------------------------------------------------------
+# Bug: CLOUDANT_DB_DECISIONS="" deve cair no default "decision_traces"
+# ---------------------------------------------------------------------------
+
+def test_ensure_databases_empty_decisions_env_uses_default(monkeypatch):
+    """
+    Com CLOUDANT_DB_DECISIONS="" (como no .env.example), ensure_databases deve
+    usar o nome padrão "decision_traces" em vez de "" (banco vazio).
+    """
+    from unittest.mock import MagicMock, call
+    from src.privacy.retention_store import ensure_databases
+
+    monkeypatch.setenv("CLOUDANT_DB_DECISIONS", "")
+
+    client = MagicMock()
+    db_result = MagicMock()
+    db_result.get_result.return_value = {}
+    client.put_database.return_value = db_result
+
+    ensure_databases(client)
+
+    called_dbs = [c.kwargs["db"] for c in client.put_database.call_args_list]
+    assert "decision_traces" in called_dbs, (
+        f"Esperava 'decision_traces' em {called_dbs}; "
+        "CLOUDANT_DB_DECISIONS='' deve cair no default."
+    )
+    assert "" not in called_dbs, (
+        f"Nome de banco vazio encontrado em {called_dbs}."
+    )
+
+
+def test_ensure_indexes_empty_decisions_env_uses_default(monkeypatch):
+    """
+    Com CLOUDANT_DB_DECISIONS="" (como no .env.example), ensure_indexes deve
+    usar o nome padrão "decision_traces" em vez de "" (banco vazio).
+    """
+    from unittest.mock import MagicMock
+    from src.privacy.retention_store import ensure_indexes
+
+    monkeypatch.setenv("CLOUDANT_DB_DECISIONS", "")
+
+    client = MagicMock()
+    idx_result = MagicMock()
+    idx_result.get_result.return_value = {}
+    client.post_index.return_value = idx_result
+
+    ensure_indexes(client)
+
+    called_dbs = [c.kwargs["db"] for c in client.post_index.call_args_list]
+    assert "decision_traces" in called_dbs, (
+        f"Esperava 'decision_traces' em {called_dbs}; "
+        "CLOUDANT_DB_DECISIONS='' deve cair no default."
+    )
+    assert "" not in called_dbs, (
+        f"Nome de banco vazio encontrado em {called_dbs}."
     )

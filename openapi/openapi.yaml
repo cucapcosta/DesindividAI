@@ -310,7 +310,7 @@ components:
     ErasureReport:
       type: object
       description: Resultado do apagamento de titular (LGPD Art. 18)
-      required: [consents_revoked, snapshots_deleted, vault_shredded, trace_id]
+      required: [consents_revoked, snapshots_deleted, decisions_deleted, vault_shredded, trace_id]
       properties:
         consents_revoked:
           type: integer
@@ -320,6 +320,10 @@ components:
           type: integer
           description: Número de snapshots financeiros apagados
           example: 3
+        decisions_deleted:
+          type: integer
+          description: Número de decisões (simulation/trace) apagadas de decision_traces
+          example: 2
         vault_shredded:
           type: boolean
           description: true se o cofre de identidade foi destruído agora; false se já estava ou não existia
@@ -333,11 +337,15 @@ components:
     RetentionReport:
       type: object
       description: Resultado do job de retenção
-      required: [snapshots_deleted, consents_awaiting_deleted, consents_expired, consents_revoked_deleted, vault_shredded, skipped_invalid, dry_run]
+      required: [snapshots_deleted, decisions_deleted, consents_awaiting_deleted, consents_expired, consents_revoked_deleted, vault_shredded, skipped_invalid, dry_run]
       properties:
         snapshots_deleted:
           type: integer
           example: 5
+        decisions_deleted:
+          type: integer
+          description: Decisões (simulation/trace) apagadas de decision_traces
+          example: 0
         consents_awaiting_deleted:
           type: integer
           example: 2

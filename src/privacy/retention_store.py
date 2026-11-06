@@ -1,10 +1,11 @@
 """
-RetentionStore — M4, Fase 6.
+RetentionStore — M4, Fase 6 / Fase B1.
 
-Abstração de acesso aos três bancos envolvidos no job de retenção:
-  - consent_registry   (consentimentos)
+Abstração de acesso aos bancos envolvidos no job de retenção:
+  - consent_registry    (consentimentos)
   - financial_snapshots (snapshots do Agente 1)
   - identity_vault      (cofre de identidade)
+  - decision_traces     (simulações e traces do Agente 2)
 
 Padrão: Protocol + InMemory (testes) + Cloudant (produção), igual ao M2.
 
@@ -20,6 +21,8 @@ import logging
 import os
 from functools import lru_cache
 from typing import Iterator, Optional, Protocol
+
+from src.core.config import decisions_db as _decisions_db
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +40,8 @@ class RetentionStore(Protocol):
     def iter_snapshots(self, selector: dict) -> Iterator[dict]: ...
     def delete_snapshot(self, doc: dict) -> None: ...
     def iter_vault(self, selector: dict) -> Iterator[dict]: ...
+    def iter_decisions(self, selector: dict) -> Iterator[dict]: ...
+    def delete_decision(self, doc: dict) -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -47,9 +52,10 @@ class InMemoryRetentionStore:
     """
     Repositório em memória — apenas para testes (sem rede).
 
-    consents: lista de dicts com pelo menos consent_id e _id.
+    consents:  lista de dicts com pelo menos consent_id e _id.
     snapshots: lista de dicts com pelo menos snapshot_id e _id.
-    vault: lista de dicts com _id = pseudonym_id.
+    vault:     lista de dicts com _id = pseudonym_id.
+    decisions: lista de dicts com _id, type, pseudonym_id, expires_at.
     """
 
     def __init__(
@@ -57,11 +63,13 @@ class InMemoryRetentionStore:
         consents: list[dict] | None = None,
         snapshots: list[dict] | None = None,
         vault: list[dict] | None = None,
+        decisions: list[dict] | None = None,
     ) -> None:
         # keyed by _id
         self._consents: dict[str, dict] = {}
         self._snapshots: dict[str, dict] = {}
         self._vault: dict[str, dict] = {}
+        self._decisions: dict[str, dict] = {}
 
         for c in consents or []:
             key = c.get("_id") or c.get("consent_id", "")
@@ -74,6 +82,10 @@ class InMemoryRetentionStore:
         for v in vault or []:
             key = v["_id"]
             self._vault[key] = dict(v)
+
+        for d in decisions or []:
+            key = d["_id"]
+            self._decisions[key] = dict(d)
 
     # -- consents --
 
@@ -111,11 +123,28 @@ class InMemoryRetentionStore:
             if _matches(doc, selector):
                 yield dict(doc)
 
+    # -- decisions --
+
+    def iter_decisions(self, selector: dict) -> Iterator[dict]:
+        for doc in list(self._decisions.values()):
+            if _matches(doc, selector):
+                yield dict(doc)
+
+    def delete_decision(self, doc: dict) -> None:
+        key = doc.get("_id", "")
+        self._decisions.pop(key, None)
+
 
 def _matches(doc: dict, selector: dict) -> bool:
-    """Filtragem simples equivalente ao Mango $eq."""
+    """Filtragem simples equivalente ao Mango $eq e $in."""
     for key, value in selector.items():
-        if value is None:
+        if isinstance(value, dict):
+            # Operadores Mango simples
+            if "$in" in value:
+                if doc.get(key) not in value["$in"]:
+                    return False
+            # Outros operadores podem ser adicionados aqui
+        elif value is None:
             if doc.get(key) is not None:
                 return False
         else:
@@ -137,9 +166,10 @@ class CloudantRetentionStore:
     delete com _rev (get_document → delete_document).
 
     Bancos:
-      CLOUDANT_DB_CONSENTS  (padrão "consent_registry")
-      CLOUDANT_DB_SNAPSHOTS (padrão "financial_snapshots")
+      CLOUDANT_DB_CONSENTS   (padrão "consent_registry")
+      CLOUDANT_DB_SNAPSHOTS  (padrão "financial_snapshots")
       CLOUDANT_DB_IDENTITY_VAULT (padrão "identity_vault")
+      CLOUDANT_DB_DECISIONS  (padrão "decision_traces")
     """
 
     def __init__(
@@ -149,6 +179,7 @@ class CloudantRetentionStore:
         consents_db: str = "consent_registry",
         snapshots_db: str = "financial_snapshots",
         vault_db: str = "identity_vault",
+        decisions_db: str = "decision_traces",
     ) -> None:
         from ibm_cloud_sdk_core.authenticators import IAMAuthenticator
         from ibmcloudant.cloudant_v1 import CloudantV1
@@ -158,6 +189,7 @@ class CloudantRetentionStore:
         self._consents_db = consents_db
         self._snapshots_db = snapshots_db
         self._vault_db = vault_db
+        self._decisions_db = decisions_db
 
     # -- helpers --
 
@@ -229,6 +261,14 @@ class CloudantRetentionStore:
     def iter_vault(self, selector: dict) -> Iterator[dict]:
         return self._iter_db(self._vault_db, selector)
 
+    # -- decisions --
+
+    def iter_decisions(self, selector: dict) -> Iterator[dict]:
+        return self._iter_db(self._decisions_db, selector)
+
+    def delete_decision(self, doc: dict) -> None:
+        self._delete_doc(self._decisions_db, doc)
+
 
 # ---------------------------------------------------------------------------
 # ensure_databases / ensure_indexes
@@ -236,15 +276,16 @@ class CloudantRetentionStore:
 
 def ensure_databases(client) -> None:
     """
-    Cria identity_vault e audit_trail se não existirem.
+    Cria identity_vault, audit_trail e decision_traces se não existirem.
     412 = já existe → ignorar silenciosamente.
     """
     from ibm_cloud_sdk_core import ApiException
 
     vault_db = os.getenv("CLOUDANT_DB_IDENTITY_VAULT", "identity_vault")
     audit_db = os.getenv("CLOUDANT_DB_AUDIT", "audit_trail")
+    decisions_db = _decisions_db()
 
-    for db in (vault_db, audit_db):
+    for db in (vault_db, audit_db, decisions_db):
         try:
             client.put_database(db=db).get_result()
             logger.info("ensure_databases: banco criado: %s", db)
@@ -265,6 +306,7 @@ def ensure_indexes(client) -> None:
 
     consents_db = os.getenv("CLOUDANT_DB_CONSENTS", "consent_registry")
     audit_db = os.getenv("CLOUDANT_DB_AUDIT", "audit_trail")
+    decisions_db = _decisions_db()
 
     indexes: list[tuple[str, list[str], str]] = [
         # (db, fields, name)
@@ -273,6 +315,8 @@ def ensure_indexes(client) -> None:
         (consents_db, ["pseudonym_id", "status"], "by-pseudonym-status"),
         (audit_db, ["pseudonym_id", "recorded_at"], "by-pseudonym-recorded"),
         (audit_db, ["event_type", "recorded_at"], "by-event-recorded"),
+        (decisions_db, ["pseudonym_id"], "by-pseudonym"),
+        (decisions_db, ["type", "expires_at"], "by-type-expires"),
     ]
 
     for db, fields, name in indexes:
@@ -315,4 +359,5 @@ def get_retention_store() -> RetentionStore:
         consents_db=os.getenv("CLOUDANT_DB_CONSENTS", "consent_registry"),
         snapshots_db=os.getenv("CLOUDANT_DB_SNAPSHOTS", "financial_snapshots"),
         vault_db=os.getenv("CLOUDANT_DB_IDENTITY_VAULT", "identity_vault"),
+        decisions_db=_decisions_db(),
     )

@@ -136,6 +136,12 @@ def test_erase_ok_returns_report(client, monkeypatch, fake_store, fake_vault):
         "snapshot_id": "s1",
         "pseudonym_id": pseudonym_a,
     }
+    fake_store._decisions["dec1"] = {
+        "_id": "dec1",
+        "type": "simulation",
+        "pseudonym_id": pseudonym_a,
+        "consent_id": "c1",
+    }
     fake_vault.store(_VALID_CPF)
 
     resp = client.post(
@@ -146,10 +152,12 @@ def test_erase_ok_returns_report(client, monkeypatch, fake_store, fake_vault):
     body = resp.json()
     assert "consents_revoked" in body
     assert "snapshots_deleted" in body
+    assert "decisions_deleted" in body
     assert "vault_shredded" in body
     assert "trace_id" in body
     assert body["consents_revoked"] == 1
     assert body["snapshots_deleted"] == 1
+    assert body["decisions_deleted"] == 1
     assert body["vault_shredded"] is True
 
 
@@ -169,6 +177,7 @@ def test_retention_dry_run_by_default(client, monkeypatch):
     assert body["dry_run"] is True
     # Nada apagado
     assert body["snapshots_deleted"] == 0
+    assert body["decisions_deleted"] == 0
 
 
 def test_retention_dry_run_false_deletes_expired_snapshot(client, monkeypatch, fake_store):

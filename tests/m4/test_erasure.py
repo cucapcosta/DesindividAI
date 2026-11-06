@@ -76,7 +76,7 @@ def vault(vault_repo):
 
 @pytest.fixture
 def store(pseudonym_a, pseudonym_b):
-    """Store com 2 consentimentos e 1 snapshot de A, 1 de B."""
+    """Store com 2 consentimentos, 1 snapshot e 1 decisão de A, 1 de B."""
     consents = [
         {
             "_id": "c-a-1",
@@ -109,7 +109,27 @@ def store(pseudonym_a, pseudonym_b):
             "pseudonym_id": pseudonym_b,
         },
     ]
-    return InMemoryRetentionStore(consents=consents, snapshots=snapshots)
+    decisions = [
+        {
+            "_id": "simulation:a-1",
+            "type": "simulation",
+            "pseudonym_id": pseudonym_a,
+            "consent_id": "c-a-1",
+        },
+        {
+            "_id": "trace:a-1",
+            "type": "trace",
+            "pseudonym_id": pseudonym_a,
+            "consent_id": "c-a-1",
+        },
+        {
+            "_id": "simulation:b-1",
+            "type": "simulation",
+            "pseudonym_id": pseudonym_b,
+            "consent_id": "c-b-1",
+        },
+    ]
+    return InMemoryRetentionStore(consents=consents, snapshots=snapshots, decisions=decisions)
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +141,7 @@ def test_erase_returns_correct_counts(store, vault, audit, pseudonym_a):
 
     assert report.consents_revoked == 2
     assert report.snapshots_deleted == 1
+    assert report.decisions_deleted == 2
     assert report.vault_shredded is True
 
 
@@ -152,6 +173,7 @@ def test_erase_idempotent_second_call_returns_zeros(store, vault, audit, pseudon
 
     assert report2.consents_revoked == 0
     assert report2.snapshots_deleted == 0
+    assert report2.decisions_deleted == 0
     assert report2.vault_shredded is False
 
 
@@ -171,6 +193,10 @@ def test_erase_does_not_touch_other_subject(store, vault_repo, audit, pseudonym_
     # Snapshot de B deve existir
     b_snapshots = list(store.iter_snapshots({"pseudonym_id": pseudonym_b}))
     assert len(b_snapshots) == 1
+
+    # Decisões de B devem existir
+    b_decisions = list(store.iter_decisions({"pseudonym_id": pseudonym_b}))
+    assert len(b_decisions) == 1
 
     # Vault de B deve ser recuperável
     cpf_b = v.reveal(pseudonym_b, purpose="LEGAL_REQUEST", actor="test")

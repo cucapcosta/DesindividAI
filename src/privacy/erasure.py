@@ -1,10 +1,11 @@
 """
-Apagamento de titular — M4, Fase 7 (LGPD Art. 18).
+Apagamento de titular — M4, Fase 7 / Fase B1 (LGPD Art. 18).
 
 erase_subject() implementa o passo 3c do M1 (docs/m1-consent-lifecycle.md):
   a. Evento consent.erasure_requested
   b. Revogar todos os consentimentos não-REVOKED do titular
   c. Apagar todos os snapshots do titular
+  c2. Apagar todas as decisões do titular (decision_traces)
   d. Crypto-shredding do cofre de identidade
   e. Evento erasure.completed
 
@@ -23,6 +24,7 @@ from typing import Optional
 class ErasureReport:
     consents_revoked: int
     snapshots_deleted: int
+    decisions_deleted: int
     vault_shredded: bool
     trace_id: str
 
@@ -79,6 +81,12 @@ def erase_subject(
         store.delete_snapshot(doc)
         snapshots_deleted += 1
 
+    # (c2) Apagar decisões do titular (decision_traces)
+    decisions_deleted = 0
+    for doc in store.iter_decisions({"pseudonym_id": pseudonym_id}):
+        store.delete_decision(doc)
+        decisions_deleted += 1
+
     # (d) Crypto-shredding do cofre
     vault_shredded: bool = vault.shred(pseudonym_id)
 
@@ -89,6 +97,7 @@ def erase_subject(
         actor="internal_api",
         consents_revoked=consents_revoked,
         snapshots_deleted=snapshots_deleted,
+        decisions_deleted=decisions_deleted,
         vault_shredded=vault_shredded,
         request_trace_id=trace_id,
     )
@@ -96,6 +105,7 @@ def erase_subject(
     return ErasureReport(
         consents_revoked=consents_revoked,
         snapshots_deleted=snapshots_deleted,
+        decisions_deleted=decisions_deleted,
         vault_shredded=vault_shredded,
         trace_id=trace_id,
     )

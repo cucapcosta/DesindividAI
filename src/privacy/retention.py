@@ -1,18 +1,20 @@
 """
-Job de retenção — M4, Fase 6.
+Job de retenção — M4, Fase 6 / Fase B1.
 
-Substitui o TTL do MongoDB: percorre consent_registry, financial_snapshots e
-identity_vault e aplica as regras de retenção definidas no M1/M4.
+Substitui o TTL do MongoDB: percorre consent_registry, financial_snapshots,
+identity_vault e decision_traces e aplica as regras de retenção do M1/M4.
 
 Regras (nesta ordem):
-  a. Snapshots: expires_at (ou min(expires_at, revoked_at + RETENTION_AFTER_REVOCATION_DAYS)
-     se o consentimento do snapshot estiver REVOKED) < now → apagar.
-  b. Consentimento AWAITING_AUTHORISATION com awaiting_expires_at < now → apagar.
-  c. Consentimento AUTHORISED com expires_at < now → REVOKED, reason EXPIRED, audit consent.expired.
-  d. Consentimento REVOKED com revoked_at + RETENTION_AFTER_REVOCATION_DAYS < now → apagar.
-  e. Cofre: doc ativo (shredded_at null) com created_at há mais de 24h, sem consentimento nem
-     snapshot com o mesmo pseudonym_id → IdentityVault.shred.
-  f. audit_trail: nunca tocar.
+  a.  Snapshots: expires_at (ou min(expires_at, revoked_at + RETENTION_AFTER_REVOCATION_DAYS)
+      se o consentimento do snapshot estiver REVOKED) < now → apagar.
+  a2. Decisões (simulation/trace): mesmo cálculo de limite que (a) mas usando o consent_id
+      do documento; limite < now → apagar.  Documento sem expires_at → skipped_invalid.
+  b.  Consentimento AWAITING_AUTHORISATION com awaiting_expires_at < now → apagar.
+  c.  Consentimento AUTHORISED com expires_at < now → REVOKED, reason EXPIRED, audit consent.expired.
+  d.  Consentimento REVOKED com revoked_at + RETENTION_AFTER_REVOCATION_DAYS < now → apagar.
+  e.  Cofre: doc ativo (shredded_at null) com created_at há mais de 24h, sem consentimento nem
+      snapshot com o mesmo pseudonym_id → IdentityVault.shred.
+  f.  audit_trail: nunca tocar.
 
 run_retention() é idempotente: segunda execução com o mesmo now → tudo zero.
 
@@ -52,6 +54,7 @@ def _get_retention_days() -> int:
 @dataclass
 class RetentionReport:
     snapshots_deleted: int = 0
+    decisions_deleted: int = 0
     consents_awaiting_deleted: int = 0
     consents_expired: int = 0
     consents_revoked_deleted: int = 0
@@ -196,6 +199,44 @@ def run_retention(
             if not dry_run:
                 store.delete_snapshot(doc)
             report.snapshots_deleted += 1
+
+    # -----------------------------------------------------------------------
+    # Regra a2 — Decisões (simulation / trace)
+    # -----------------------------------------------------------------------
+    for doc in store.iter_decisions({"type": {"$in": ["simulation", "trace"]}}):
+        doc_id = doc.get("_id", "")
+        raw_expires = doc.get("expires_at")
+
+        if not raw_expires:
+            report.skipped_invalid += 1
+            logger.warning(
+                "retention: decisão sem expires_at _id=%s — ignorando", doc_id
+            )
+            continue
+
+        expires_at = _parse_safe(raw_expires, doc_id, "expires_at")
+        if expires_at is None:
+            report.skipped_invalid += 1
+            continue
+
+        # Verificar se consentimento associado está REVOKED → min(expires_at, revoked_at + delta)
+        consent_id = doc.get("consent_id", "")
+        consent_doc = consent_by_id.get(consent_id)
+        limit = expires_at
+
+        if consent_doc is not None and consent_doc.get("status") == "REVOKED":
+            raw_revoked = consent_doc.get("revoked_at")
+            if raw_revoked:
+                revoked_at = _parse_safe(raw_revoked, consent_doc.get("_id", ""), "revoked_at")
+                if revoked_at is not None:
+                    candidate = revoked_at + retention_delta
+                    if candidate < limit:
+                        limit = candidate
+
+        if limit < now:
+            if not dry_run:
+                store.delete_decision(doc)
+            report.decisions_deleted += 1
 
     # -----------------------------------------------------------------------
     # Regra b — AWAITING_AUTHORISATION expirados
@@ -364,6 +405,7 @@ def run_retention(
             pseudonym_id=None,
             actor="retention",
             snapshots_deleted=report.snapshots_deleted,
+            decisions_deleted=report.decisions_deleted,
             consents_awaiting_deleted=report.consents_awaiting_deleted,
             consents_expired=report.consents_expired,
             consents_revoked_deleted=report.consents_revoked_deleted,
