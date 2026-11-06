@@ -12,7 +12,6 @@ Uso (na raiz do repo, com o .env preenchido):
 
 from __future__ import annotations
 
-import os
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -24,20 +23,16 @@ from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv()
 
-from ibm_cloud_sdk_core.authenticators import IAMAuthenticator  # noqa: E402
-from ibmcloudant.cloudant_v1 import CloudantV1, Document  # noqa: E402
+from ibmcloudant.cloudant_v1 import Document  # noqa: E402
 
+from src.agents.agent1.repository import build_cloudant_client  # noqa: E402
 from src.agents.agent1.sandbox_data import SANDBOX_CPF  # noqa: E402
+from src.core.config import consents_db, snapshots_db  # noqa: E402
 from src.privacy.pseudonymization import pseudonymize_cpf  # noqa: E402
 
-CONSENTS_DB = os.getenv("CLOUDANT_DB_CONSENTS", "consent_registry")
-SNAPSHOTS_DB = os.getenv("CLOUDANT_DB_SNAPSHOTS", "financial_snapshots")
-
-
-def client() -> CloudantV1:
-    service = CloudantV1(authenticator=IAMAuthenticator(os.environ["CLOUDANT_APIKEY"]))
-    service.set_service_url(os.environ["CLOUDANT_URL"])
-    return service
+CONSENTS_DB = consents_db()
+SNAPSHOTS_DB = snapshots_db()
+client = build_cloudant_client
 
 
 def create() -> None:

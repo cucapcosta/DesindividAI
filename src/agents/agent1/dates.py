@@ -1,13 +1,5 @@
-"""Datas ISO 8601 vindas de outros serviços (consent_registry, M1)."""
+"""Compatibilidade: as datas ISO 8601 vivem em src.core.dates (compartilhadas com o M3)."""
 
-from datetime import datetime, timezone
+from src.core.dates import parse_utc
 
-
-def parse_utc(value: str) -> datetime:
-    """
-    Converte ISO 8601 em datetime com fuso. Sem fuso explícito, assume UTC —
-    comparar datetime ingênuo com aware levantaria TypeError.
-    Levanta ValueError se o valor não for uma data ISO válida.
-    """
-    parsed = datetime.fromisoformat(value)
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+__all__ = ["parse_utc"]
