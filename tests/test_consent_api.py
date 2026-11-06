@@ -501,6 +501,41 @@ def test_revoke_without_oauth_url_skips(client, monkeypatch, store):
     assert doc["token_revocation"] == "skipped"
 
 
+def test_revoke_persists_revoked_before_token_call(client, monkeypatch, store):
+    """R1: o documento REVOKED deve estar gravado antes que _revoke_tokens seja chamado."""
+    monkeypatch.setenv("OAUTH_REVOKE_URL", "http://example.com/revoke")
+    consent_id = _authorised_consent(client, monkeypatch)
+
+    status_seen_during_revoke: list[str] = []
+
+    import src.services.consent_service as svc
+    original_revoke_tokens = svc._revoke_tokens
+
+    async def capturing_revoke(cid):
+        # Lê o documento do store no momento em que _revoke_tokens é chamado
+        doc = await store.get(consents_db(), cid)
+        status_seen_during_revoke.append(doc["status"] if doc else "NOT_FOUND")
+        return "skipped"
+
+    monkeypatch.setattr(svc, "_revoke_tokens", capturing_revoke)
+    resp = client.delete(f"/consent/{consent_id}")
+    assert resp.status_code == 204
+    assert status_seen_during_revoke == [ConsentStatus.REVOKED.value], (
+        f"_revoke_tokens viu status={status_seen_during_revoke!r}, esperava REVOKED"
+    )
+
+
+def test_revoke_malformed_revoke_url_still_revokes(client, monkeypatch, store):
+    """R2: URL malformada de verdade → 204, documento REVOKED, token_revocation=failed."""
+    monkeypatch.setenv("OAUTH_REVOKE_URL", "http://[::1")  # URL inválida real
+    consent_id = _authorised_consent(client, monkeypatch)
+    resp = client.delete(f"/consent/{consent_id}")
+    assert resp.status_code == 204
+    doc = asyncio.run(store.get(consents_db(), consent_id))
+    assert doc["status"] == ConsentStatus.REVOKED.value
+    assert doc["token_revocation"] == "failed"
+
+
 # ===========================================================================
 # Grupo: integração M2/M3
 # ===========================================================================

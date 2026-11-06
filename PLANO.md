@@ -135,7 +135,7 @@ Definir como o cliente autoriza o acesso aos seus dados financeiros via Open Fin
 | Limpeza de AWAITING/REJECTED antigos (retention.py não apaga REJECTED) | Retenção do M4 |
 | Bug em `retention.py:358` — destrói cofre do titular se um consentimento antigo for apagado enquanto outro está AUTHORISED | M4 |
 | Contrato exato do endpoint de revogação de token do IBM API Connect (B3) | API Connect |
-| Corrida callback × DELETE em Cloudant real (write-rev conflicts) — sem mudança de store por ora (C3) | Integração M1+M4 |
+| Corrida callback × DELETE ainda é last-write-wins no Cloudant; falta escrita condicional por `_rev` em `src/storage/store.py` (compartilhado com M3) — sem mudança de store por ora (C3) | Integração M1+M4 |
 
 #### Relevant Context
 - Regulação: Open Finance Brasil — [openfinancebrasil.org.br](https://openfinancebrasil.org.br)

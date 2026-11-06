@@ -338,12 +338,20 @@ async def revoke_consent(store: DocumentStore, consent_id: str) -> None:
     doc["revoked_at"] = now.isoformat()
     doc["revocation_reason"] = "CUSTOMER_REQUEST"
     doc["revoked_by"] = "customer"
+    doc["token_revocation"] = None  # valor provisório; atualizado abaixo
 
-    # Gravar REVOKED antes de tentar revogar tokens (C3 — estado consistente mesmo em falha)
-    token_revocation = await _revoke_tokens(consent_id)
-    doc["token_revocation"] = token_revocation
-
+    # Escrita 1: gravar REVOKED antes de qualquer I/O externo.
+    # Isso garante que, mesmo se _revoke_tokens demorar ou falhar, o consentimento
+    # já está revogado no banco — a janela de corrida com o callback é eliminada.
     await store.put(consents_db(), consent_id, doc)
+
+    # Escrita 2: chamar a revogação de tokens, depois reler e gravar token_revocation.
+    token_revocation = await _revoke_tokens(consent_id)
+    doc_fresh = await store.get(consents_db(), consent_id)
+    if doc_fresh is not None:
+        doc_fresh["token_revocation"] = token_revocation
+        await store.put(consents_db(), consent_id, doc_fresh)
+
     _audit(
         "consent.revoked",
         consent_id=consent_id,
@@ -397,6 +405,6 @@ async def _revoke_tokens(consent_id: str) -> str:
             resp = await client.post(revoke_url, json={"consent_id": consent_id})
             resp.raise_for_status()
         return "ok"
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, httpx.InvalidURL) as exc:
         logger.warning("Revogação de token falhou para consent_id=%s: %s", consent_id, type(exc).__name__)
         return "failed"

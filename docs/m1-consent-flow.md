@@ -118,7 +118,12 @@ curl -s "$(echo "$R" | python -c 'import sys,json;print(json.load(sys.stdin)["re
 
 | Gatilho | Ação |
 |---|---|
-| `DELETE /consent/{consentId}` (titular ou BB) | Status → `REVOKED`, `revocation_reason=CUSTOMER_REQUEST` |
+| `DELETE /consent/{consentId}` (titular ou BB) | (1) grava `REVOKED` no banco; (2) tenta `POST OAUTH_REVOKE_URL`; (3) atualiza `token_revocation` — `"ok"` / `"failed"` / `"skipped"` |
 | `expiration_days` atingido | Consentimento recusado pelos consumidores via `expires_at` (expiração preguiçosa) |
 | Fraude detectada | Time de segurança do BB revoga via API interna do OAuth Provider |
 | Requisição LGPD Art. 18 (direito ao esquecimento) | `POST /internal/erase` (M4) + revogação |
+
+**Pendência B3 — contrato do endpoint de revogação de token:** o backend envia
+`POST OAUTH_REVOKE_URL {"consent_id": ...}`. O contrato exato do IBM API Connect
+(parâmetros, autenticação, body format) precisa ser definido pela equipe de API.
+O backend não detém os tokens — eles ficam no API Connect.
