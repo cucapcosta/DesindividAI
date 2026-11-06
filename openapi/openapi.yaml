@@ -7,20 +7,30 @@ info:
     API REST do agente DesendividAÍ — consolida dívidas via Open Finance e Serasa,
     prioriza por CET e entrega plano personalizado de quitação.
 
-    **Autenticação:** OAuth2 Authorization Code Flow com PKCE (FAPI 1.0 Advanced Profile).
-    Todos os endpoints exigem um Bearer token emitido pelo IBM API Connect Native OAuth Provider.
+    **Autenticação:** dois esquemas, ambos emitidos pelo IBM API Connect Native OAuth Provider.
 
-    **Escopo de consentimento obrigatório por recurso:**
+    - `channel_oauth2` (client credentials): o **canal** (app/portal BB) gerencia o
+      consentimento. Não depende de token do titular, que só existe depois da autorização.
+    - `openfinance_oauth2` (Authorization Code + PKCE, FAPI 1.0 Advanced): token **do titular**,
+      emitido depois que ele autoriza o consentimento; acessa os dados financeiros.
 
-    | Endpoint | Scope |
-    |---|---|
-    | POST /consent | `openid consent:write` |
-    | GET /consent/callback | — (retorno do Authorization Server) |
-    | GET /consent/{consentId} | `consent:read` |
-    | DELETE /consent/{consentId} | `consent:write` |
-    | GET /debts | `debts:read` |
-    | POST /simulation | `simulation:read` |
-    | POST /recommendation | `recommendation:read` |
+    | Endpoint | Esquema | Scope |
+    |---|---|---|
+    | POST /consent | `channel_oauth2` | `consent:write` |
+    | GET /consent/callback | — | — (retorno do Authorization Server, validado pelo `state`) |
+    | GET /consent/{consentId} | `channel_oauth2` | `consent:read` |
+    | DELETE /consent/{consentId} | `channel_oauth2` | `consent:write` |
+    | GET /debts | `openfinance_oauth2` | `debts:read` |
+    | POST /simulation | `openfinance_oauth2` | `simulation:read` |
+    | POST /recommendation | `openfinance_oauth2` | `recommendation:read` |
+
+    `401` e `429` vêm do gateway, antes de a requisição chegar ao backend.
+
+    **Códigos de consentimento (403):** `GET /debts` usa `CONSENT_NOT_AUTHORISED` para
+    consentimento não `AUTHORISED`; `POST /simulation` e `POST /recommendation` usam
+    `CONSENT_REQUIRED` para consentimento ausente, não `AUTHORISED` ou de outro titular.
+    `INSUFFICIENT_SCOPE` e `CONSENT_EXPIRED` são iguais nos três. A unificação do caso
+    "não AUTHORISED" está pendente entre M2 e M3.
   contact:
     name: Os Guri da IBM
   license:
@@ -37,10 +47,22 @@ servers:
 # ---------------------------------------------------------------------------
 components:
   securitySchemes:
+    channel_oauth2:
+      type: oauth2
+      description: |
+        Client credentials do canal (app/portal BB, cliente confidencial registrado no
+        API Connect). Usado para criar, consultar e revogar consentimentos.
+      flows:
+        clientCredentials:
+          tokenUrl: https://api.bb.com.br/desendividai/v1/oauth/token
+          scopes:
+            "consent:read":      Consultar status do consentimento
+            "consent:write":     Criar e revogar consentimentos
     openfinance_oauth2:
       type: oauth2
       description: |
         OAuth2 Authorization Code com PKCE — Financial-grade API (FAPI) 1.0 Advanced Profile.
+        Token do titular, emitido depois que ele autoriza o consentimento.
         O Authorization Server é o IBM API Connect Native OAuth Provider.
       flows:
         authorizationCode:
@@ -49,8 +71,6 @@ components:
           refreshUrl: https://api.bb.com.br/desendividai/v1/oauth/token
           scopes:
             openid:              Identidade do cliente (obrigatório)
-            "consent:read":      Consultar status do consentimento
-            "consent:write":     Criar e revogar consentimentos
             "debts:read":        Listar dívidas consolidadas
             "simulation:read":   Solicitar simulação de cenários
             "recommendation:read": Obter recomendação de quitação
@@ -201,7 +221,7 @@ components:
         snapshot_id:
           type: string
           format: uuid
-          description: ID do snapshot financeiro persistido no MongoDB
+          description: ID do snapshot financeiro persistido no Cloudant (financial_snapshots)
         total_outstanding:
           type: number
           format: double
@@ -329,7 +349,26 @@ components:
           format: date-time
         trace_id:
           type: string
-          description: ID de rastreio do watsonx.governance para auditoria LGPD
+          description: |
+            ID do trace da decisão em decision_traces (Cloudant), correlacionado com a trilha de
+            auditoria do M4. O envio ao watsonx.governance está pendente.
+
+    ValidationErrorResponse:
+      type: object
+      description: Erro de validação padrão do FastAPI (fora de /consent*, que responde 400 ErrorResponse)
+      properties:
+        detail:
+          type: array
+          items:
+            type: object
+            properties:
+              loc:
+                type: array
+                items: {}
+              msg:
+                type: string
+              type:
+                type: string
 
     ErrorResponse:
       type: object
@@ -367,7 +406,7 @@ paths:
         da instituição financeira. O status inicial é `AWAITING_AUTHORISATION`.
       tags: [Consent]
       security:
-        - openfinance_oauth2: [openid, "consent:write"]
+        - channel_oauth2: ["consent:write"]
       requestBody:
         required: true
         content:
@@ -483,7 +522,7 @@ paths:
       description: Retorna o status atual do consentimento para o canal acompanhar.
       tags: [Consent]
       security:
-        - openfinance_oauth2: ["consent:read"]
+        - channel_oauth2: ["consent:read"]
       parameters:
         - name: consentId
           in: path
@@ -522,6 +561,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        "429":
+          description: Rate limit excedido (gateway)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
     delete:
       operationId: revokeConsent
       summary: Revogar consentimento
@@ -533,7 +578,7 @@ paths:
         Conforme LGPD Art. 8º §5 — consentimento pode ser revogado a qualquer tempo.
       tags: [Consent]
       security:
-        - openfinance_oauth2: ["consent:write"]
+        - channel_oauth2: ["consent:write"]
       parameters:
         - name: consentId
           in: path
@@ -575,6 +620,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+        "429":
+          description: Rate limit excedido (gateway)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   # ── Dívidas ────────────────────────────────────────────────────────────────
   /debts:
     get:
@@ -583,7 +634,7 @@ paths:
       description: |
         Aciona o Agente 1 (LangChain + Granite) que coleta dívidas via Open Finance
         e Serasa, calcula o CET de cada uma e retorna o retrato financeiro priorizado.
-        Os dados são pseudonimizados antes da persistência no MongoDB.
+        Os dados são pseudonimizados antes da persistência no Cloudant.
       tags: [Debts]
       security:
         - openfinance_oauth2: ["debts:read"]
@@ -609,13 +660,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         "403":
-          description: Consentimento não autorizado ou escopo insuficiente
+          description: Consentimento não `AUTHORISED` ou sem data de expiração válida (`CONSENT_NOT_AUTHORISED`), sem o escopo `debts:read` (`INSUFFICIENT_SCOPE`) ou expirado (`CONSENT_EXPIRED`)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         "404":
-          description: Consentimento não encontrado
+          description: Consentimento não encontrado (`CONSENT_NOT_FOUND`)
           content:
             application/json:
               schema:
@@ -639,13 +690,32 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+        "401":
+          description: Token ausente ou inválido (gateway)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "422":
+          description: Parâmetros fora do formato esperado (validação do FastAPI, corpo `detail`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+        "429":
+          description: Rate limit excedido (gateway)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   # ── Simulação ──────────────────────────────────────────────────────────────
   /simulation:
     post:
       operationId: runSimulation
       summary: Simular cenários de quitação
       description: |
-        Aciona o Motor de Simulação (AI Service Python no watsonx.ai) e retorna
+        Aciona o Motor de Simulação (lógica Python determinística; roda no processo, e como
+        AI Service no watsonx.ai quando WATSONX_SIMULATION_URL estiver configurado) e retorna
         3 cenários: **agressivo**, **consolidação** e **mínimo viável**.
       tags: [Simulation]
       security:
@@ -688,6 +758,26 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+        "401":
+          description: Token ausente ou inválido (gateway)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "422":
+          description: Snapshot inválido (`SNAPSHOT_INVALID`) ou corpo fora do formato (validação do FastAPI, corpo `detail`)
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/ErrorResponse'
+                  - $ref: '#/components/schemas/ValidationErrorResponse'
+        "429":
+          description: Rate limit excedido (gateway)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   # ── Recomendação ───────────────────────────────────────────────────────────
   /recommendation:
     post:
@@ -695,8 +785,9 @@ paths:
       summary: Obter recomendação de quitação em linguagem simples
       description: |
         Aciona o Agente 2 (LangChain + Granite) que analisa os cenários e
-        gera uma recomendação em linguagem simples. Toda decisão do LLM é
-        registrada no watsonx.governance para auditoria LGPD.
+        gera uma recomendação em linguagem simples. Cada decisão é registrada em
+        decision_traces e na trilha de auditoria do M4; o envio ao watsonx.governance
+        está pendente.
       tags: [Recommendation]
       security:
         - openfinance_oauth2: ["recommendation:read"]
@@ -738,3 +829,21 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+        "401":
+          description: Token ausente ou inválido (gateway)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "422":
+          description: Parâmetros fora do formato esperado (validação do FastAPI, corpo `detail`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+        "429":
+          description: Rate limit excedido (gateway)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'

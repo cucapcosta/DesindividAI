@@ -31,6 +31,7 @@ from src.core.errors import ServiceError
 from src.privacy.audit_bridge import emit
 from src.privacy.identity_vault import IdentityVault, InMemoryVaultRepository, get_identity_vault
 from src.privacy.key_provider import KeyProviderError
+from src.privacy.pseudonymization import PseudonymizationKeyError, current_key_version
 from src.storage.store import DocumentStore
 
 logger = logging.getLogger(__name__)
@@ -73,12 +74,17 @@ def _identity_vault() -> IdentityVault:
     return get_identity_vault()
 
 
-async def _store_identity(cpf: str) -> str:
-    """Cifra o CPF no cofre e devolve o pseudonym_id. O CPF não sai daqui."""
+async def _store_identity(cpf: str) -> tuple[str, str]:
+    """
+    Cifra o CPF no cofre e devolve (pseudonym_id, key_version). O CPF não sai daqui.
+    key_version é a versão da chave que gerou o pseudônimo; o Agente 1 a copia para o snapshot.
+    """
+    def store() -> tuple[str, str]:
+        return _identity_vault().store(cpf), current_key_version()
+
     try:
-        vault = _identity_vault()
-        return await asyncio.to_thread(vault.store, cpf)
-    except (ConfigurationError, KeyProviderError) as exc:
+        return await asyncio.to_thread(store)
+    except (ConfigurationError, KeyProviderError, PseudonymizationKeyError) as exc:
         raise ServiceError(503, "NOT_CONFIGURED", "Cofre de identidade não configurado.") from exc
     except (ApiException, requests.RequestException) as exc:
         raise ServiceError(503, "SERVICE_UNAVAILABLE", "Cofre de identidade indisponível.") from exc
@@ -213,7 +219,7 @@ async def create_consent(store: DocumentStore, body) -> ConsentResponse:
     redirect_url = _build_redirect_url(consent_id, state)
 
     # --- CPF cifrado no cofre do M4 (não sai daqui) ---
-    pseudonym_id = await _store_identity(body.cpf)
+    pseudonym_id, key_version = await _store_identity(body.cpf)
 
     now = _utcnow()
     expires_at = (now + timedelta(days=body.expiration_days)).isoformat()
@@ -225,6 +231,7 @@ async def create_consent(store: DocumentStore, body) -> ConsentResponse:
         "type": "consent",
         "consent_id": consent_id,
         "pseudonym_id": pseudonym_id,
+        "key_version": key_version,
         "institutions": institutions,
         "scopes": scopes,
         "status": ConsentStatus.AWAITING_AUTHORISATION.value,

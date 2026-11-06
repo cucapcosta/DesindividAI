@@ -406,7 +406,7 @@ uvicorn src.main:app --reload       # na raiz do repo
 ter a instância `watsonx-Hackathon WML` associada, e os bancos `consent_registry` e
 `financial_snapshots` precisam existir no Cloudant (já criados, com os índices da seção 7).
 
-**Consentimento de teste:** enquanto `POST /consent` (M1) não existe, grave um com
+**Consentimento de teste:** o caminho normal é `POST /consent` + callback (sandbox: `code=sandbox`, ver `docs/m1-consent-flow.md`). Como atalho, grave um com
 
 ```bash
 python scripts/seed_test_consent.py create          # imprime o consent_id

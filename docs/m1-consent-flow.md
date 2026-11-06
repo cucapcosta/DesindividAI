@@ -13,6 +13,27 @@ para Open Finance fase 2 (dados de crédito). Diferença crítica em relação a
 | mTLS ou DPoP no token request | Vincula o token ao cliente que o solicitou |
 | Nonce obrigatório | Anti-replay para o `id_token` |
 
+## Simplificação em relação à API de consentimentos do Open Finance Brasil
+
+No Open Finance Brasil (OFB) o consentimento é criado **em cada instituição transmissora**
+(`POST /consents`), com `permissions` padronizadas. O DesendividAÍ simplifica isso de propósito:
+
+| OFB | DesendividAÍ (M1) |
+|---|---|
+| Um consentimento por instituição transmissora | Um consentimento do titular com o BB cobrindo N instituições (`institutions`) |
+| `permissions` do OFB | Escopos internos (`debts:read`, `simulation:read`, `recommendation:read`) |
+| Redirect para cada transmissora | Um `redirect_url` (modo real: Authorization Server configurado) |
+
+Quem abre os consentimentos OFB por transmissora é o **receptor Open Finance do BB**, que o
+Agente 1 consulta em `/consents/{consent_id}/credit-operations` (`src/agents/agent1/sources.py`).
+Mapeamento esperado dos escopos para as permissions de dados de crédito (fase 2; conferir os
+nomes na versão vigente da especificação OFB):
+
+| Escopo | Permissions OFB |
+|---|---|
+| `debts:read` | `RESOURCES_READ`, `LOANS_READ`, `LOANS_SCHEDULED_INSTALMENTS_READ`, `LOANS_PAYMENTS_READ`, `FINANCINGS_READ`, `FINANCINGS_SCHEDULED_INSTALMENTS_READ`, `FINANCINGS_PAYMENTS_READ`, `UNARRANGED_ACCOUNTS_OVERDRAFT_READ`, `UNARRANGED_ACCOUNTS_OVERDRAFT_PAYMENTS_READ`, `CREDIT_CARDS_ACCOUNTS_READ`, `CREDIT_CARDS_ACCOUNTS_BILLS_READ` |
+| `simulation:read`, `recommendation:read` | Nenhuma — usam só o snapshot já coletado |
+
 ---
 
 ## Diagrama de Sequência
@@ -28,7 +49,7 @@ Cliente (App/Canal)          API Connect (Gateway)          Auth Server (FAPI)  
         │── POST /consent ─────────▶│                               │                          │
         │   {cpf, institutions,     │── valida Bearer token ───────▶│                          │
         │    scopes, expiration}    │◀─ 200 token valid ────────────│                          │
-        │                           │── persist consent_registry ──▶│(Cloudant)                │
+        │                           │── backend M1: cofre + consent_registry (Cloudant)        │
         │◀─ 201 {consent_id,        │                               │                          │
         │        redirect_url,      │                               │                          │
         │        status:AWAITING}──│                               │                          │
@@ -65,7 +86,7 @@ Cliente (App/Canal)          API Connect (Gateway)          Auth Server (FAPI)  
 
 ### 1. Criação do Consentimento (`POST /consent`)
 - O canal (app/portal) envia CPF, lista de instituições e escopos desejados.
-- O API Connect valida o Bearer token do canal (Service ID IAM provisionado pelo BB). *(pendência de configuração)*
+- O API Connect valida o token do canal (`channel_oauth2`, client credentials, escopo `consent:write`). O titular ainda não tem token: ele só é emitido depois da autorização. *(pendência de configuração)*
 - O servidor cifra o CPF no cofre de identidade do M4 (`identity_vault`, envelope encryption), que devolve o `pseudonym_id`; o CPF não vai para nenhum outro lugar.
 - Cria o registro em `consent_registry` no Cloudant com `status: AWAITING_AUTHORISATION` e o `pseudonym_id`.
 - Retorna `redirect_url` apontando para o portal Open Finance da instituição.
@@ -131,7 +152,7 @@ curl -s "$(echo "$R" | python -c 'import sys,json;print(json.load(sys.stdin)["re
 | `expiration_days` atingido | Consumidores recusam via `expires_at` (expiração preguiçosa); o job de retenção do M4 (regra c) depois grava `REVOKED` com `revocation_reason=EXPIRED` e audita `consent.expired` |
 | `AWAITING` vencido | Callback depois do prazo → `403 CONSENT_AUTHORISATION_EXPIRED`; se a retenção do M4 (regra b) já apagou o documento, `404 CONSENT_NOT_FOUND` |
 | Fraude detectada | Time de segurança do BB revoga via API interna do OAuth Provider |
-| Requisição LGPD Art. 18 (direito ao esquecimento) | `POST /internal/erase` (M4) + revogação |
+| Requisição LGPD Art. 18 (direito ao esquecimento) | `POST /internal/erase` (M4): consentimento → `REVOKED`/`LGPD_ERASURE`, dados apagados e cofre destruído. Não chama a revogação de token; o access token expira no TTL (15 min) e o refresh token precisa ser revogado no API Connect (mesma pendência B3) |
 
 **Pendência B3 — contrato do endpoint de revogação de token:** o backend envia
 `POST OAUTH_REVOKE_URL {"consent_id": ...}`. O contrato exato do IBM API Connect

@@ -998,3 +998,33 @@ def test_identity_vault_selection(monkeypatch):
     assert svc._identity_vault() is svc._identity_vault()
     monkeypatch.setenv("STORE_BACKEND", "")
     assert svc._identity_vault() is sentinel
+
+
+def test_consent_doc_records_pseudonym_key_version(client, monkeypatch, store):
+    """O Agente 1 copia key_version do consentimento para o snapshot."""
+    monkeypatch.setenv("OPEN_FINANCE_AUTH_SANDBOX", "true")
+    doc = asyncio.run(store.get(consents_db(), _created(client)["consent_id"]))
+    assert doc["key_version"] == ps.current_key_version() == "v1"
+
+
+def test_openapi_yaml_covers_every_code_the_app_declares(client):
+    """Todo código do app.openapi() está no YAML; o YAML só acrescenta 401/429 (gateway)."""
+    spec = yaml.safe_load(OPENAPI_YAML.read_text())
+    for route, ops in client.app.openapi()["paths"].items():
+        yaml_route = route.replace("{consent_id}", "{consentId}")
+        for method, op in ops.items():
+            app_codes = set(op["responses"])
+            yaml_codes = set(spec["paths"][yaml_route][method]["responses"])
+            assert app_codes <= yaml_codes, f"{method.upper()} {route}: faltam no YAML {app_codes - yaml_codes}"
+            assert yaml_codes - app_codes <= {"401", "429"}, f"{method.upper()} {route}: {yaml_codes - app_codes}"
+
+
+def test_openapi_consent_routes_use_channel_credentials():
+    """POST/GET/DELETE /consent usam o token do canal; o callback não exige token."""
+    spec = yaml.safe_load(OPENAPI_YAML.read_text())
+    paths = spec["paths"]
+    assert paths["/consent"]["post"]["security"] == [{"channel_oauth2": ["consent:write"]}]
+    assert paths["/consent/{consentId}"]["get"]["security"] == [{"channel_oauth2": ["consent:read"]}]
+    assert paths["/consent/{consentId}"]["delete"]["security"] == [{"channel_oauth2": ["consent:write"]}]
+    assert paths["/consent/callback"]["get"]["security"] == []
+    assert "clientCredentials" in spec["components"]["securitySchemes"]["channel_oauth2"]["flows"]

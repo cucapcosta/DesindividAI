@@ -120,7 +120,7 @@ Definir como o cliente autoriza o acesso aos seus dados financeiros via Open Fin
 - [`src/api/models.py`](src/api/models.py) — `ConsentStatusResponse`; `Field(example=…)` → `json_schema_extra`; `cpf` pattern ASCII-only
 - [`src/main.py`](src/main.py) — handler de `RequestValidationError` para `/consent` e `/consent/*` (400 sem ecoar CPF)
 - [`src/storage/store.py`](src/storage/store.py) — `put(..., rev=...)`: escrita condicional (409 `CONFLICT` se outra escrita chegou antes); sem `rev`, comportamento anterior
-- [`tests/test_consent_api.py`](tests/test_consent_api.py) — 69 casos de teste (create, callback, status, revoke, concorrência, cofre e auditoria, integração M2/M3, lgpd, openapi contract)
+- [`tests/test_consent_api.py`](tests/test_consent_api.py) — 72 casos de teste (create, callback, status, revoke, concorrência, cofre e auditoria, integração M2/M3, lgpd, openapi contract)
 - [`.env.example`](.env.example) — bloco M1 (`OPEN_FINANCE_AUTH_SANDBOX`, `PUBLIC_BASE_URL`, `OPEN_FINANCE_AUTHORIZE_URL`, `OPEN_FINANCE_CLIENT_ID`, `OPEN_FINANCE_REDIRECT_URI`, `OAUTH_REVOKE_URL`)
 - [`scripts/cloud_setup.py`](scripts/cloud_setup.py) — índices `by-state-hash` e `by-consent-id` em `consent_registry`
 
@@ -133,7 +133,8 @@ Definir como o cliente autoriza o acesso aos seus dados financeiros via Open Fin
 | Afinidade por `consent_id` no gateway (jobs `202` do `GET /debts` em memória) | API Connect |
 | Rate limit (`429`) e `401` | API Connect |
 | Ligar `REQUIRE_CONSENT=true` por padrão e aposentar `scripts/seed_test_consent.py` | Decisão do time após o merge |
-| Contrato exato do endpoint de revogação de token do IBM API Connect (B3) | API Connect |
+| Contrato exato do endpoint de revogação de token do IBM API Connect (B3); revogar também no erase LGPD e na expiração (regra c) | API Connect + M4 |
+| Unificar o código 403 de consentimento não `AUTHORISED`: `CONSENT_NOT_AUTHORISED` no `GET /debts` × `CONSENT_REQUIRED` no `/simulation` e `/recommendation` (o contrato documenta os dois) | M2 + M3 |
 
 #### Relevant Context
 - Regulação: Open Finance Brasil — [openfinancebrasil.org.br](https://openfinancebrasil.org.br)
@@ -171,7 +172,7 @@ Projetar o Agente 1 responsável por coletar dívidas via Open Finance e Serasa,
 - [`src/agents/agent1/`](src/agents/agent1/) — Implementação do Agente 1 (LangChain `AgentExecutor` + Granite via watsonx.ai)
 - [`src/privacy/pseudonymization.py`](src/privacy/pseudonymization.py) — HMAC-SHA256 compartilhado com M1/M4
 - [`src/api/routers/debts.py`](src/api/routers/debts.py) — `GET /debts` implementado
-- [`scripts/seed_test_consent.py`](scripts/seed_test_consent.py) — Cria/remove consentimento de teste no Cloudant (até o `POST /consent` do M1 existir)
+- [`scripts/seed_test_consent.py`](scripts/seed_test_consent.py) — Atalho de teste: cria/remove um consentimento AUTHORISED no Cloudant (o caminho normal é `POST /consent` + callback)
 - [`scripts/update_market_rates.py`](scripts/update_market_rates.py) — Atualiza as taxas médias PF do BCB usadas para estimar CET de dívidas só do Serasa
 - [`tests/`](tests/) — Testes de CET, priorização, pseudonimização, agente e endpoint
 
@@ -301,7 +302,8 @@ Projetar a camada de dados garantindo que informações pessoais financeiras sej
 | Secrets (hackathon) | **Env + KeyProvider; envelope encryption com DEK por titular** | Secrets Manager indisponível na conta do hackathon; chaves via variáveis de ambiente atrás da interface `KeyProvider`; CPF cifrado com AES-256-GCM e DEK aleatória por titular, envolvida pela KEK |
 | Pseudonimização | HMAC-SHA256 + chave mestra | Pseudonimização determinística (permite correlação interna) |
 | Retenção no Cloudant | Job de expurgo idempotente (`src/privacy/retention.py`) | Cloudant não tem TTL nativo; job substitui os índices TTL do MongoDB previstos no M1 |
-| Gateway | IBM API Connect | Padrão IBM, suporte a FAPI (Financial-grade API), políticas OAuth2 nativas |
+| Gateway (produção) | IBM API Connect | Padrão IBM, suporte a FAPI (Financial-grade API), políticas OAuth2 nativas |
+| Gateway (hackathon) | **Não provisionado** — contrato em `openapi/openapi.yaml`, políticas em `docs/m1-api-connect-policies.md` | API Connect fora da conta do hackathon. Sem gateway, nada valida token: o backend confia que só o gateway o chama. Canal usa client credentials (`consent:*`); titular usa authorization code + PKCE (dados) |
 | Governança | watsonx.governance | Rastreabilidade de decisões de IA exigida por regulação financeira |
 | Motor de simulação | AI Service Python no watsonx.ai | Lógica financeira pura, sem dependência de LLM, reutilizável como endpoint REST |
 | Canal de engajamento | Fora do escopo | API genérica OpenAPI — qualquer canal pode integrar |

@@ -57,6 +57,7 @@ física de documentos vencidos fica com a retenção do M4.
   "type": "consent",
   "consent_id": "uuid-v4",
   "pseudonym_id": "hmac-hex",
+  "key_version": "v1",
   "institutions": ["bb", "itau"],
   "scopes": ["debts:read", "simulation:read"],
   "status": "AWAITING_AUTHORISATION",
@@ -76,6 +77,7 @@ física de documentos vencidos fica com a retenção do M4.
 
 - **`_id` = `consent_id`** para permitir `store.get` direto.
 - **Nunca** gravar o CPF, nem mascarado. O CPF fica só cifrado no cofre de identidade do M4.
+- `key_version`: versão da chave que gerou o `pseudonym_id`; o Agente 1 a copia para o snapshot.
 - `rejection_reason`: `"ACCESS_DENIED"` | `"AUTHORISATION_TIMEOUT"` | `"CUSTOMER_CANCELLED"` (DELETE antes de autorizar).
 - `revocation_reason`: `"CUSTOMER_REQUEST"` (único valor que o M1 grava; `FRAUD` e `LGPD_ERASURE` são de outros fluxos).
 - `token_revocation`: `"ok"` | `"failed"` | `"skipped"`.
@@ -162,7 +164,9 @@ O backend não detém os tokens — eles ficam no API Connect.
 2. Equipe de privacidade aciona: POST /internal/erase/{pseudonym_id}  [M4]
 3. Backend (M4):
    a. Revoga consentimento: status → REVOKED, reason → "LGPD_ERASURE"
-   b. Invalida tokens e apaga cofre
+   b. Apaga snapshots e decisões e destrói o registro do cofre
+   (não revoga tokens: o access token expira no TTL de 15 min; a revogação do refresh
+   token no API Connect depende da pendência B3)
 4. Prazo de execução: 15 dias corridos (BCB + LGPD)
 ```
 
@@ -177,5 +181,5 @@ auditoria não derruba a operação.
 |---|---|
 | `consent.created` | consent_id, institutions, scopes, expires_at |
 | `consent.authorised` | consent_id |
-| `consent.rejected` | consent_id, reason |
-| `consent.revoked` | consent_id, revocation_reason, revoked_by, token_revocation |
+| `consent.rejected` | consent_id, reason (`ACCESS_DENIED`, `AUTHORISATION_TIMEOUT` ou `CUSTOMER_CANCELLED`) |
+| `consent.revoked` | consent_id, revocation_reason, revoked_by (emitido antes da revogação de token; o resultado fica no campo `token_revocation` do documento) |
