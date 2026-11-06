@@ -9,6 +9,8 @@ _REAL_SERVICE_VARS = (
     "CLOUDANT_URL", "CLOUDANT_APIKEY",
     "OPEN_FINANCE_BASE_URL", "OPEN_FINANCE_API_KEY",
     "SERASA_BASE_URL", "SERASA_API_KEY",
+    # M4 — credenciais de COS zeradas (testes não usam COS real)
+    "COS_ACCESS_KEY_ID", "COS_SECRET_ACCESS_KEY",
 )
 if os.getenv("RUN_CLOUD_TESTS") != "1":
     for var in _REAL_SERVICE_VARS:
@@ -21,11 +23,18 @@ os.environ["SERASA_SANDBOX"] = "true"
 os.environ["PSEUDONYM_HMAC_KEY"] = "ab" * 32
 os.environ["APP_ENV"] = "development"
 
+# M4 — chaves e token fixos para testes unitários.
+# Nunca usar valores reais aqui. 64 hex chars = 32 bytes.
+os.environ["VAULT_KEK_V1"] = "cd" * 32
+os.environ["VAULT_KEK_ACTIVE_VERSION"] = "v1"
+os.environ["PSEUDONYM_KEY_ACTIVE_VERSION"] = "v1"
+os.environ["INTERNAL_API_TOKEN"] = "test-internal-token-do-not-use-in-production"
+
 import pytest  # noqa: E402  (o ambiente acima precisa existir antes dos imports da aplicação)
 from fastapi.testclient import TestClient  # noqa: E402
 from langchain_core.language_models.fake_chat_models import FakeListChatModel  # noqa: E402
 
-from src.agents.recommendation_agent import build_llm  # noqa: E402
+from src.agents.recommendation_agent import get_llm  # noqa: E402
 from src.main import app  # noqa: E402
 from src.storage.store import MemoryStore, get_store  # noqa: E402
 
@@ -58,6 +67,6 @@ def client(store):
         "total_outstanding": 25000.0, "generated_at": "2026-01-01T00:00:00Z",
     }))
     app.dependency_overrides[get_store] = lambda: store
-    app.dependency_overrides[build_llm] = lambda: FakeListChatModel(responses=["Explicação de teste."])
+    app.dependency_overrides[get_llm] = lambda: FakeListChatModel(responses=["Explicação de teste."])
     yield TestClient(app)
     app.dependency_overrides.clear()

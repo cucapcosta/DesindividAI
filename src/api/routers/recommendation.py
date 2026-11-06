@@ -8,7 +8,7 @@ Ver docs/m3-agent2-recommendation.md.
 from fastapi import APIRouter, Depends, status
 from langchain_core.runnables import Runnable
 
-from src.agents.recommendation_agent import build_llm
+from src.agents.recommendation_agent import get_llm
 from src.api.models import RecommendationRequest, RecommendationResponse, ErrorResponse
 from src.services.recommendation_service import create_recommendation
 from src.storage.store import DocumentStore, get_store
@@ -31,7 +31,7 @@ router = APIRouter(prefix="/recommendation", tags=["Recommendation"])
 async def get_recommendation(
     body: RecommendationRequest,
     store: DocumentStore = Depends(get_store),
-    llm: Runnable = Depends(build_llm),
+    llm: Runnable = Depends(get_llm),
 ) -> RecommendationResponse:
     """Escolhe o cenário (regra determinística) e o Granite explica; registra trace para auditoria LGPD."""
     return await create_recommendation(store, llm, body.simulation_id, body.language_level)

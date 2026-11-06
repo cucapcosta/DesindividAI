@@ -14,6 +14,7 @@ injection, o agente não consegue consultar dados de outro titular.
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -42,6 +43,9 @@ class ToolInputError(ValueError):
     """Chamada inválida — a mensagem é devolvida ao LLM para que ele corrija."""
 
 
+logger = logging.getLogger(__name__)
+
+
 @dataclass
 class RunContext:
     consent: dict
@@ -49,6 +53,10 @@ class RunContext:
     open_finance: OpenFinanceClient
     serasa: SerasaClient
     model_id: Optional[str] = None
+    audit: Optional[Any] = None  # objeto com record_event; default None → M2 intacto
+    # Versão da chave que gerou o pseudonym_id (injetada por run_agent1 a partir do
+    # consentimento ou do cofre). None → fallback para current_key_version() + warning.
+    pseudonym_key_version: Optional[str] = None
 
     open_finance_debts: Optional[list[RawDebt]] = None
     serasa_report: Optional[SerasaReport] = None   # None = get_serasa_data não chamada
@@ -151,6 +159,9 @@ def calculate_cet(ctx: RunContext) -> dict:
 
 def persist_snapshot(ctx: RunContext) -> dict:
     def run() -> dict:
+        from src.privacy.pii_guard import assert_no_pii
+        from src.privacy.pseudonymization import current_key_version
+
         if ctx.analyzed_debts is None:
             raise ToolInputError("chame calculate_cet antes de persist_snapshot")
         if ctx.snapshot is not None:
@@ -163,8 +174,42 @@ def persist_snapshot(ctx: RunContext) -> dict:
         snapshot["agent"]["tool_calls"].append(
             {"tool": "persist_snapshot", "at": snapshot["generated_at"], "ok": True}
         )
+
+        # M4: marcar versão da chave e validar ausência de PII antes de salvar.
+        # PIIViolation propaga: a tool falha e o snapshot NUNCA é salvo.
+        # Usar a versão registrada no consentimento/cofre (injetada via RunContext);
+        # fallback para a versão ativa somente se não disponível (com aviso).
+        if ctx.pseudonym_key_version is not None:
+            snapshot["key_version"] = ctx.pseudonym_key_version
+        else:
+            snapshot["key_version"] = current_key_version()
+            logger.warning(
+                "persist_snapshot: pseudonym_key_version não disponível no contexto; "
+                "usando versão ativa da chave como fallback"
+            )
+        assert_no_pii(snapshot)
+
         ctx.repository.save_snapshot(snapshot)
         ctx.snapshot = snapshot
+
+        # M4: registrar evento de auditoria (falha nunca falha a tool).
+        if ctx.audit is not None:
+            try:
+                ctx.audit.record_event(
+                    "agent1.snapshot_persisted",
+                    pseudonym_id=ctx.pseudonym_id,
+                    actor="agent1",
+                    snapshot_id=ctx.snapshot["snapshot_id"],
+                    consent_id=ctx.consent_id,
+                    model_id=ctx.model_id,
+                    tool_calls=[c["tool"] for c in snapshot["agent"]["tool_calls"]],
+                )
+            except Exception as exc:
+                logger.warning(
+                    "persist_snapshot: falha ao registrar auditoria exc=%s",
+                    type(exc).__name__,
+                )
+
         return {
             "snapshot_id": ctx.snapshot["snapshot_id"],
             "debts_count": ctx.snapshot["debts_count"],

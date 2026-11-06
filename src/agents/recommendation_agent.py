@@ -8,8 +8,9 @@ pelo Motor de Simulação. O LLM só vê dados pseudonimizados.
 
 from __future__ import annotations
 
+import asyncio
 import json
-from functools import lru_cache
+import weakref
 from operator import itemgetter
 from typing import Any
 
@@ -93,8 +94,20 @@ def _facts(inputs: dict[str, Any]) -> str:
     )
 
 
-@lru_cache(maxsize=1)
-def _cached_llm() -> Runnable:
+# ---------------------------------------------------------------------------
+# Cache de LLM por event loop
+#
+# WeakKeyDictionary garante que, quando o loop for coletado pelo GC, a entrada
+# seja removida automaticamente, sem risco de vazar clientes HTTP de loops mortos.
+# ---------------------------------------------------------------------------
+
+_LLM_BY_LOOP: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, Runnable
+] = weakref.WeakKeyDictionary()
+
+
+def _build_llm_instance() -> Runnable:
+    """Constrói um novo cliente ChatWatsonx. Lança ServiceError em caso de falha."""
     try:
         require_env(*WATSONX_VARS)
         scope = watsonx_scope()
@@ -117,40 +130,121 @@ def _cached_llm() -> Runnable:
         ) from exc
 
 
+def clear_llm_cache() -> None:
+    """Limpa o cache de LLM de todos os event loops conhecidos."""
+    _LLM_BY_LOOP.clear()
+
+
 def build_llm() -> Runnable:
     """
     Granite via watsonx.ai. Falha com 503 se as credenciais não estiverem configuradas.
     Usa WATSONX_SPACE_ID (espaço de implementação) se definido; senão WATSONX_PROJECT_ID.
-    Usa cache (lru_cache) para evitar recriar o cliente a cada requisição.
-    Exceções não ficam em cache: _cached_llm é chamada diretamente.
+
+    Cache por event loop: dentro do mesmo loop (uvicorn, pytest async), reutiliza o
+    cliente HTTP; em loops distintos (dois asyncio.run() seguidos, TestClient sem
+    context manager) cria um cliente novo, evitando RuntimeError: Event loop is closed.
+
+    Exceções nunca ficam em cache: a próxima chamada sempre tentará reconstruir.
     """
     try:
-        return _cached_llm()
-    except ServiceError:
-        # Exceção não deve ser cacheada: limpar o cache para que a próxima chamada tente novamente.
-        _cached_llm.cache_clear()
-        raise
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # Nenhum loop rodando: constrói sem cache (caso de uso fora de contexto async).
+        return _build_llm_instance()
+
+    cached = _LLM_BY_LOOP.get(loop)
+    if cached is not None:
+        return cached
+
+    # Constrói; se falhar, a exceção propaga sem guardar nada no cache.
+    instance = _build_llm_instance()
+    _LLM_BY_LOOP[loop] = instance
+    return instance
+
+
+async def get_llm() -> Runnable:
+    """
+    Dependência FastAPI assíncrona com cache por event loop.
+
+    No cache hit, retorna o objeto já construído sem bloquear o loop.
+    No cache miss, constrói via asyncio.to_thread para não travar o event loop
+    com a troca de token IAM/validação síncronas do ChatWatsonx; só depois
+    persiste no cache.  Exceções não ficam em cache: a próxima chamada tentará
+    reconstruir.
+    """
+    loop = asyncio.get_running_loop()
+
+    cached = _LLM_BY_LOOP.get(loop)
+    if cached is not None:
+        return cached
+
+    # Constrói fora da thread do loop; se falhar, a exceção propaga sem guardar.
+    instance = await asyncio.to_thread(_build_llm_instance)
+    _LLM_BY_LOOP[loop] = instance
+    return instance
+
+
+# Instruções corretivas por código de issue (usadas no retry).
+_CORRECTIVE_INSTRUCTIONS: dict[str, str] = {
+    "UNGROUNDED_AMOUNT": (
+        "Use apenas valores em R$ presentes em FATOS; não calcule diferenças nem somas."
+    ),
+    "SAVINGS_CLAIM_BELOW_MINIMUMS": (
+        "O orçamento está abaixo dos mínimos: não afirme economia."
+    ),
+}
 
 
 def build_chain(llm: Runnable) -> Runnable:
     """
-    Entrada: {scenarios: list[SimulationScenario], language_level, first_steps: callable | list[str]}
-    Saída:   entrada + {recommended, prompt_text, explanation}
+    Constrói a cadeia LCEL de recomendação.
 
-    `first_steps` pode ser uma função (cenário recomendado) -> list[str], para que os passos
-    do mês 1 sejam os do cenário escolhido pela cadeia.
+    Entrada:
+        scenarios      — list[SimulationScenario], obrigatório.
+        language_level — LanguageLevel, obrigatório.
+        first_steps    — callable(ScenarioId) -> list[str] **ou** list[str].
+                         Quando callable, os passos são os do cenário recomendado pela cadeia.
+        correcao       — str | None (opcional). Se presente, é anexado à mensagem humana
+                         do prompt para orientar o retry com instrução corretiva.
+
+    Saída (dicionário passado adiante na cadeia):
+        recommended    — ScenarioId com o cenário de menor juros totais.
+        facts_json     — str JSON com os fatos serializados enviados ao LLM.
+        prompt_text    — str com o prompt completo formatado (para auditoria).
+        explanation    — str com a explicação gerada pelo LLM.
     """
 
     def with_steps(x: dict) -> dict:
         steps = x["first_steps"]
         return {**x, "first_steps": steps(x["recommended"]) if callable(steps) else steps}
 
+    def make_prompt_input(x: dict) -> dict:
+        base: dict = {"style": STYLES[x["language_level"]], "facts": x["facts_json"]}
+        return base
+
+    # Prompt com campo de correção opcional: se correcao estiver presente, appende à mensagem humana.
+    def build_prompt_value(x: dict) -> Any:
+        correcao: str | None = x.get("correcao")
+        if correcao:
+            # Escape curly braces in facts_json so ChatPromptTemplate doesn't treat them as
+            # template variables (JSON contains { } for keys/objects).
+            escaped_facts = x["facts_json"].replace("{", "{{").replace("}", "}}")
+            human_msg = (
+                f"FATOS (JSON):\n{escaped_facts}\n\n{correcao}\n\nEscreva a recomendação."
+            )
+            prompt_val = ChatPromptTemplate.from_messages(
+                [("system", SYSTEM_PROMPT), ("human", human_msg)]
+            ).invoke({"style": STYLES[x["language_level"]]})
+        else:
+            prompt_val = PROMPT.invoke({"style": STYLES[x["language_level"]], "facts": x["facts_json"]})
+        return prompt_val
+
     return (
         RunnablePassthrough.assign(recommended=RunnableLambda(lambda x: select_recommended(x["scenarios"])))
         | RunnableLambda(with_steps)
+        | RunnablePassthrough.assign(facts_json=RunnableLambda(_facts))
         | RunnablePassthrough.assign(
-            prompt_value=RunnableLambda(lambda x: {"style": STYLES[x["language_level"]], "facts": _facts(x)})
-            | PROMPT
+            prompt_value=RunnableLambda(build_prompt_value)
         )
         | RunnablePassthrough.assign(
             prompt_text=itemgetter("prompt_value") | RunnableLambda(lambda p: p.to_string()),

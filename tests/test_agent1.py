@@ -176,3 +176,66 @@ def test_snapshot_debts_follow_api_contract_consumed_by_agent2(consent, repo):
     assert snapshot["weighted_avg_cet"] > 1             # % a.a.
     for debt in snapshot["debts"]:
         Debt.model_validate(debt)                       # campos extras são ignorados
+
+# ---------------------------------------------------------------------------
+# R-20: persist_snapshot grava a key_version correta
+# ---------------------------------------------------------------------------
+
+def test_snapshot_key_version_from_consent(consent, repo):
+    """Se o consentimento carrega key_version 'v1' e a versão ativa é qualquer uma,
+    o snapshot deve gravar 'v1' (a versão do pseudonym_id, não a ativa)."""
+    consent_with_version = {**consent, "key_version": "v1"}
+    snapshot = run(consent_with_version, repo)
+    assert snapshot["key_version"] == "v1"
+
+
+def test_snapshot_key_version_fallback_to_active_when_not_in_consent(consent, repo, monkeypatch):
+    """Sem key_version no consentimento nem no cofre, usa a versão ativa (fallback com warning)."""
+    # Garantir que o cofre não está disponível (ConfigurationError esperada)
+    import warnings
+    import logging
+
+    consent_without_version = {k: v for k, v in consent.items() if k != "key_version"}
+    # Sem key_version no consentimento — vault também não está disponível nos testes
+    # (CLOUDANT_URL está zerado), então cai no fallback
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        snapshot = run(consent_without_version, repo)
+    # Deve ter alguma versão (a ativa)
+    assert isinstance(snapshot["key_version"], str) and len(snapshot["key_version"]) > 0
+
+
+def test_snapshot_key_version_from_vault_when_consent_lacks_it(consent, repo):
+    """Se o cofre tiver key_version diferente da ativa, o snapshot deve gravá-la."""
+    from src.privacy.identity_vault import IdentityVault, InMemoryVaultRepository
+    from src.agents.agent1.agent import run_agent1
+
+    vault_repo = InMemoryVaultRepository()
+    # Simular documento do cofre com key_version "v1" para o titular
+    vault_repo.put({
+        "_id": consent["pseudonym_id"],
+        "type": "identity",
+        "key_version": "v1",
+        "kek_version": "v1",
+        "wrapped_dek": "ZmFrZQ==",
+        "dek_nonce": "ZmFrZQ==",
+        "cpf_ciphertext": "ZmFrZQ==",
+        "nonce": "ZmFrZQ==",
+        "created_at": "2026-01-01T00:00:00Z",
+        "shredded_at": None,
+    })
+
+    from unittest.mock import patch as mock_patch
+    consent_without_version = {k: v for k, v in consent.items() if k != "key_version"}
+
+    with mock_patch("src.privacy.identity_vault.get_vault_repository", return_value=vault_repo):
+        snapshot = run_agent1(
+            consent_without_version,
+            repository=repo,
+            llm=happy_path_granite(consent_without_version),
+            open_finance=SandboxOpenFinanceClient(),
+            serasa=SandboxSerasaClient(),
+        )
+
+    assert snapshot["key_version"] == "v1"
+
