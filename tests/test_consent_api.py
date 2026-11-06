@@ -826,11 +826,11 @@ def test_pseudonymization_key_error_returns_503(client, monkeypatch, app_env, ke
         monkeypatch.delenv("PSEUDONYM_HMAC_KEY", raising=False)
     else:
         monkeypatch.setenv("PSEUDONYM_HMAC_KEY", key)
-    ps._master_key.cache_clear()
+    ps.reset_key_cache()
     try:
         resp = _post_consent(client)
     finally:
-        ps._master_key.cache_clear()
+        ps.reset_key_cache()
     assert resp.status_code == 503
     assert resp.json()["code"] == "NOT_CONFIGURED"
     # nome da variável de config não deve vazar na resposta (F5)

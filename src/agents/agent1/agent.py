@@ -81,8 +81,30 @@ def run_agent1(
     open_finance: Optional[OpenFinanceClient] = None,
     serasa: Optional[SerasaClient] = None,
     llm=None,
+    audit=None,
 ) -> dict:
     """Executa o Agente 1 e devolve o snapshot persistido (fonte da resposta da API)."""
+    # M4: se audit não for injetado, tenta get_audit_logger(); falha → None + warning.
+    if audit is None:
+        from src.privacy.audit import get_audit_logger_or_none
+        audit = get_audit_logger_or_none()
+
+    # R-20: determinar a versão da chave que gerou o pseudonym_id.
+    # Preferência: consent["key_version"] > cofre (identity_vault) > None (fallback na tool).
+    pseudonym_key_version: Optional[str] = consent.get("key_version")
+    if pseudonym_key_version is None:
+        try:
+            from src.privacy.identity_vault import get_vault_repository
+            vault_doc = get_vault_repository().get(consent.get("pseudonym_id", ""))
+            if vault_doc is not None:
+                pseudonym_key_version = vault_doc.get("key_version")
+        except Exception as exc:
+            logger.warning(
+                "run_agent1: não foi possível obter key_version do cofre; "
+                "persist_snapshot usará a versão ativa. exc=%s",
+                type(exc).__name__,
+            )
+
     llm = llm or build_llm()
     ctx = RunContext(
         consent=consent,
@@ -91,6 +113,8 @@ def run_agent1(
         serasa=serasa or build_serasa_client(),
         # Registra o modelo que de fato rodou (o injetado, se houver).
         model_id=getattr(llm, "model_id", None),
+        audit=audit,
+        pseudonym_key_version=pseudonym_key_version,
     )
     _execute(ctx, llm)
     return ctx.snapshot

@@ -13,7 +13,9 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Optional, Protocol
 
-from src.core.config import CLOUDANT_VARS, consents_db, env, require_env, snapshots_db
+from src.core.cloudant import build_cloudant_client  # noqa: F401  (re-exportado para compatibilidade)
+from src.core.config import consents_db, snapshots_db
+
 
 class Repository(Protocol):
     def get_consent(self, consent_id: str) -> Optional[dict]: ...
@@ -34,17 +36,6 @@ class InMemoryRepository:
 
     def get_snapshot(self, snapshot_id: str) -> Optional[dict]:
         return self._snapshots.get(snapshot_id)
-
-
-def build_cloudant_client():
-    """Client síncrono do SDK a partir de CLOUDANT_URL/CLOUDANT_APIKEY (também usado pelos scripts)."""
-    from ibm_cloud_sdk_core.authenticators import IAMAuthenticator
-    from ibmcloudant.cloudant_v1 import CloudantV1
-
-    require_env(*CLOUDANT_VARS)
-    client = CloudantV1(authenticator=IAMAuthenticator(env("CLOUDANT_APIKEY")))
-    client.set_service_url(env("CLOUDANT_URL"))
-    return client
 
 
 class CloudantRepository:

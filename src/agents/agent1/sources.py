@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import date
-from typing import Any, Optional, Protocol
+from typing import Any, Callable, Optional, Protocol
 
 import httpx
 
@@ -213,17 +213,23 @@ class _HttpClient:
         self._api_key = api_key
         self._timeout = timeout
 
-    def _get(self, path: str) -> Any:
+    def _request(self, method: str, path: str, json_body: Optional[dict] = None) -> Any:
         try:
-            response = httpx.get(
+            response = httpx.request(
+                method,
                 f"{self._base_url}{path}",
                 headers={"Authorization": f"Bearer {self._api_key}"},
+                json=json_body,
                 timeout=self._timeout,
             )
             response.raise_for_status()
             return response.json()
-        except httpx.HTTPError as exc:
-            raise SourceUnavailableError(f"{self._base_url}: {exc}") from exc
+        except httpx.HTTPStatusError as exc:
+            raise SourceUnavailableError(
+                f"{self._base_url}: HTTP {exc.response.status_code}"
+            ) from exc
+        except httpx.HTTPError:
+            raise SourceUnavailableError(f"{self._base_url}: erro de transporte") from None
         except ValueError as exc:  # corpo não-JSON
             raise InvalidSourceDataError(f"{self._base_url}: resposta não é JSON") from exc
 
@@ -235,17 +241,56 @@ class HttpOpenFinanceClient(_HttpClient):
     """
 
     def fetch_contracts(self, consent: dict) -> list[dict]:
-        return self._get(f"/consents/{consent['consent_id']}/credit-operations")["data"]
+        return self._request("GET", f"/consents/{consent['consent_id']}/credit-operations")["data"]
 
 
 class HttpSerasaClient(_HttpClient):
     """
-    Integração Serasa via camada de re-identificação (M4): o agente envia o
-    pseudonym_id e o serviço resolve o CPF dentro do perímetro do HSM.
+    Integração Serasa via cofre de identidade do M4.
+
+    O CPF é reidentificado pelo cofre (purpose=SERASA_QUERY, auditado) e
+    enviado SOMENTE no corpo JSON do POST /reports — nunca em URL, query
+    string, header ou log.
+
+    Parâmetros:
+        base_url  — URL base do Serasa.
+        api_key   — chave de API (Bearer).
+        timeout   — timeout HTTP em segundos (padrão 10.0).
+        resolver  — callable(pseudonym_id: str) -> str que retorna o CPF.
+                    None → resolvido preguiçosamente na 1ª chamada com
+                    get_identity_vault().resolve_for_serasa.
     """
 
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        timeout: float = 10.0,
+        *,
+        resolver: Optional[Callable[[str], str]] = None,
+    ) -> None:
+        super().__init__(base_url, api_key, timeout)
+        self._resolver = resolver
+
+    def _get_resolver(self) -> Callable[[str], str]:
+        if self._resolver is not None:
+            return self._resolver
+        # Import local para não acoplar o módulo ao cofre na carga
+        from src.privacy.identity_vault import get_identity_vault
+        return get_identity_vault().resolve_for_serasa
+
     def fetch_report(self, pseudonym_id: str) -> dict:
-        return self._get(f"/reports/{pseudonym_id}")
+        try:
+            cpf = self._get_resolver()(pseudonym_id)
+        except Exception as exc:
+            logger.warning(
+                "Serasa: falha ao resolver identidade do titular — %s", type(exc).__name__
+            )
+            raise SourceUnavailableError(
+                "Serasa: identidade do titular indisponível"
+            ) from None
+
+        return self._request("POST", "/reports", {"cpf": cpf})
 
 
 def build_open_finance_client() -> OpenFinanceClient:
@@ -261,4 +306,7 @@ def build_serasa_client() -> SerasaClient:
         return SandboxSerasaClient()
     require_env("SERASA_BASE_URL", "SERASA_API_KEY",
                 hint="Para simular esta fonte, defina SERASA_SANDBOX=true.")
-    return HttpSerasaClient(os.environ["SERASA_BASE_URL"], os.environ["SERASA_API_KEY"])
+    return HttpSerasaClient(
+        os.environ["SERASA_BASE_URL"],
+        os.environ["SERASA_API_KEY"],
+    )

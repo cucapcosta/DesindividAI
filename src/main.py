@@ -14,6 +14,8 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request, status
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import http_exception_handler as _default_http_exception_handler
+from fastapi.exceptions import HTTPException as FastAPIHTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
@@ -23,6 +25,7 @@ load_dotenv()  # lê .env (na raiz do repo ou no cwd) antes de qualquer módulo 
 from src.api.models import ErrorResponse
 from src.core.errors import ServiceError
 from src.api.routers import consent, debts, simulation, recommendation
+from src.api.routers import internal
 
 app = FastAPI(
     title="DesendividAÍ API",
@@ -62,6 +65,7 @@ app.include_router(consent.router)       # M1 — POST /consent, GET/DELETE /con
 app.include_router(debts.router)         # M2 — GET /debts
 app.include_router(simulation.router)    # M3 — POST /simulation
 app.include_router(recommendation.router)  # M3 — POST /recommendation
+app.include_router(internal.router)      # M4 — POST /internal/erase, POST /internal/retention/run
 
 # ---------------------------------------------------------------------------
 # Handlers de exceção
@@ -121,6 +125,26 @@ def _openapi() -> dict:
 
 
 app.openapi = _openapi  # type: ignore[method-assign]
+
+
+# ---------------------------------------------------------------------------
+# Handler para HTTPException com detail dict (usado pelos endpoints /internal/*)
+# Converte {"code": ..., "message": ...} para ErrorResponse JSON.
+# ---------------------------------------------------------------------------
+
+@app.exception_handler(FastAPIHTTPException)
+async def http_exception_handler(request: Request, exc: FastAPIHTTPException):
+    if isinstance(exc.detail, dict) and "code" in exc.detail:
+        return JSONResponse(
+            status_code=exc.status_code,
+            headers=getattr(exc, "headers", None),
+            content=ErrorResponse(
+                code=exc.detail["code"],
+                message=exc.detail.get("message", ""),
+            ).model_dump(mode="json"),
+        )
+    # Fallback: delegar para o handler padrão do FastAPI
+    return await _default_http_exception_handler(request, exc)
 
 
 # ---------------------------------------------------------------------------

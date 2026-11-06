@@ -71,3 +71,13 @@ def decisions_db() -> str:
     separado dos snapshots (padrão: ``decision_traces``), com acesso restrito.
     """
     return env("CLOUDANT_DB_DECISIONS", "decision_traces")
+
+
+def audit_db() -> str:
+    """Banco da trilha de auditoria (nunca expurgado)."""
+    return env("CLOUDANT_DB_AUDIT", "audit_trail")
+
+
+def vault_db() -> str:
+    """Banco do cofre de identidade (identity_vault)."""
+    return env("CLOUDANT_DB_IDENTITY_VAULT", "identity_vault")

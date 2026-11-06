@@ -317,10 +317,21 @@ db.financial_snapshots.createIndex({ expires_at: 1 }, { expireAfterSeconds: 0 })
 - **HMAC, não SHA-256 puro:** o espaço de CPFs (10¹¹) é quebrável por força bruta;
   sem a chave, o HMAC não é recalculável.
 - Chave: `PSEUDONYM_HMAC_KEY` (hex, ≥ 256 bits). Produção: Secrets Manager + HSM;
-  hackathon: COS + envelope encryption (gestão por **M4**). Ausente com
-  `APP_ENV=production` → erro fatal; em dev, chave efêmera com aviso no log.
-- Serasa consulta por CPF: o cliente HTTP envia o `pseudonym_id` para a camada de
-  re-identificação (M4), que resolve o CPF dentro do perímetro do HSM.
+  hackathon: chave via variável de ambiente atrás da interface `KeyProvider`
+  (`EnvKeyProvider`) — gestão por **M4** ([`docs/m4-chaves-e-iam.md`](m4-chaves-e-iam.md)).
+  Ausente com `APP_ENV=production` → erro fatal; em dev, chave efêmera com aviso no log.
+- **Cofre de identidade:** CPF cifrado no cofre (`identity_vault`) com AES-256-GCM e DEK
+  aleatória por titular, envolvida pela KEK. Implementado na Parte A do M4
+  ([`docs/m4-chaves-e-iam.md`](m4-chaves-e-iam.md)).
+- **Snapshot auditado:** `persist_snapshot` registra `agent1.snapshot_persisted` em
+  `audit_trail` + COS. Implementado na Parte A do M4
+  ([`docs/m4-auditoria-governanca.md`](m4-auditoria-governanca.md)).
+- **Serasa consulta por CPF (implementado):** `HttpSerasaClient` reidentifica o titular
+  via `get_identity_vault().resolve_for_serasa` (finalidade `SERASA_QUERY`, auditado como
+  `vault.reveal`); o CPF vai somente no corpo JSON do `POST /reports` — nunca em URL,
+  query string, header ou log. Resolver injetável (padrão: cofre de identidade).
+  Falha ao resolver → `SourceUnavailableError` ("Serasa indisponível").
+  Sandbox (`SERASA_SANDBOX=true`) inalterado.
 
 ---
 
@@ -442,11 +453,13 @@ roteirizado, o repositório é em memória, e o `conftest.py` zera as credenciai
 | Escopo validado no documento de consentimento, não no token OAuth | **Sub-Tarefa 1 (M1)** — política do API Connect (pendência de configuração) |
 | `202`/`500`/`502`/`503` fora do `openapi.yaml` | ~~**Sub-Tarefa 1 (M1)**~~ ✅ resolvido em `3a2a5ac` |
 | `expires_at` do consentimento sempre ISO 8601 **com fuso** | ~~**Sub-Tarefa 1 (M1)**~~ ✅ resolvido em `feat/m1-consentimento` — datas sempre com timezone |
-| Confirmar retenção de 90 dias após o consentimento e dono da chave de pseudonimização | **Sub-Tarefa 4 (M4)** |
+| ~~Confirmar retenção de 90 dias após o consentimento e dono da chave de pseudonimização~~ | ✅ **Resolvido na Parte A do M4** — ver [`docs/m4-retencao-e-delecao.md`](m4-retencao-e-delecao.md) e [`docs/m4-chaves-e-iam.md`](m4-chaves-e-iam.md) |
 | Afinidade por `consent_id` no gateway (jobs do `202` em memória) | **Sub-Tarefa 1 (M1)** — ou store compartilhado de jobs |
-| `PSEUDONYM_HMAC_KEY` vem do `.env` (deveria vir do COS/HSM) | **Sub-Tarefa 4 (M4)** |
-| Serviço de re-identificação para consultar o Serasa por CPF | **Sub-Tarefa 4 (M4)** — `HttpSerasaClient` já aponta para ele |
-| Expurgo de snapshots por `expires_at` (Cloudant sem TTL) | **Sub-Tarefa 4 (M4)** — índice `by-expiry` pronto |
-| Envio de `agent.tool_calls` ao watsonx.governance | **Sub-Tarefa 4 (M4)** — reaproveitar `services/governance.py` do M3 |
-| `financial_snapshots` também recebe simulações e traces do M3 | **Sub-Tarefa 4 (M4)** — decidir separação de bancos |
+| ~~`PSEUDONYM_HMAC_KEY` vem do `.env` (deveria vir do COS/HSM)~~ | ✅ **Resolvido na Parte A do M4** — chave via `EnvKeyProvider` (hackathon); produção deve implementar um KeyProvider sobre o Secrets Manager — ver [`docs/m4-chaves-e-iam.md`](m4-chaves-e-iam.md) |
+| ~~Serviço de re-identificação para consultar o Serasa por CPF~~ | ✅ **Implementado na Parte B do M4** — `HttpSerasaClient` com resolver injetável (`get_identity_vault().resolve_for_serasa`, finalidade `SERASA_QUERY`, auditado como `vault.reveal`); CPF somente no corpo do `POST /reports`; falha ao resolver → `SourceUnavailableError`; sandbox inalterado — ver [`src/agents/agent1/sources.py`](../src/agents/agent1/sources.py) e [`docs/m4-chaves-e-iam.md`](m4-chaves-e-iam.md) |
+| ~~Expurgo de snapshots por `expires_at` (Cloudant sem TTL)~~ | ✅ **Resolvido na Parte A do M4** — job de expurgo idempotente em [`src/privacy/retention.py`](../src/privacy/retention.py); ver [`docs/m4-retencao-e-delecao.md`](m4-retencao-e-delecao.md) |
+| ~~Envio de `agent.tool_calls` ao watsonx.governance~~ (auditoria do snapshot) | ✅ **Resolvido na Parte A do M4** — `agent1.snapshot_persisted` em `audit_trail` + COS; ver [`docs/m4-auditoria-governanca.md`](m4-auditoria-governanca.md); produção deve implementar um GovernanceSink para o watsonx.governance (plano) |
+| ~~`financial_snapshots` também recebe simulações e traces do M3~~ (decisão de separação de bancos) | ✅ **Decidido na Parte A do M4** — banco `decisions` será criado na Parte B; ver [`docs/m4-retencao-e-delecao.md`](m4-retencao-e-delecao.md) §4.2 |
+| ~~Guarda de PII no snapshot antes de persistir~~ | ✅ **Resolvido na Parte A do M4** — `assert_no_pii()` em [`src/privacy/pii_guard.py`](../src/privacy/pii_guard.py) |
+| ~~Apagamento LGPD Art. 18 (`POST /internal/erase`)~~ | ✅ **Resolvido na Parte A do M4** — ver [`docs/m4-retencao-e-delecao.md`](m4-retencao-e-delecao.md) |
 | Open Finance e Serasa reais | **Fora do PLANO** — exige participação regulada / contrato; segue `*_SANDBOX=true` |
