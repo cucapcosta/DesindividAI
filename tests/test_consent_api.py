@@ -19,6 +19,7 @@ import pytest
 
 from src.api.models import ConsentStatus
 from src.core.config import consents_db, snapshots_db
+import src.services.consent_service as svc
 
 CPF_VALID = "52998224725"
 CPF_BAD_DV = "52998224726"      # dígito verificador errado
@@ -534,6 +535,24 @@ def test_revoke_malformed_revoke_url_still_revokes(client, monkeypatch, store):
     doc = asyncio.run(store.get(consents_db(), consent_id))
     assert doc["status"] == ConsentStatus.REVOKED.value
     assert doc["token_revocation"] == "failed"
+
+
+def test_revoke_reapplies_revoked_if_callback_overwrites(client, monkeypatch, store):
+    """Callback concorrente grava AUTHORISED entre as duas escritas do DELETE → REVOKED é reaplicado."""
+    consent_id = _authorised_consent(client, monkeypatch)
+
+    async def callback_overwrites(cid):
+        doc = await store.get(consents_db(), cid)
+        doc["status"] = ConsentStatus.AUTHORISED.value
+        await store.put(consents_db(), cid, doc)
+        return "skipped"
+
+    monkeypatch.setattr(svc, "_revoke_tokens", callback_overwrites)
+    assert client.delete(f"/consent/{consent_id}").status_code == 204
+    doc = asyncio.run(store.get(consents_db(), consent_id))
+    assert doc["status"] == ConsentStatus.REVOKED.value
+    assert doc["revocation_reason"] == "CUSTOMER_REQUEST"
+    assert doc["token_revocation"] == "skipped"
 
 
 # ===========================================================================

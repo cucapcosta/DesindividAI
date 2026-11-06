@@ -338,19 +338,25 @@ async def revoke_consent(store: DocumentStore, consent_id: str) -> None:
     doc["revoked_at"] = now.isoformat()
     doc["revocation_reason"] = "CUSTOMER_REQUEST"
     doc["revoked_by"] = "customer"
-    doc["token_revocation"] = None  # valor provisório; atualizado abaixo
+    doc["token_revocation"] = None  # preenchido na escrita 2
 
-    # Escrita 1: gravar REVOKED antes de qualquer I/O externo.
-    # Isso garante que, mesmo se _revoke_tokens demorar ou falhar, o consentimento
-    # já está revogado no banco — a janela de corrida com o callback é eliminada.
+    # Escrita 1: REVOKED antes de qualquer I/O externo, para que demora ou falha na
+    # revogação de token não deixe o consentimento ativo. Reduz, mas não elimina, a
+    # corrida com o callback: o store é last-write-wins (pendência C3 no PLANO.md).
     await store.put(consents_db(), consent_id, doc)
 
-    # Escrita 2: chamar a revogação de tokens, depois reler e gravar token_revocation.
     token_revocation = await _revoke_tokens(consent_id)
-    doc_fresh = await store.get(consents_db(), consent_id)
-    if doc_fresh is not None:
-        doc_fresh["token_revocation"] = token_revocation
-        await store.put(consents_db(), consent_id, doc_fresh)
+
+    # Escrita 2: registra token_revocation. Se um callback concorrente sobrescreveu o
+    # REVOKED entre as duas escritas, reaplica a revogação, que é a intenção mais
+    # recente do titular.
+    current = await store.get(consents_db(), consent_id)
+    if current is not None:
+        if current.get("status") != ConsentStatus.REVOKED.value:
+            logger.warning("Consentimento %s sobrescrito durante a revogação; REVOKED reaplicado", consent_id)
+            current.update({k: doc[k] for k in ("status", "revoked_at", "revocation_reason", "revoked_by")})
+        current["token_revocation"] = token_revocation
+        await store.put(consents_db(), consent_id, current)
 
     _audit(
         "consent.revoked",
