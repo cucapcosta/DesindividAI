@@ -49,9 +49,15 @@ _FORBIDDEN_KEYS: frozenset[str] = frozenset({
 # 1. Valor inteiro no formato CPF: 11 dígitos com ou sem máscara
 _CPF_FULL = re.compile(r"^\d{3}\.?\d{3}\.?\d{3}-?\d{2}$")
 
-# 2. CPF com máscara embutido em texto (delimitado por não-alfanumérico)
+# 2. CPF com máscara embutido em texto (delimitado por não-alfanumérico).
+# Separadores aceitos entre os grupos 3-3-3-2: ponto, hífen, espaço comum ou NBSP.
+# Lookbehind duplo evita "0 529 982 247 25" (dígito colado via espaço).
+# Lookahead duplo evita "529 982 247 25 1" (dígito colado via espaço após).
+_CPF_SEP = r"[.\- \u00a0]"
 _CPF_MASKED_EMBEDDED = re.compile(
-    r"(?<![0-9A-Za-z])\d{3}\.\d{3}\.\d{3}-\d{2}(?![0-9A-Za-z])"
+    r"(?<!\d )(?<!\d\u00a0)(?<![0-9A-Za-z])"
+    r"(\d{3})" + _CPF_SEP + r"(\d{3})" + _CPF_SEP + r"(\d{3})" + _CPF_SEP + r"(\d{2})"
+    r"(?! \d)(?!\u00a0\d)(?![0-9A-Za-z])"
 )
 
 # 3. 11 dígitos contínuos delimitados por não-alfanumérico
@@ -115,8 +121,11 @@ def _check_string(value: str, path: str) -> None:
         raise PIIViolation(path, "valor é um CPF (com ou sem máscara)")
 
     # Regra 2: CPF com máscara embutido em texto (delimitado por não-alfanumérico).
-    if _CPF_MASKED_EMBEDDED.search(value):
-        raise PIIViolation(path, "CPF mascarado embutido no texto")
+    # Extrai os 4 grupos capturados e valida os dígitos verificadores.
+    for m in _CPF_MASKED_EMBEDDED.finditer(value):
+        digits = m.group(1) + m.group(2) + m.group(3) + m.group(4)
+        if _is_valid_cpf(digits):
+            raise PIIViolation(path, "CPF mascarado embutido no texto")
 
     # Regra 3: 11 dígitos contínuos embutidos, delimitados e com check digits válidos.
     # Inteiros de 11 dígitos em hexadecimais/IDs não ativam esta regra.

@@ -376,3 +376,59 @@ def test_property_2000_ref_cpfs_all_valid():
         f"{len(invalid)} CPFs gerados com _ref_cpf foram rejeitados por _is_valid_cpf: "
         f"{invalid[:5]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 13. CPF separado por espaço (Fase B2)
+# ---------------------------------------------------------------------------
+
+# CPF 529.982.247-25 (52998224725) é válido — verificado pelos DVs.
+_CPF_SPACED = "529 982 247 25"      # separadores: espaço
+_CPF_SPACED_DIGITS = "52998224725"
+
+def test_cpf_space_separated_in_text_raises():
+    """'CPF: 529 982 247 25' deve disparar PIIViolation."""
+    text = f"CPF: {_CPF_SPACED} do cliente"
+    exc = _raises_pii({"notes": text}, path_contains="notes")
+    assert _CPF_SPACED_DIGITS not in str(exc)
+
+
+def test_cpf_mixed_sep_dot_space_raises():
+    """'529.982.247 25' (terceiro sep = espaço) deve disparar."""
+    text = f"documento 529.982.247 25 registrado"
+    exc = _raises_pii({"obs": text}, path_contains="obs")
+    assert _CPF_SPACED_DIGITS not in str(exc)
+
+
+def test_cpf_mixed_sep_space_hyphen_raises():
+    """'529 982 247-25' (primeiro sep = espaço, terceiro = hífen) deve disparar."""
+    text = f"ref 529 982 247-25 ok"
+    exc = _raises_pii({"obs": text}, path_contains="obs")
+    assert _CPF_SPACED_DIGITS not in str(exc)
+
+
+def test_monetary_value_does_not_trigger():
+    """'R$ 529 982 247,25' não deve disparar — último sep é vírgula, não dígito."""
+    assert_no_pii({"valor": "R$ 529 982 247,25"})
+
+
+def test_space_separated_invalid_check_digits_does_not_trigger():
+    """'parcelas 123 456 789 00' — DVs inválidos, não deve disparar."""
+    assert_no_pii({"info": "parcelas 123 456 789 00"})
+
+
+def test_digit_before_space_cpf_does_not_trigger():
+    """'0 529 982 247 25 1' — dígito colado via espaço antes e depois, não deve disparar."""
+    assert_no_pii({"val": "0 529 982 247 25 1"})
+
+
+def test_monetary_common_does_not_trigger():
+    """Valores monetários comuns não disparam."""
+    assert_no_pii({"saldo": "R$ 56.667,67"})
+
+
+def test_uuid_does_not_trigger():
+    """UUIDs não disparam a guarda."""
+    import uuid
+    for _ in range(20):
+        assert_no_pii({"id": str(uuid.uuid4())})

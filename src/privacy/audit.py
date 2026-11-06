@@ -47,6 +47,8 @@ _ALLOWED_EVENT_TYPES: frozenset[str] = frozenset({
     "retention.run",
     "agent1.snapshot_persisted",
     "audit.pii_blocked",
+    "agent2.simulation_created",
+    "agent2.recommendation_generated",
 })
 
 _RESERVED_FIELDS: frozenset[str] = frozenset({

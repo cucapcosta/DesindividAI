@@ -9,6 +9,7 @@ from src.api.models import SimulationResponse
 from src.core.config import consents_db, decisions_db, env_bool, snapshots_db  # noqa: F401  (reexportados)
 from src.core.dates import parse_utc
 from src.core.errors import ServiceError
+from src.privacy.audit_bridge import emit, guard_or_raise
 from src.simulation.client import run_engine
 from src.storage.store import DocumentStore
 
@@ -94,16 +95,24 @@ async def create_simulation(store: DocumentStore, snapshot_id: UUID, monthly_bud
     else:
         expires_at = (datetime.now(timezone.utc) + timedelta(days=DECISION_RETENTION_DAYS)).isoformat()
 
-    await store.put(
-        decisions_db(),
-        f"simulation:{response.simulation_id}",
-        {
-            "type": "simulation",
-            "pseudonym_id": snapshot.get("pseudonym_id"),
-            "consent_id": snapshot.get("consent_id"),
-            "monthly_budget": monthly_budget,
-            "expires_at": expires_at,
-            **response.model_dump(mode="json"),
-        },
+    pseudonym_id = snapshot.get("pseudonym_id")
+    consent_id = snapshot.get("consent_id")
+    doc = {
+        "type": "simulation",
+        "pseudonym_id": pseudonym_id,
+        "consent_id": consent_id,
+        "monthly_budget": monthly_budget,
+        "expires_at": expires_at,
+        **response.model_dump(mode="json"),
+    }
+    guard_or_raise(doc, context="agent2.simulation_created")
+    await store.put(decisions_db(), f"simulation:{response.simulation_id}", doc)
+    await emit(
+        "agent2.simulation_created",
+        pseudonym_id=pseudonym_id,
+        actor="agent2",
+        simulation_id=str(response.simulation_id),
+        snapshot_id=str(snapshot_id),
+        consent_id=consent_id,
     )
     return response
