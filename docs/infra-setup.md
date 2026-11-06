@@ -27,7 +27,7 @@ Os seguintes serviços do PLANO original **não podem ser provisionados** nesta 
 |---|---|---|
 | IBM Cloud Databases for MongoDB | **Cloudant** (já disponível) | Cloudant é NoSQL document-store compatível; schemas do PLANO se aplicam com adaptação mínima |
 | IBM Cloud Secrets Manager + HSM | **Env + KeyProvider** (`EnvKeyProvider`) | Sem HSM dedicado; chave mestra em variáveis de ambiente atrás da interface `KeyProvider`; envelope encryption com DEK por titular no cofre `identity_vault` |
-| IBM Cloud Logs | **COS** como destino de logs + IBM Cloud Activity Tracker nativo | Sem interface de busca em tempo real; logs em JSON no COS |
+| IBM Cloud Logs | **Logs JSON estruturados no stdout** (logger `desendividai.audit`) + trilha persistida em Cloudant (`audit_trail`) e COS | Sem pipeline de logs nem de alertas nesta conta (Activity Tracker também não está provisionado); alertas de acesso anômalo especificados em `docs/m4-auditoria-governanca.md` §8, mas não ativos |
 | IBM API Connect | **Fora desta conta** — documentado em `openapi/openapi.yaml` para deploy futuro | OpenAPI contract pronto; gateway pode ser provisionado em conta BB de produção |
 
 > Essas decisões são válidas **apenas para desenvolvimento e apresentação do hackathon**.

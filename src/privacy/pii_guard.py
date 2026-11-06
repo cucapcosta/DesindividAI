@@ -10,7 +10,12 @@ PIIViolation se encontrar:
 Falsos positivos são evitados:
   - 11 dígitos contínuos só contam se delimitados por não-alfanumérico
     E tiverem dígitos verificadores de CPF válidos (rejeita sequências repetidas).
-  - Inteiros e floats não são verificados.
+  - Inteiros só são verificados a partir de 9 dígitos significativos
+    (>= 10**8); inteiros pequenos (prazos, dias de atraso, centavos) nunca
+    contam como CPF. Floats não são verificados.
+  - Identificadores técnicos inteiros (hex de 64 caracteres, como o
+    pseudonym_id HMAC-SHA256, e UUIDs) não são verificados: as letras a-f
+    não servem de delimitador para a regra 3.
   - "name" NÃO está na lista proibida (agent.name legítimo no snapshot do M2).
 
 Segurança no path:
@@ -72,6 +77,20 @@ _CPF_DIGITS_EMBEDDED = re.compile(
 )
 
 
+# Identificadores técnicos que nunca são CPF, mesmo contendo 11 dígitos
+# seguidos entre letras a-f (ex.: "...c06183334529db...").
+_TECHNICAL_ID = re.compile(
+    r"^(?:[0-9a-f]{64}"
+    r"|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
+    re.IGNORECASE,
+)
+
+# Menor inteiro verificado como CPF: 9 dígitos significativos. CPFs reais
+# têm no máximo 2 zeros à esquerda; abaixo disso o zero-fill gera falsos
+# positivos em ~1% dos inteiros (ex.: 191, 272, 353).
+_MIN_CPF_INT = 10**8
+
+
 # ---------------------------------------------------------------------------
 # Validação de dígitos verificadores de CPF
 # ---------------------------------------------------------------------------
@@ -120,6 +139,8 @@ class PIIViolation(ValueError):
 def _check_string(value: str, path: str) -> None:
     """Levanta PIIViolation se a string contiver um CPF."""
     stripped = value.strip()
+    if _TECHNICAL_ID.match(stripped):
+        return
 
     # Regra 1: valor INTEIRO no formato CPF (com ou sem máscara).
     # Exige dígitos verificadores válidos para evitar falsos positivos
@@ -154,6 +175,8 @@ def _mask_path_segment(segment: str) -> str:
     caso contrário retorna o segmento original.
     """
     stripped = segment.strip()
+    if _TECHNICAL_ID.match(stripped):
+        return segment
     # Regra 1: segmento inteiro no formato CPF
     if _CPF_FULL.match(stripped):
         return "<cpf>"
@@ -185,14 +208,16 @@ def _check_int(value: int, path: str) -> None:
     """
     Levanta PIIViolation se o inteiro representar um CPF válido.
 
-    Converte para string com zero-fill(11) para cobrir CPFs com dígitos iniciais
-    zero (ex.: int 1234567890 → "01234567890", 9–11 dígitos significativos).
-    Inteiros negativos e com mais de 11 dígitos nunca são CPF.
+    Só verifica inteiros com 9 a 11 dígitos significativos (>= 10**8).
+    Converte para string com zero-fill(11) para cobrir CPFs com até dois
+    zeros à esquerda (ex.: int 1234567890 → "01234567890").
+    Inteiros negativos, menores que 10**8 ou com mais de 11 dígitos nunca
+    são CPF.
     bool é subclasse de int mas NÃO deve ser verificado.
     """
     if isinstance(value, bool):
         return
-    if value < 0:
+    if value < _MIN_CPF_INT:
         return
     s = str(value)
     if len(s) > 11:
@@ -232,6 +257,25 @@ def _scan(node: object, path: str) -> None:
 # ---------------------------------------------------------------------------
 # API pública
 # ---------------------------------------------------------------------------
+
+def mask_cpfs(text: str) -> str:
+    """
+    Substitui por "<cpf>" todo CPF válido (com ou sem máscara) encontrado em
+    `text`. Uso: sanitizar linhas de log que a aplicação não controla, como o
+    access log do servidor, que grava o caminho e a query da URL.
+    Não aplica a isenção de identificadores técnicos: mascarar a mais num log
+    é aceitável, deixar passar um CPF não é.
+    """
+    def _sub_masked(m: "re.Match[str]") -> str:
+        digits = m.group(1) + m.group(2) + m.group(3) + m.group(4)
+        return "<cpf>" if _is_valid_cpf(digits) else m.group(0)
+
+    def _sub_digits(m: "re.Match[str]") -> str:
+        return "<cpf>" if _is_valid_cpf(m.group(1)) else m.group(0)
+
+    text = _CPF_MASKED_EMBEDDED.sub(_sub_masked, text)
+    return _CPF_DIGITS_EMBEDDED.sub(_sub_digits, text)
+
 
 def assert_no_pii(doc: object) -> None:
     """

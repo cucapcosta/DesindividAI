@@ -70,3 +70,41 @@ def random_cpfs():
                 return cpf
 
     return [_gen_cpf() for _ in range(200)]
+
+
+@pytest.fixture
+def audit_log_lines():
+    """Captura as linhas do logger desendividai.audit (propagate=False)."""
+    import logging
+
+    from src.privacy.audit import AUDIT_EVENT_LOGGER_NAME
+
+    lines: list[str] = []
+
+    class _Collector(logging.Handler):
+        def emit(self, record):
+            lines.append(record.getMessage())
+
+    handler = _Collector(level=logging.INFO)
+    event_logger = logging.getLogger(AUDIT_EVENT_LOGGER_NAME)
+    event_logger.addHandler(handler)
+    try:
+        yield lines
+    finally:
+        event_logger.removeHandler(handler)
+
+
+@pytest.fixture
+def pseudonym_v2(monkeypatch):
+    """Adiciona a versão v2 da chave de pseudonimização (v1 continua ativa).
+
+    Para rotacionar no meio do teste: monkeypatch.setenv(
+    "PSEUDONYM_KEY_ACTIVE_VERSION", "v2") seguido de pm.reset_key_cache().
+    """
+    from src.privacy import pseudonymization as pm
+
+    monkeypatch.setenv("PSEUDONYM_HMAC_KEY_V2", "ef" * 32)
+    monkeypatch.setenv("PSEUDONYM_KEY_ACTIVE_VERSION", "v1")
+    pm.reset_key_cache()
+    yield pm
+    pm.reset_key_cache()

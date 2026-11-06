@@ -326,3 +326,52 @@ Os 15 `skipped_invalid` do I4/I5 são exatamente esses documentos legados (12 + 
 - [x] Correções da review do PR aplicadas e verificadas (seção 7)
 - [x] Suíte unitária verde (534 passed, 1 skipped), integração real verde (7/7), smoke do M3 verde (1/1), E2E real 37/37
 - [x] Documentação LGPD do M4 (mapeamento, ROPA, retenção, chaves/IAM, auditoria) atualizada
+
+---
+
+## 10. Revisão LGPD do M4 (2026-11-06)
+
+Rodada posterior ao relatório acima, depois das correções das duas reviews do M4.
+
+| Camada | Comando | Resultado |
+|---|---|---|
+| Unitários + API | `.venv/bin/python -m pytest -q` | **655 passed, 1 skipped**, 11 deselected (também em ordem reversa de arquivos) |
+| Integração na cloud real (M4) | `.venv/bin/python -m pytest -q -m integration tests/m4/test_integration.py` | **11 passed** (~2 min) |
+| Smoke na cloud real (M3) | `RUN_CLOUD_TESTS=1 .venv/bin/python -m pytest -q tests/test_cloud_integration.py` | **1 passed** |
+| E2E no servidor real | uvicorn em `:8765` com agendador ligado (dry-run), Granite/Cloudant/COS reais, roteiro abaixo | **34/34 OK** |
+
+### 10.1 E2E da revisão (servidor real) — 34/34 OK
+
+Titular de teste com **CPF aleatório** criado pelo cofre real (não o CPF do sandbox, que é compartilhado: o apagamento por CPF apagaria os dados de teste do time todo). Open Finance e Serasa em sandbox, como no `.env`; por isso a checagem de consentimento do cofre foi exercida direto pela factory de produção contra o Cloudant real.
+
+| Bloco | Cenários | Resultado |
+|---|---|---|
+| Plataforma | `/health`; OpenAPI não expõe nenhum `/internal/*`, inclusive os novos | ✅ |
+| Fluxo | `/debts` (Granite real, 6 dívidas) → `/simulation` → `/recommendation` | ✅ |
+| Cofre | `SERASA_QUERY` com consentimento ativo revela; actor errado negado; `LEGAL_REQUEST` pelo `agent1` negado; após o apagamento, `no_active_consent` | ✅ |
+| Exportação | Por CPF mascarado e por `pseudonym_id`; traz consentimento, snapshot, 2 decisões, histórico (`agent1.*`, `agent2.*`, `vault.reveal`) e `sharing`; sem CPF nem material do cofre; CPF com DV inválido → 422 sem eco; `subject.access_exported` no Cloudant | ✅ |
+| Autenticação | Sem token e token errado → 401; ambos viram `internal.auth_failed` no stdout com a rota em molde | ✅ |
+| Apagamento por CPF | Contagens 1/1/2/1; `/debts` → 403; `/simulation` e `/recommendation` → 404; cofre destruído; `reveal` → `VaultError`; idempotente; eventos de apagamento na trilha; export depois mostra tudo vazio | ✅ |
+| Logs | Eventos do fluxo em JSON no stdout com `audit_persisted ≥ 1`; agendador rodou `retention.run` sozinho; **nenhum CPF nem token no log do servidor** | ✅ (após correção) |
+
+**Defeito encontrado no E2E e corrigido:** o access log do uvicorn gravava o caminho da URL, então um CPF colocado na URL por engano (`/internal/erase/<cpf>`, que a API rejeita) ia para o log em claro. Os testes com `TestClient` não pegavam isso porque não passam pelo uvicorn. Correção: `CpfMaskingFilter` no logger `uvicorn.access` ([`src/core/log_filters.py`](../src/core/log_filters.py)), instalado na importação da app; a linha passa a sair como `POST /internal/erase/<cpf>`. Testes em `tests/m4/test_log_filters.py`; E2E repetido inteiro depois da correção: 34/34.
+
+Resíduos: os eventos de auditoria dos dois titulares de teste ficam no `audit_trail` (por desenho, seção 8); consentimento e cofre de teste foram removidos ao final.
+
+Testes de integração novos:
+
+| Teste | O que prova |
+|---|---|
+| `test_erase_by_cpf_all_key_versions_real` | Mesmo CPF com pseudônimos v1 e v2 → `POST /internal/erase {cpf}` apaga os dois no Cloudant real |
+| `test_subject_export_real` | `POST /internal/subject/export` devolve consentimento e snapshot, sem CPF nem material do cofre, e grava `subject.access_exported` |
+| `test_vault_requires_active_consent_real` | Factory de produção: `SERASA_QUERY` negado sem consentimento, liberado com `AUTHORISED`, negado de novo após `REVOKED` e para actor errado |
+| `test_audit_expiry_selector_real` | A consulta `$lt` da regra f acha e apaga só o evento antigo (restrita ao pseudônimo do teste, nunca na trilha inteira) |
+
+O que mudou e tem teste unitário próprio:
+
+- Guarda de PII: inteiros pequenos não são mais CPF; `pseudonym_id` hex e UUID não disparam a regra de 11 dígitos (`tests/m4/test_pii_guard.py`).
+- Eventos de auditoria como JSON no stdout e `internal.auth_failed` nos 401 (`test_audit.py`, `test_subject_rights.py`).
+- Versões da chave de pseudonimização, apagamento e exportação por CPF (`test_key_versions.py`, `test_subject_rights.py`).
+- Controles de acesso do cofre (`test_vault_access_control.py`).
+- Regra f e agendador da retenção, inclusive a subida da app com o agendador ligado (`test_retention_schedule_and_audit_expiry.py`).
+- Máscara de CPF no access log do uvicorn (`test_log_filters.py`).

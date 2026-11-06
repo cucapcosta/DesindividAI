@@ -59,11 +59,12 @@ Em produção, implementar um `KeyProvider` sobre o IBM Cloud Secrets Manager em
 |---|---|---|---|---|
 | `pseudonymize_cpf()` / `pseudonymize_contract()` | Gerar `pseudonym_id` e `debt_id` | `pseudonym` (versão ativa) | `SecretsReader` (grupo do projeto) | Chamado no M1 (criação do consentimento) e M2 (`pseudonymize_contract` em `src/agents/agent1/analysis.py`) |
 | `IdentityVault.store()` | Cifrar CPF novo do titular | `pseudonym` + `vault_kek` (ativas) | `SecretsReader` | Chamado no seed e no provisionamento do titular |
-| `IdentityVault.reveal()` | Decifrar CPF para re-identificação | `vault_kek` (versão registrada no doc) | `SecretsReader` | Sempre auditado; `purpose` restrito a `SERASA_QUERY` ou `LEGAL_REQUEST` |
+| `IdentityVault.reveal()` | Decifrar CPF para re-identificação | `vault_kek` (versão registrada no doc) | `SecretsReader` | Sempre auditado; `purpose` restrito a `SERASA_QUERY` ou `LEGAL_REQUEST`; na factory de produção, `purpose` amarrado ao actor e consentimento ativo exigido para `SERASA_QUERY` (ver §5.1) |
 | `IdentityVault.resolve_for_serasa()` | Re-identificar titular para o Serasa real | `vault_kek` (via `reveal()`) | `SecretsReader` | **Implementado (Parte B):** chamado pelo `HttpSerasaClient` real via `resolver` injetável; CPF apenas no corpo do POST |
 | `IdentityVault.shred()` | Destruir material criptográfico | **Nenhuma chave (shred só remove campos)** | Nenhuma chave necessária | Não precisa acessar a KEK |
 | Job de retenção (`retention.py`) | Executar regras de expiração | **Nenhuma chave (shred só remove campos)** na regra e; `vault_kek` indireta apenas se `reveal` for chamado | `SecretsReader` | Apenas na regra e (shred automático) |
-| `POST /internal/erase` | Apagamento LGPD Art. 18 | **Nenhuma chave (shred só remove campos)** | `SecretsReader` | Autenticado por `X-Internal-Token`; cobre `decision_traces` (Parte B) |
+| `POST /internal/erase` (por CPF) e `POST /internal/subject/export` | Apagamento e exportação LGPD Art. 18 | `pseudonym` em **todas** as versões configuradas (para achar os pseudônimos do CPF); nenhuma KEK | `SecretsReader` | Autenticado por `X-Internal-Token`. Se uma versão não puder ser lida, aborta antes de alterar qualquer dado |
+| `POST /internal/erase/{pseudonym_id}` | Apagamento LGPD Art. 18 | **Nenhuma chave (shred só remove campos)** | `SecretsReader` | Autenticado por `X-Internal-Token`; cobre `decision_traces` (Parte B) |
 | Testes unitários | Verificar comportamento | Chaves fixas de teste em `tests/conftest.py` | Nenhuma (sem rede) | Nunca usam a chave real do `.env` |
 
 ---
@@ -80,6 +81,7 @@ A rotação **não afeta pseudônimos já emitidos**, pois o campo `key_version`
 2. Adicionar ao `.env`: `PSEUDONYM_HMAC_KEY_V2=<nova_chave>`.
 3. Atualizar: `PSEUDONYM_KEY_ACTIVE_VERSION=v2`.
 4. Novos titulares serão pseudonimizados com v2; um novo `store()` do **mesmo CPF** com a chave v2 gera um `pseudonym_id` diferente (v2). Documentos emitidos com v1 continuam ligados ao pseudônimo v1 — **não são migrados automaticamente**; migração de titulares exige um job dedicado (plano).
+6. **Nunca apagar a chave antiga** (`PSEUDONYM_HMAC_KEY` ou `_V<N>`) enquanto houver dados emitidos com ela. Os pedidos do titular por CPF (`POST /internal/erase` e `POST /internal/subject/export`) calculam o pseudônimo em **todas** as versões presentes no ambiente (`EnvKeyProvider.list_versions`, `pseudonymize_cpf_all_versions`); sem a chave antiga, os dados daquela versão ficariam sem caminho de apagamento.
 5. Titulares existentes (v1) continuam funcionando; `reveal()` usa `kek_version` do documento para escolher a KEK correta (não `key_version` — cada campo tem seu propósito de controle separado).
 
 > **Atenção:** pseudônimos são determinísticos por chave. Se um titular for recriado com uma nova chave, o `pseudonym_id` muda. Documentos antigos (v1) não serão vinculados automaticamente.
@@ -134,6 +136,20 @@ IdentityVault.resolve_for_serasa(pseudonym_id)
 O CPF **nunca sai do escopo de `reveal()`** em direção a outras camadas. O Agente 1 nunca vê o CPF. Erros (titular sem cofre, cofre destruído pós-shred) levantam erro claro sem vazar dados pessoais.
 
 > **Sandbox inalterado:** o `SandboxSerasaClient` continua usando apenas o `pseudonym_id`; o `resolver` não é chamado nesse caminho.
+
+### 5.1 Controles de acesso no `reveal()` (Implementado)
+
+Defesa em profundidade: mesmo que uma camada de cima falhe, o cofre não entrega o CPF fora da finalidade. A factory de produção (`get_identity_vault()`) liga os dois controles; o construtor `IdentityVault(...)` sem esses parâmetros mantém o comportamento antigo (usado nos testes unitários e em ferramentas).
+
+| Controle | Regra | Falha → |
+|---|---|---|
+| Finalidade × actor (`purpose_actors`) | `SERASA_QUERY` só para `agent1`; `LEGAL_REQUEST` só para `internal_api` | `VaultAccessDenied`, `vault.reveal ok=false reason=actor_not_allowed` |
+| Consentimento ativo (`consent_checker`) | `SERASA_QUERY` exige consentimento `AUTHORISED` com `expires_at` futuro no `consent_registry` | `VaultAccessDenied`, `vault.reveal ok=false reason=no_active_consent` |
+
+- A consulta de consentimento que falha (Cloudant fora) **nega** o acesso (fail closed).
+- `LEGAL_REQUEST` não exige consentimento: a base legal é obrigação legal ou ordem judicial.
+- `VaultAccessDenied` é subclasse de `VaultError`; o `HttpSerasaClient` já transforma qualquer falha do resolver em "Serasa indisponível", sem vazar dados.
+- **Limite:** o actor é declarado pelo chamador dentro do mesmo processo. O controle impede uso trocado por engano, não um atacante com execução de código no servidor. Para isso, em produção: identidade IAM por serviço (Trusted Profile) e o cofre como serviço separado.
 
 ---
 

@@ -613,6 +613,12 @@ def _make_vault_via_factory(monkeypatch, fake_logger, cpf_to_store=None):
         lambda: mem_repo,
     )
     monkeypatch.setattr(audit_mod, "get_audit_logger", lambda: fake_logger)
+    # A factory de produção exige consentimento ativo para SERASA_QUERY;
+    # aqui simulamos um titular com consentimento AUTHORISED.
+    monkeypatch.setattr(
+        "src.privacy.identity_vault._cloudant_consent_checker",
+        lambda pseudonym_id: True,
+    )
     # Also clear lru_cache on get_audit_logger if it was cached
     try:
         audit_mod.get_audit_logger.cache_clear()
@@ -679,6 +685,10 @@ def test_get_identity_vault_configuration_error_uses_noop(monkeypatch):
         "src.privacy.identity_vault.get_vault_repository",
         lambda: mem_repo,
     )
+    monkeypatch.setattr(
+        "src.privacy.identity_vault._cloudant_consent_checker",
+        lambda pseudonym_id: True,
+    )
 
     def _raise():
         raise ConfigurationError("sem credenciais")
@@ -714,6 +724,10 @@ def test_get_identity_vault_audit_callback_raises_reveal_still_returns(monkeypat
     monkeypatch.setattr(
         "src.privacy.identity_vault.get_vault_repository",
         lambda: mem_repo,
+    )
+    monkeypatch.setattr(
+        "src.privacy.identity_vault._cloudant_consent_checker",
+        lambda pseudonym_id: True,
     )
     monkeypatch.setattr(audit_mod, "get_audit_logger", lambda: _BrokenLogger())
     try:

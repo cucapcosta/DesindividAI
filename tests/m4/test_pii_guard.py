@@ -866,3 +866,58 @@ def test_cpf_with_one_dv_changed_does_not_raise(cpf_with_wrong_dv):
     masked = f"{cpf_with_wrong_dv[:3]}.{cpf_with_wrong_dv[3:6]}.{cpf_with_wrong_dv[6:9]}-{cpf_with_wrong_dv[9:]}"
     assert_no_pii({"notes": f"documento {masked} registrado"})
 
+
+
+# ---------------------------------------------------------------------------
+# Review: inteiros pequenos e IDs técnicos não são CPF
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("doc", [
+    {"total_months": 191},
+    {"days_overdue": 272},
+    {"x": 353},
+])
+def test_small_ints_with_valid_dv_after_zfill_do_not_raise(doc):
+    """191, 272 e 353 viram CPF "válido" com zfill(11); não podem bloquear."""
+    assert_no_pii(doc)
+
+
+def test_no_int_below_9_significant_digits_raises():
+    """Nenhum inteiro de 1 a 99_999 (nem amostra até 10**8) é tratado como CPF."""
+    for i in range(1, 100_000):
+        assert_no_pii({"n": i})
+    for i in range(100_000, 10**8, 9_973):
+        assert_no_pii({"n": i})
+
+
+def test_int_with_9_significant_digits_still_checked():
+    """CPF com dois zeros à esquerda como int (9 dígitos) continua bloqueado."""
+    from src.privacy.pii_guard import _is_valid_cpf
+    n = next(
+        i for i in range(10**8, 10**9)
+        if _is_valid_cpf(str(i).zfill(11))
+    )
+    with pytest.raises(PIIViolation):
+        assert_no_pii({"n": n})
+
+
+def test_hex_pseudonym_id_with_embedded_cpf_digits_does_not_raise():
+    """Letras a-f do HMAC hex não servem de borda para a regra de 11 dígitos."""
+    pid = ("ca" + _VALID_CPF_DIGITS + "db").ljust(64, "a")
+    assert len(pid) == 64
+    assert_no_pii({"pseudonym_id": pid})
+    assert_no_pii({pid: {"ok": True}})
+    assert_no_pii({"pseudonym_id": pid.upper()})
+
+
+def test_uuid_with_embedded_cpf_digits_does_not_raise():
+    uid = "12345678-9091-4abc-8def-0123456789ab"
+    assert_no_pii({"trace_id": uid})
+
+
+def test_cpf_glued_to_letters_in_free_text_still_raises():
+    with pytest.raises(PIIViolation):
+        assert_no_pii({"notes": "cliente CPF" + _VALID_CPF_DIGITS})
+    # hex com tamanho diferente de 64 não é isento
+    with pytest.raises(PIIViolation):
+        assert_no_pii({"ref": "ca" + _VALID_CPF_DIGITS + "db"})

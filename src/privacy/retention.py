@@ -16,7 +16,10 @@ Regras (nesta ordem):
   e.  Cofre: doc ativo (shredded_at null) com created_at há mais de 24h, sem consentimento nem
       snapshot com o mesmo pseudonym_id → IdentityVault.shred.
       Consentimento com status desconhecido NÃO conta como ativo (skipped_invalid).
-  f.  audit_trail: nunca tocar.
+  f.  audit_trail: por padrão nunca é tocado. Se AUDIT_RETENTION_DAYS (> 0) estiver
+      definido, eventos com recorded_at mais antigo que o prazo são apagados do
+      Cloudant (as cópias no COS seguem a regra de ciclo de vida do bucket).
+      O prazo é decisão do controlador/jurídico (ver docs/m4-ropa.md §2.4).
 
 run_retention() é idempotente: segunda execução com o mesmo now → tudo zero.
 
@@ -40,6 +43,19 @@ from src.privacy.retention_store import RetentionStore, get_retention_store
 logger = logging.getLogger(__name__)
 
 _DEFAULT_RETENTION_AFTER_REVOCATION_DAYS = 90
+
+
+def _get_audit_retention_days() -> Optional[int]:
+    """Prazo de guarda do audit_trail em dias; None = guardar sem prazo (padrão)."""
+    raw = os.getenv("AUDIT_RETENTION_DAYS", "").strip()
+    if not raw:
+        return None
+    try:
+        days = int(raw)
+    except ValueError:
+        logger.warning("retention: AUDIT_RETENTION_DAYS inválido — auditoria não será expurgada")
+        return None
+    return days if days > 0 else None
 
 
 def _get_retention_days() -> int:
@@ -71,6 +87,7 @@ class RetentionReport:
     consents_expired: int = 0
     consents_revoked_deleted: int = 0
     vault_shredded: int = 0
+    audit_events_deleted: int = 0
     skipped_invalid: int = 0
     errors: int = 0
     dry_run: bool = False
@@ -519,6 +536,29 @@ def run_retention(
                         continue
                 report.vault_shredded += 1
 
+        # -------------------------------------------------------------------
+        # Regra f — audit_trail (só com AUDIT_RETENTION_DAYS definido)
+        # recorded_at é sempre ISO-8601 UTC com sufixo Z (src.core.clock),
+        # então a comparação de strings no Mango equivale à cronológica.
+        # -------------------------------------------------------------------
+        audit_days = _get_audit_retention_days()
+        if audit_days is not None:
+            cutoff = (now - timedelta(days=audit_days)).astimezone(timezone.utc)
+            cutoff_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
+            selector = {"type": "audit_event", "recorded_at": {"$lt": cutoff_iso}}
+            for doc in store.iter_audit(selector):
+                if not dry_run:
+                    try:
+                        store.delete_audit(doc)
+                    except Exception as exc:
+                        report.errors += 1
+                        logger.error(
+                            "retention: erro ao expurgar auditoria _id=%s: %s",
+                            doc.get("_id", ""), type(exc).__name__,
+                        )
+                        continue
+                report.audit_events_deleted += 1
+
     try:
         _apply_rules()
     except Exception:
@@ -540,6 +580,7 @@ def run_retention(
                 consents_expired=report.consents_expired,
                 consents_revoked_deleted=report.consents_revoked_deleted,
                 vault_shredded=report.vault_shredded,
+                audit_events_deleted=report.audit_events_deleted,
                 skipped_invalid=report.skipped_invalid,
                 errors=report.errors,
                 dry_run=dry_run,

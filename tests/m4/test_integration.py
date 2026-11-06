@@ -455,7 +455,7 @@ def test_vault_roundtrip_real(real_env, test_cpf, real_vault, cloudant_client, c
     assert cpf_normalized not in doc_json, "CPF normalizado encontrado no documento Cloudant"
 
     # reveal retorna o CPF
-    revealed = real_vault.reveal(pseudonym_id, purpose="LEGAL_REQUEST", actor="integration_test")
+    revealed = real_vault.reveal(pseudonym_id, purpose="LEGAL_REQUEST", actor="internal_api")
     assert revealed == cpf_normalized
 
     # shred
@@ -464,7 +464,7 @@ def test_vault_roundtrip_real(real_env, test_cpf, real_vault, cloudant_client, c
 
     # reveal depois de shred deve falhar
     with pytest.raises(VaultError):
-        real_vault.reveal(pseudonym_id, purpose="LEGAL_REQUEST", actor="integration_test")
+        real_vault.reveal(pseudonym_id, purpose="LEGAL_REQUEST", actor="internal_api")
 
 
 # ---------------------------------------------------------------------------
@@ -734,7 +734,7 @@ def test_internal_erase_real(real_env, real_vault, real_audit, cloudant_client, 
 
     # reveal deve falhar (shredded)
     with pytest.raises(VaultError):
-        real_vault.reveal(pseudonym_id, purpose="LEGAL_REQUEST", actor="integration_test")
+        real_vault.reveal(pseudonym_id, purpose="LEGAL_REQUEST", actor="internal_api")
 
     # Segunda chamada → zeros
     from src.privacy.retention_store import get_retention_store
@@ -1121,7 +1121,7 @@ def test_full_flow_m2_m3_m4(real_env, real_vault, cloudant_client, cleanup):
 
     # reveal deve falhar (vault shredded)
     with pytest.raises(VaultError):
-        real_vault.reveal(pseudonym_id, purpose="LEGAL_REQUEST", actor="integration_test")
+        real_vault.reveal(pseudonym_id, purpose="LEGAL_REQUEST", actor="internal_api")
 
     # --- h. Segunda chamada ao erase → todos zero ---
     get_retention_store.cache_clear()
@@ -1141,3 +1141,214 @@ def test_full_flow_m2_m3_m4(real_env, real_vault, cloudant_client, cleanup):
     assert erase_body2["vault_shredded"] is False
 
     cleanup.add_doc(audit_db, erase_body2["trace_id"])
+
+
+# ---------------------------------------------------------------------------
+# Lacunas LGPD (revisão do M4): por CPF, exportação, consentimento no cofre,
+# expurgo da auditoria por prazo
+# ---------------------------------------------------------------------------
+
+def _put_test_consent(cloudant_client, cleanup, pseudonym_id, *, status="AUTHORISED", days=90):
+    import os
+    from ibmcloudant.cloudant_v1 import Document
+
+    consents_db = os.getenv("CLOUDANT_DB_CONSENTS", "consent_registry")
+    consent_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+    doc = {
+        "_id": consent_id,
+        "consent_id": consent_id,
+        "pseudonym_id": pseudonym_id,
+        "institutions": ["bb"],
+        "scopes": ["debts:read"],
+        "status": status,
+        "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "expires_at": (now + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "test_fixture": True,
+    }
+    cloudant_client.put_document(db=consents_db, doc_id=consent_id, document=Document.from_dict(doc))
+    cleanup.add_doc(consents_db, consent_id)
+    return consent_id
+
+
+def _put_test_snapshot(cloudant_client, cleanup, pseudonym_id, consent_id):
+    import os
+    from ibmcloudant.cloudant_v1 import Document
+
+    snapshots_db = os.getenv("CLOUDANT_DB_SNAPSHOTS", "financial_snapshots")
+    snapshot_id = str(uuid.uuid4())
+    doc = {
+        "_id": snapshot_id,
+        "snapshot_id": snapshot_id,
+        "pseudonym_id": pseudonym_id,
+        "consent_id": consent_id,
+        "expires_at": _future_iso(90),
+        "test_fixture": True,
+    }
+    cloudant_client.put_document(db=snapshots_db, doc_id=snapshot_id, document=Document.from_dict(doc))
+    cleanup.add_doc(snapshots_db, snapshot_id)
+    return snapshot_id
+
+
+def _clear_factories():
+    from src.privacy.audit import get_audit_logger
+    from src.privacy.retention_store import get_retention_store
+
+    get_retention_store.cache_clear()
+    get_audit_logger.cache_clear()
+
+
+def test_erase_by_cpf_all_key_versions_real(real_env, real_vault, cloudant_client, cleanup, monkeypatch):
+    """
+    Mesmo CPF com pseudônimos v1 e v2 (rotação) → POST /internal/erase {cpf}
+    apaga os dois titulares no Cloudant real.
+    """
+    import os
+    from ibm_cloud_sdk_core import ApiException
+    from src.privacy import pseudonymization as pm
+
+    vault_db = os.getenv("CLOUDANT_DB_IDENTITY_VAULT", "identity_vault")
+    snapshots_db = os.getenv("CLOUDANT_DB_SNAPSHOTS", "financial_snapshots")
+    token = os.getenv("INTERNAL_API_TOKEN")
+    cpf = _gen_random_cpf()
+
+    pid_v1 = real_vault.store(cpf)
+    cleanup.add_doc(vault_db, pid_v1)
+    cleanup.add_pseudonym(pid_v1)
+    snap_v1 = _put_test_snapshot(cloudant_client, cleanup, pid_v1,
+                                 _put_test_consent(cloudant_client, cleanup, pid_v1))
+
+    monkeypatch.setenv("PSEUDONYM_HMAC_KEY_V2", "ef" * 32)
+    monkeypatch.setenv("PSEUDONYM_KEY_ACTIVE_VERSION", "v2")
+    pm.reset_key_cache()
+    try:
+        pid_v2 = real_vault.store(cpf)
+        cleanup.add_doc(vault_db, pid_v2)
+        cleanup.add_pseudonym(pid_v2)
+        assert pid_v2 != pid_v1
+        snap_v2 = _put_test_snapshot(cloudant_client, cleanup, pid_v2,
+                                     _put_test_consent(cloudant_client, cleanup, pid_v2))
+
+        _clear_factories()
+        from src.main import app
+        with TestClient(app) as tc:
+            resp = tc.post("/internal/erase", json={"cpf": cpf}, headers={"X-Internal-Token": token})
+    finally:
+        monkeypatch.setenv("PSEUDONYM_KEY_ACTIVE_VERSION", "v1")
+        pm.reset_key_cache()
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert pm.normalize_cpf(cpf) not in resp.text
+    assert {s["pseudonym_id"] for s in body["subjects"]} == {pid_v1, pid_v2}
+    assert body["totals"]["snapshots_deleted"] == 2
+    assert body["totals"]["consents_revoked"] == 2
+    assert body["totals"]["vault_shredded"] == 2
+
+    for snap in (snap_v1, snap_v2):
+        with pytest.raises(ApiException) as exc:
+            cloudant_client.get_document(db=snapshots_db, doc_id=snap).get_result()
+        assert exc.value.status_code == 404
+    for pid in (pid_v1, pid_v2):
+        doc = cloudant_client.get_document(db=vault_db, doc_id=pid).get_result()
+        assert doc.get("shredded_at") and "cpf_ciphertext" not in doc
+
+
+def test_subject_export_real(real_env, real_vault, cloudant_client, cleanup):
+    """POST /internal/subject/export {cpf} devolve os dados do titular e audita."""
+    import os
+    from src.privacy.pseudonymization import normalize_cpf
+
+    vault_db = os.getenv("CLOUDANT_DB_IDENTITY_VAULT", "identity_vault")
+    audit_db = os.getenv("CLOUDANT_DB_AUDIT", "audit_trail")
+    token = os.getenv("INTERNAL_API_TOKEN")
+    cpf = _gen_random_cpf()
+
+    pid = real_vault.store(cpf)
+    cleanup.add_doc(vault_db, pid)
+    cleanup.add_pseudonym(pid)
+    consent_id = _put_test_consent(cloudant_client, cleanup, pid)
+    snapshot_id = _put_test_snapshot(cloudant_client, cleanup, pid, consent_id)
+
+    _clear_factories()
+    from src.main import app
+    with TestClient(app) as tc:
+        resp = tc.post("/internal/subject/export", json={"cpf": cpf}, headers={"X-Internal-Token": token})
+
+    assert resp.status_code == 200, resp.text
+    assert normalize_cpf(cpf) not in resp.text
+    assert "cpf_ciphertext" not in resp.text and "wrapped_dek" not in resp.text
+    subject = resp.json()["subjects"][0]
+    assert subject["pseudonym_id"] == pid
+    assert [c["_id"] for c in subject["consents"]] == [consent_id]
+    assert [s["_id"] for s in subject["snapshots"]] == [snapshot_id]
+    assert subject["vault"]["exists"] is True
+
+    found = cloudant_client.post_find(
+        db=audit_db, selector={"pseudonym_id": pid, "event_type": "subject.access_exported"}, limit=5,
+    ).get_result()["docs"]
+    assert len(found) == 1 and found[0]["snapshots"] == 1
+
+
+def test_vault_requires_active_consent_real(real_env, cloudant_client, cleanup):
+    """Factory de produção: SERASA_QUERY só revela com consentimento AUTHORISED no Cloudant real."""
+    import os
+    from ibmcloudant.cloudant_v1 import Document
+    from src.privacy.identity_vault import VaultAccessDenied, get_identity_vault
+    from src.privacy.pseudonymization import normalize_cpf
+
+    vault_db = os.getenv("CLOUDANT_DB_IDENTITY_VAULT", "identity_vault")
+    consents_db = os.getenv("CLOUDANT_DB_CONSENTS", "consent_registry")
+    cpf = _gen_random_cpf()
+    _clear_factories()
+    vault = get_identity_vault()
+
+    pid = vault.store(cpf)
+    cleanup.add_doc(vault_db, pid)
+    cleanup.add_pseudonym(pid)
+
+    with pytest.raises(VaultAccessDenied):
+        vault.resolve_for_serasa(pid)
+
+    consent_id = _put_test_consent(cloudant_client, cleanup, pid)
+    assert vault.resolve_for_serasa(pid) == normalize_cpf(cpf)
+
+    doc = cloudant_client.get_document(db=consents_db, doc_id=consent_id).get_result()
+    doc["status"] = "REVOKED"
+    cloudant_client.put_document(db=consents_db, doc_id=consent_id, document=Document.from_dict(doc))
+    with pytest.raises(VaultAccessDenied):
+        vault.resolve_for_serasa(pid)
+
+    with pytest.raises(VaultAccessDenied):
+        vault.reveal(pid, purpose="SERASA_QUERY", actor="internal_api")
+
+
+def test_audit_expiry_selector_real(real_env, cloudant_client, cleanup):
+    """
+    A consulta da regra f ($lt em recorded_at) encontra e apaga um evento antigo
+    no audit_trail real. Restrita ao pseudonym_id do teste: nunca roda o expurgo
+    sobre a trilha inteira compartilhada.
+    """
+    import os
+    from ibmcloudant.cloudant_v1 import Document
+    from src.privacy.retention_store import get_retention_store
+
+    audit_db = os.getenv("CLOUDANT_DB_AUDIT", "audit_trail")
+    pid = uuid.uuid4().hex + uuid.uuid4().hex
+    cleanup.add_pseudonym(pid)
+    old_id, new_id = str(uuid.uuid4()), str(uuid.uuid4())
+    for _id, ts in ((old_id, "2020-01-01T00:00:00Z"), (new_id, _utcnow_iso())):
+        cloudant_client.put_document(db=audit_db, doc_id=_id, document=Document.from_dict({
+            "_id": _id, "type": "audit_event", "trace_id": _id, "event_type": "retention.run",
+            "recorded_at": ts, "pseudonym_id": pid, "actor": "integration_test",
+        }))
+        cleanup.add_doc(audit_db, _id)
+
+    _clear_factories()
+    store = get_retention_store()
+    selector = {"type": "audit_event", "pseudonym_id": pid, "recorded_at": {"$lt": "2021-01-01T00:00:00Z"}}
+    docs = list(store.iter_audit(selector))
+    assert [d["_id"] for d in docs] == [old_id]
+    store.delete_audit(docs[0])
+    remaining = {d["_id"] for d in store.iter_audit({"pseudonym_id": pid})}
+    assert remaining == {new_id}

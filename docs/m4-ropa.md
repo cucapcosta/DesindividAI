@@ -33,7 +33,7 @@ Este documento é o Registro de Operações de Tratamento de Dados Pessoais (ROP
 | **Destinatários (compartilhamento)** | Open Finance (instituições financeiras autorizadas pelo titular); Serasa Experian (consulta de score/restrições — **Implementado (Parte B):** `HttpSerasaClient` real envia o CPF resolvido pelo cofre somente no corpo do POST, nunca em URL ou log; sandbox continua enviando apenas `pseudonym_id`); IBM Cloud (processamento e armazenamento sob DPA) |
 | **Transferência internacional** | Dados hospedados em IBM Cloud us-south (Dallas, EUA) — requer cláusula contratual padrão ou equivalente nos termos do Art. 33 LGPD / ANPD |
 | **Retenção** | Snapshot: `expires_at` herdado do snapshot (ou `now + DECISION_RETENTION_DAYS` para snapshots legados); Decisões (`decision_traces`): `expires_at` do documento, antecipado para `revoked_at + 90 dias` se o consentimento for revogado (regra a2); Consentimento REVOKED: até `revoked_at + 90 dias`; Consentimento AWAITING: 10 minutos; cofre de identidade: até crypto-shredding |
-| **Medidas de segurança** | Pseudonimização HMAC-SHA256; AES-256-GCM (DEK por titular + envelope KEK); guarda de PII antes de persistir (M4 e M3); trilha de auditoria append-only pela aplicação (o código só insere; não há update/delete — para proteção plena em produção: COS com Object Lock/WORM, hash chain entre eventos e credencial exclusiva de escrita separada da CLOUDANT_APIKEY); acesso ao CPF somente via `vault.reveal()` auditado; endpoints internos protegidos por token HMAC; hashes adicionais `prompt_sha256`/`output_sha256` nos traces para integridade (texto completo mantido para auditoria; evento de auditoria carrega apenas os hashes) |
+| **Medidas de segurança** | Pseudonimização HMAC-SHA256; AES-256-GCM (DEK por titular + envelope KEK); guarda de PII antes de persistir (M4 e M3); trilha de auditoria append-only pela aplicação (o código só insere; não há update/delete — para proteção plena em produção: COS com Object Lock/WORM, hash chain entre eventos e credencial exclusiva de escrita separada da CLOUDANT_APIKEY); acesso ao CPF somente via `vault.reveal()` auditado, com finalidade amarrada ao serviço chamador e consentimento ativo exigido para a consulta ao Serasa; endpoints internos protegidos por token secreto compartilhado (`X-Internal-Token`, comparado em tempo constante); hashes adicionais `prompt_sha256`/`output_sha256` nos traces para integridade (texto completo mantido para auditoria; evento de auditoria carrega apenas os hashes) |
 
 ---
 
@@ -62,8 +62,23 @@ Este documento é o Registro de Operações de Tratamento de Dados Pessoais (ROP
 | **Base legal** | LGPD Art. 18, VI — direito à eliminação dos dados pessoais tratados com o consentimento |
 | **Titulares** | Pessoas físicas que solicitaram o apagamento |
 | **Dados envolvidos** | Consentimentos, snapshots financeiros, decisões em `decision_traces` e cofre de identidade do titular |
-| **Prazo de execução** | 15 dias corridos (Art. 19, II LGPD) |
+| **Entrada do pedido** | CPF do titular, enviado só no corpo de `POST /internal/erase`. O sistema calcula o pseudônimo em **todas** as versões da chave de pseudonimização, para não deixar dados de versões anteriores à última rotação |
+| **Prazo de execução** | Referência interna de 15 dias corridos. A LGPD fixa 15 dias para a declaração completa de acesso (Art. 19, II); para a eliminação o prazo é **[a definir pelo controlador]**, seguindo a regulamentação da ANPD |
 | **Medidas** | Revogação de consentimentos (`LGPD_ERASURE`), deleção de snapshots, apagamento de decisões (`decisions_deleted`), crypto-shredding do cofre; auditoria em `consent.erasure_requested` e `erasure.completed` |
+
+---
+
+### 2.3.1 Acesso e portabilidade (LGPD Art. 18, II, V e VII)
+
+| Atributo | Detalhamento |
+|---|---|
+| **Nome da atividade** | Atendimento a pedido de acesso, portabilidade e informação sobre compartilhamento |
+| **Finalidade** | Entregar ao titular uma cópia completa dos dados que o sistema guarda dele, em formato legível por máquina |
+| **Base legal** | LGPD Art. 18, II (acesso), V (portabilidade) e VII (informação sobre compartilhamento); Art. 19 (forma e prazo) |
+| **Entrada do pedido** | CPF (todas as versões da chave) ou `pseudonym_id`, em `POST /internal/subject/export` |
+| **Dados entregues** | Consentimentos, snapshots, decisões (inclusive o texto da recomendação gerado pelo modelo), metadados do cofre (nunca o CPF cifrado nem a chave), histórico de auditoria e resumo de compartilhamentos (instituições Open Finance, consultas ao Serasa, operadores) |
+| **Prazo de execução** | 15 dias para a declaração completa (Art. 19, II) |
+| **Medidas** | Evento `subject.access_exported` gravado antes da entrega (sem trilha, nada é entregue); token interno; CPF nunca devolvido nem logado |
 
 ---
 
@@ -75,7 +90,8 @@ Este documento é o Registro de Operações de Tratamento de Dados Pessoais (ROP
 | **Finalidade** | Conformidade regulatória; rastreabilidade de acesso e operações sobre dados do titular; suporte a investigações |
 | **Base legal** | Art. 7º, II LGPD (cumprimento de obrigação legal); Art. 37 LGPD (registro de operações) |
 | **Categorias de dados** | Apenas pseudônimos (`pseudonym_id`), identificadores de sessão (`trace_id`, `consent_id`, `snapshot_id`), tipo de evento e metadados de operação — **nunca CPF nem dados financeiros em claro** |
-| **Retenção** | `audit_trail` nunca é expurgado pelo job de retenção |
+| **Retenção** | **[a definir pelo controlador]**. Hoje a trilha não é expurgada (padrão). O código já aplica qualquer prazo configurado em `AUDIT_RETENTION_DAYS` (regra f do job de retenção); as cópias no COS devem expirar pela regra de ciclo de vida do bucket com o mesmo prazo. Sugestão a validar com o jurídico: o maior prazo de guarda regulatória aplicável ao controlador, e não "para sempre" |
+| **Natureza dos dados após o apagamento do titular** | Continuam sendo dado pessoal **pseudonimizado**: o `pseudonym_id` é recalculável a partir do CPF enquanto a chave HMAC existir. Por isso a trilha precisa de prazo definido e não pode ser tratada como dado anonimizado |
 | **Destinatários** | Cloudant (banco `audit_trail`) + COS (bucket `desendividai-artifacts`, prefixo `audit/`) |
 
 ---
@@ -92,17 +108,22 @@ Este documento é o Registro de Operações de Tratamento de Dados Pessoais (ROP
 
 ---
 
-## 4. Direitos dos titulares (LGPD Art. 18)
+## 4. Direitos dos titulares (LGPD Art. 18 e Art. 20)
 
-| Direito | Canal de exercício | Implementação |
-|---|---|---|
-| Confirmação de tratamento (inciso I) | [a definir pelo controlador] | `consent_registry` registra o tratamento |
-| Acesso aos dados (inciso II) | [a definir pelo controlador] | `GET /debts` retorna o snapshot atual (M2) |
-| Correção (inciso III) | [a definir pelo controlador] | Novo consentimento + novo snapshot |
-| Anonimização / bloqueio / eliminação (incisos IV–VI) | Equipe de privacidade → `POST /internal/erase/{pseudonym_id}` | Implementado (Parte A e B); cobre snapshots e `decision_traces`; prazo: 15 dias |
-| Portabilidade (inciso V) | [a definir pelo controlador] | Plano / produção |
-| Revogação do consentimento (inciso IX) | Portal do banco / `DELETE /consent/{id}` (M1 stub) | Revogação OAuth pelo M1; crypto-shredding pelo M4 |
-| Revisão de decisões automatizadas (inciso IX) | [a definir pelo controlador] | Plano / produção |
+O canal de atendimento ao titular é do controlador; os endpoints abaixo são internos (protegidos por `X-Internal-Token`) e usados pela equipe de privacidade para cumprir o pedido.
+
+| Direito | Base | Implementação | Estado |
+|---|---|---|---|
+| Confirmação da existência de tratamento | Art. 18, I | `POST /internal/subject/export` (lista vazia = nada guardado) | Implementado |
+| Acesso aos dados | Art. 18, II | `POST /internal/subject/export` | Implementado |
+| Correção de dados incompletos, inexatos ou desatualizados | Art. 18, III | Os dados vêm das fontes (Open Finance, Serasa): a correção é feita na origem e entra com um novo consentimento e um novo snapshot | Processo; sem endpoint |
+| Anonimização, bloqueio ou eliminação de dados desnecessários ou excessivos | Art. 18, IV | Job de retenção (expurgo por prazo) e guarda de PII (bloqueia dados excessivos antes de persistir) | Implementado |
+| Portabilidade | Art. 18, V | `POST /internal/subject/export` (JSON legível por máquina) | Implementado |
+| Eliminação dos dados tratados com consentimento | Art. 18, VI | `POST /internal/erase` (por CPF, todas as versões da chave) e `POST /internal/erase/{pseudonym_id}` | Implementado |
+| Informação sobre compartilhamento | Art. 18, VII | Bloco `sharing` da exportação + seção 3 deste ROPA | Implementado |
+| Informação sobre a possibilidade de não consentir | Art. 18, VIII | Tela de consentimento do canal | Fora do escopo (canal) |
+| Revogação do consentimento | Art. 18, IX | `DELETE /consent/{id}` (M1); a retenção antecipa o expurgo para `revoked_at + 90 dias` | Implementado (M1 + M4) |
+| Revisão de decisões automatizadas | **Art. 20** | A recomendação é escolhida por regra determinística ([ADR 0001](adr/0001-recomendacao-por-regra-deterministica.md)) e o texto do modelo só a explica. A exportação entrega a decisão e a explicação; o pedido de revisão por pessoa é **[a definir pelo controlador]** | Parcial |
 
 ---
 
@@ -115,15 +136,23 @@ Este documento é o Registro de Operações de Tratamento de Dados Pessoais (ROP
 | Crypto-shredding (apagamento por destruição da DEK) | Implementado (Parte A) |
 | Guarda de PII em todas as camadas de persistência e auditoria (M4 + M3) | Implementado (Parte A e B) |
 | Controle de acesso ao CPF por `purpose` auditado (`SERASA_QUERY`, `LEGAL_REQUEST`) | Implementado (Parte A) |
+| `purpose` amarrado ao serviço chamador e consentimento ativo exigido para `SERASA_QUERY`, com falha fechada | Implementado (revisão M4) |
 | Re-identificação para Serasa via cofre; CPF apenas no corpo do POST | Implementado (Parte B) |
 | Hashes adicionais `prompt_sha256`/`output_sha256` nos traces para integridade e correlação com auditoria; prompt e output mantidos no trace | Implementado (Parte B) |
 | Retenção e apagamento cobrem `decision_traces` (regra a2, campo `decisions_deleted`) | Implementado (Parte B) |
 | Autenticação IAM em Cloudant e COS | Implementado (Parte A) |
-| Endpoints internos protegidos por X-Internal-Token (HMAC) | Implementado (Parte A) |
+| Endpoints internos protegidos por `X-Internal-Token` (segredo compartilhado comparado em tempo constante; não é HMAC) | Implementado (Parte A) |
+| Falhas de autenticação no `/internal/*` registradas como log estruturado (`internal.auth_failed`) | Implementado (revisão M4) |
+| Job de retenção agendado na própria API (`RETENTION_SCHEDULE_ENABLED`) | Implementado (revisão M4); em produção, preferir job agendado único |
+| Apagamento e exportação por CPF cobrindo todas as versões da chave de pseudonimização | Implementado (revisão M4) |
+| Prazo de guarda da trilha de auditoria (`AUDIT_RETENTION_DAYS`) | Mecanismo implementado; **prazo a definir pelo controlador** |
+| Relatório de Impacto à Proteção de Dados (RIPD, Art. 38) | **Rascunho** em [`m4-ripd.md`](m4-ripd.md) |
 | Retry com backoff exponencial em operações Cloudant (429 too_many_requests) | Implementado (Parte B) |
 | Gestão de chaves via Secrets Manager + HSM (Key Protect) | **Plano / produção** — implementar um KeyProvider sobre o Secrets Manager |
 | Trusted Profile IAM (sem API key em texto plano) | **Plano / produção** |
-| Alertas de acesso anômalo (Activity Tracker) | **Plano / produção** |
+| Eventos de auditoria como log JSON no stdout (`desendividai.audit`) | Implementado |
+| Alertas de acesso anômalo sobre `event_type` (IBM Cloud Logs) | **Especificado, não ativo** — Cloud Logs e Activity Tracker não provisionados nesta conta |
+| Envio do trace ao watsonx.governance | **Pendente** — `NoopGovernanceSink`; instância provisionada, falta implementar |
 
 ---
 
@@ -133,6 +162,7 @@ Este documento é o Registro de Operações de Tratamento de Dados Pessoais (ROP
 |---|---|---|---|
 | 1.0 | 2026-11-05 | Equipe M4 | Criação inicial — reflete Parte A do M4 |
 | 2.0 | 2026-11-06 | Equipe M4 | Parte B: tratamento pelo Agente 2; re-identificação Serasa implementada; regra a2; erase cobre `decision_traces`; hashes de prompt/output |
+| 3.0 | 2026-11-06 | Equipe M4 | Revisão: tabela de direitos corrigida (incisos do Art. 18 e Art. 20); acesso/portabilidade (2.3.1); apagamento por CPF em todas as versões da chave; prazo e natureza da trilha de auditoria; controles de acesso do cofre; token interno descrito corretamente; RIPD em rascunho |
 
 ---
 
@@ -141,6 +171,8 @@ Este documento é o Registro de Operações de Tratamento de Dados Pessoais (ROP
 | Módulo | Caminho |
 |---|---|
 | Apagamento (Art. 18) | [`src/privacy/erasure.py`](../src/privacy/erasure.py) |
+| Acesso e portabilidade (Art. 18) | [`src/privacy/subject_access.py`](../src/privacy/subject_access.py) |
+| Agendador da retenção | [`src/privacy/retention_scheduler.py`](../src/privacy/retention_scheduler.py) |
 | Endpoint interno | [`src/api/routers/internal.py`](../src/api/routers/internal.py) |
 | Cofre de identidade | [`src/privacy/identity_vault.py`](../src/privacy/identity_vault.py) |
 | Retenção | [`src/privacy/retention.py`](../src/privacy/retention.py) |

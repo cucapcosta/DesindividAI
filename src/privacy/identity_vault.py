@@ -27,6 +27,18 @@ compactação do Cloudant, backups e réplicas) permanecem decifráveis enquanto
 a KEK global existir. Para irrecuperabilidade inclusive em backups (produção):
 DEK por titular em Key Protect/HSM, destruída no shred.
 
+Controles de acesso no reveal() (defesa em profundidade, além das camadas de cima):
+  - purpose precisa estar em _ALLOWED_PURPOSES.
+  - purpose_actors (opcional): mapa purpose → actors autorizados. A factory de
+    produção (get_identity_vault) usa _DEFAULT_PURPOSE_ACTORS. O actor ainda é
+    declarado pelo chamador dentro do mesmo processo; isso impede uso trocado
+    por engano, não um atacante com execução de código (para isso: IAM por
+    serviço em produção).
+  - consent_checker (opcional): callable(pseudonym_id) -> bool. Para
+    SERASA_QUERY, o CPF só sai se houver consentimento AUTHORISED e não
+    expirado. A factory de produção liga _cloudant_consent_checker. Falha ao
+    consultar = acesso negado (fail closed).
+
 Ligação com o Serasa:
   resolve_for_serasa() chama reveal(purpose="SERASA_QUERY", actor="agent1").
   O HttpSerasaClient em src/agents/agent1/sources.py chama este método (resolver
@@ -51,6 +63,15 @@ logger = logging.getLogger(__name__)
 
 _ALLOWED_PURPOSES = frozenset({"SERASA_QUERY", "LEGAL_REQUEST"})
 
+#: Quem pode pedir cada finalidade na factory de produção.
+_DEFAULT_PURPOSE_ACTORS: dict[str, frozenset[str]] = {
+    "SERASA_QUERY": frozenset({"agent1"}),
+    "LEGAL_REQUEST": frozenset({"internal_api"}),
+}
+
+#: Finalidades que exigem consentimento ativo do titular.
+_CONSENT_REQUIRED_PURPOSES = frozenset({"SERASA_QUERY"})
+
 
 def _b64e(data: bytes) -> str:
     return base64.b64encode(data).decode()
@@ -66,6 +87,10 @@ def _b64d(data: str) -> bytes:
 
 class VaultError(RuntimeError):
     """CPF não pode ser recuperado (titular inexistente, shredded ou corrompido)."""
+
+
+class VaultAccessDenied(VaultError):
+    """reveal() negado: actor não autorizado ou titular sem consentimento ativo."""
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +183,10 @@ class IdentityVault:
                         Chamado em reveal() com ou sem sucesso. Nunca recebe o CPF.
         clock         — callable() -> str (ISO-8601Z); padrão: _utcnow_iso().
                         Injetável em testes para controlar o tempo.
+        purpose_actors — mapa purpose → frozenset de actors autorizados; None
+                        desativa a checagem (padrão nos testes unitários).
+        consent_checker — callable(pseudonym_id) -> bool; None desativa a
+                        checagem de consentimento ativo para SERASA_QUERY.
     """
 
     def __init__(
@@ -166,8 +195,12 @@ class IdentityVault:
         key_provider: KeyProvider = default_provider,
         audit: Optional[Callable[..., None]] = None,
         clock: Optional[Callable[[], str]] = None,
+        purpose_actors: Optional[dict[str, frozenset[str]]] = None,
+        consent_checker: Optional[Callable[[str], bool]] = None,
     ) -> None:
         self._repo = repository
+        self._purpose_actors = purpose_actors
+        self._consent_checker = consent_checker
         self._kp = key_provider
         self._audit: Callable[..., None] = audit if audit is not None else (lambda event_type, **kw: None)
         self._clock: Callable[[], str] = clock if clock is not None else _utcnow_iso
@@ -281,6 +314,43 @@ class IdentityVault:
                 f"purpose inválido: {purpose!r}. "
                 f"Valores aceitos: {sorted(_ALLOWED_PURPOSES)}"
             )
+
+        if self._purpose_actors is not None:
+            allowed_actors = self._purpose_actors.get(purpose, frozenset())
+            if actor not in allowed_actors:
+                self._fire_audit(
+                    "vault.reveal",
+                    pseudonym_id=pseudonym_id,
+                    actor=actor,
+                    purpose=purpose,
+                    ok=False,
+                    reason="actor_not_allowed",
+                )
+                raise VaultAccessDenied(
+                    f"actor {actor!r} não autorizado para purpose {purpose!r}."
+                )
+
+        if self._consent_checker is not None and purpose in _CONSENT_REQUIRED_PURPOSES:
+            try:
+                has_consent = bool(self._consent_checker(pseudonym_id))
+            except Exception as exc:
+                logger.error(
+                    "vault: falha ao verificar consentimento (acesso negado): %s",
+                    type(exc).__name__,
+                )
+                has_consent = False
+            if not has_consent:
+                self._fire_audit(
+                    "vault.reveal",
+                    pseudonym_id=pseudonym_id,
+                    actor=actor,
+                    purpose=purpose,
+                    ok=False,
+                    reason="no_active_consent",
+                )
+                raise VaultAccessDenied(
+                    "Titular sem consentimento ativo para esta finalidade."
+                )
 
         doc = self._repo.get(pseudonym_id)
 
@@ -409,12 +479,53 @@ def _default_audit() -> Callable[..., None]:
     return lambda event_type, **kw: None
 
 
+def has_active_consent(consents, pseudonym_id: str, now=None) -> bool:
+    """
+    True se algum consentimento do titular está AUTHORISED e com expires_at no
+    futuro. `consents` é um iterável de documentos do consent_registry.
+    Documento com expires_at ausente ou inválido não conta.
+    """
+    from datetime import datetime, timezone
+
+    from src.agents.agent1.dates import parse_utc
+
+    now = now or datetime.now(timezone.utc)
+    for doc in consents:
+        if doc.get("pseudonym_id") != pseudonym_id or doc.get("status") != "AUTHORISED":
+            continue
+        try:
+            expires_at = parse_utc(doc.get("expires_at"))
+        except (TypeError, ValueError):
+            continue
+        if expires_at > now:
+            return True
+    return False
+
+
+def _cloudant_consent_checker(pseudonym_id: str) -> bool:
+    """Consulta o consent_registry real (via RetentionStore)."""
+    from src.privacy.retention_store import get_retention_store  # local — evita ciclo
+
+    store = get_retention_store()
+    return has_active_consent(
+        store.iter_consents({"pseudonym_id": pseudonym_id, "status": "AUTHORISED"}),
+        pseudonym_id,
+    )
+
+
 def get_identity_vault() -> IdentityVault:
     """
-    Retorna uma instância de IdentityVault com o repositório Cloudant real
-    e o AuditLogger padrão (get_audit_logger().record_event).
+    Retorna uma instância de IdentityVault com o repositório Cloudant real,
+    o AuditLogger padrão (get_audit_logger().record_event) e os controles de
+    acesso de produção: purpose amarrado ao actor e consentimento ativo
+    exigido para SERASA_QUERY.
 
     Equivalente a get_repository() do M2, mas sem @lru_cache no nível da
     vault (o repositório já é cacheado por get_vault_repository()).
     """
-    return IdentityVault(repository=get_vault_repository(), audit=_default_audit())
+    return IdentityVault(
+        repository=get_vault_repository(),
+        audit=_default_audit(),
+        purpose_actors=_DEFAULT_PURPOSE_ACTORS,
+        consent_checker=_cloudant_consent_checker,
+    )
