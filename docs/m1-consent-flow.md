@@ -60,32 +60,57 @@ Cliente (App/Canal)          API Connect (Gateway)          Auth Server (FAPI)  
 
 ### 1. Criação do Consentimento (`POST /consent`)
 - O canal (app/portal) envia CPF, lista de instituições e escopos desejados.
-- O API Connect valida o Bearer token do canal (Service ID IAM provisionado pelo BB).
-- O servidor cria um registro em `consent_registry` no MongoDB com `status: AWAITING_AUTHORISATION`.
+- O API Connect valida o Bearer token do canal (Service ID IAM provisionado pelo BB). *(pendência de configuração)*
+- O servidor cria um registro em `consent_registry` no Cloudant com `status: AWAITING_AUTHORISATION`.
 - Retorna `redirect_url` apontando para o portal Open Finance da instituição.
+  - Modo sandbox (`OPEN_FINANCE_AUTH_SANDBOX=true`): a URL aponta para o próprio `GET /consent/callback?state=...&code=sandbox`.
+  - Modo real: URL do Authorization Server configurado em `OPEN_FINANCE_AUTHORIZE_URL`.
 
 ### 2. Autorização pelo Titular
 - O cliente é redirecionado ao portal Open Finance.
 - O titular confirma o consentimento (quais dados, por quanto tempo).
-- O portal emite um `authorization_code` e redireciona de volta ao callback do cliente (BB).
+- O portal emite um `authorization_code` e redireciona para o callback.
 
-### 3. Troca do Código por Token (`POST /oauth/token`)
-- O canal envia `code + code_verifier` (PKCE S256).
-- O IBM API Connect Native OAuth Provider valida o PKCE e emite:
-  - `access_token` (JWT, TTL: 15 minutos)
-  - `refresh_token` (TTL: 90 dias — alinhado ao `expiration_days` do consentimento)
-  - `id_token` (OIDC, confirma identidade do titular)
+### 3. Callback (`GET /consent/callback`)
+- O backend recebe `state` e `code` (ou `error`).
+- Valida o `state` via `sha256(state)` contra o `state_hash` gravado no documento.
+- O `state` é de **uso único**: após autorização bem-sucedida, o `state_hash` é removido
+  do documento. Uma segunda chamada com o mesmo `state` retorna `404 CONSENT_NOT_FOUND`.
+- Modo sandbox: `code == "sandbox"` é aceito; qualquer outro `code` → `400 INVALID_REQUEST`.
+- Modo real: `code == "sandbox"` é recusado; a validade real do `code` é verificada pelo API Connect.
 
-### 4. Chamadas Autenticadas (`GET /debts`, `POST /simulation`, etc.)
+### 4. Troca do Código por Token — responsabilidade do API Connect
+> **Limitação do backend:** a troca `code → token` (PKCE S256), a validação do PKCE e a
+> emissão de `access_token` / `refresh_token` / `id_token` são responsabilidade do
+> IBM API Connect Native OAuth Provider, não do backend Python. O backend apenas valida
+> o `state` e persiste o novo status `AUTHORISED`.
+
+### 5. Chamadas Autenticadas (`GET /debts`, `POST /simulation`, etc.)
 - O canal inclui `Authorization: Bearer <access_token>`.
-- O API Connect faz **token introspection** (RFC 7662) no Native OAuth Provider antes de rotear.
+- O API Connect faz **token introspection** (RFC 7662) no Native OAuth Provider antes de rotear. *(pendência de configuração)*
 - Valida scope exigido para o endpoint.
 - Roteia para o Agente 1 ou Agente 2 conforme o endpoint.
 
-### 5. Renovação do Token (Refresh)
+### 6. Renovação do Token (Refresh)
 - Quando `access_token` expira (15 min), o canal usa o `refresh_token`.
 - O IBM API Connect emite novo `access_token` sem exigir nova autorização do titular.
 - O `refresh_token` é rotacionado a cada uso (prevenção de replay).
+
+---
+
+## Modo Sandbox
+
+Para desenvolvimento local sem Authorization Server:
+
+```bash
+STORE_BACKEND=memory OPEN_FINANCE_AUTH_SANDBOX=true uvicorn src.main:app --port 8000 &
+R=$(curl -s -X POST localhost:8000/consent -H 'Content-Type: application/json' \
+  -d '{"cpf":"52998224725","institutions":["bb","itau"],"scopes":["debts:read"]}')
+echo "$R"
+# redirect_url = http://localhost:8000/consent/callback?state=<...>&code=sandbox
+curl -s "$(echo "$R" | python -c 'import sys,json;print(json.load(sys.stdin)["redirect_url"])')"
+# → {"status":"AUTHORISED",...}
+```
 
 ---
 
@@ -93,7 +118,7 @@ Cliente (App/Canal)          API Connect (Gateway)          Auth Server (FAPI)  
 
 | Gatilho | Ação |
 |---|---|
-| `DELETE /consent/{consentId}` (titular ou BB) | Status → `REVOKED`, refresh tokens invalidados imediatamente |
-| `expiration_days` atingido | Status → `REVOKED` por TTL index no MongoDB |
-| Fraude detectada (monitoramento IBM Cloud Logs) | Time de segurança do BB revoga via API interna do OAuth Provider |
-| Requisição LGPD Art. 18 (direito ao esquecimento) | Revogação + deleção do snapshot financeiro |
+| `DELETE /consent/{consentId}` (titular ou BB) | Status → `REVOKED`, `revocation_reason=CUSTOMER_REQUEST` |
+| `expiration_days` atingido | Consentimento recusado pelos consumidores via `expires_at` (expiração preguiçosa) |
+| Fraude detectada | Time de segurança do BB revoga via API interna do OAuth Provider |
+| Requisição LGPD Art. 18 (direito ao esquecimento) | `POST /internal/erase` (M4) + revogação |

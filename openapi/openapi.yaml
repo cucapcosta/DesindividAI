@@ -16,7 +16,7 @@ info:
     |---|---|
     | POST /consent | `openid consent:write` |
     | GET /consent/callback | — (retorno do Authorization Server) |
-    | GET /consent/{consentId} | `consent:write` |
+    | GET /consent/{consentId} | `consent:read` |
     | DELETE /consent/{consentId} | `consent:write` |
     | GET /debts | `debts:read` |
     | POST /simulation | `simulation:read` |
@@ -48,10 +48,11 @@ components:
           tokenUrl: https://api.bb.com.br/desendividai/v1/oauth/token
           refreshUrl: https://api.bb.com.br/desendividai/v1/oauth/token
           scopes:
-            openid:             Identidade do cliente (obrigatório)
-            "consent:write":    Criar e revogar consentimentos
-            "debts:read":       Listar dívidas consolidadas
-            "simulation:read":  Solicitar simulação de cenários
+            openid:              Identidade do cliente (obrigatório)
+            "consent:read":      Consultar status do consentimento
+            "consent:write":     Criar e revogar consentimentos
+            "debts:read":        Listar dívidas consolidadas
+            "simulation:read":   Solicitar simulação de cenários
             "recommendation:read": Obter recomendação de quitação
 
   # -------------------------------------------------------------------------
@@ -61,7 +62,7 @@ components:
 
     ConsentRequest:
       type: object
-      required: [cpf, institutions, scopes, expiration_days]
+      required: [cpf, institutions, scopes]
       properties:
         cpf:
           type: string
@@ -115,9 +116,11 @@ components:
     ConsentStatusResponse:
       type: object
       description: Status atual de um consentimento (sem campos internos como pseudonym_id ou state_hash)
+      required: [consent_id, status, institutions, scopes, created_at, expires_at]
       properties:
         consent_id:
           type: string
+          format: uuid
           description: UUID do consentimento
           example: "c7f3a2d1-8b4e-4c6f-9a0b-123456789abc"
         status:
@@ -463,7 +466,7 @@ paths:
       description: Retorna o status atual do consentimento para o canal acompanhar.
       tags: [Consent]
       security:
-        - openfinance_oauth2: ["consent:write"]
+        - openfinance_oauth2: ["consent:read"]
       parameters:
         - name: consentId
           in: path

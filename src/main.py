@@ -73,7 +73,7 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
     inválidos (sem ecoar o valor — LGPD). Para outras rotas mantém o comportamento padrão
     do FastAPI (422 com detalhe completo), preservando o contrato de M2/M3.
     """
-    if request.url.path.startswith("/consent"):
+    if request.url.path == "/consent" or request.url.path.startswith("/consent/"):
         fields = [".".join(str(loc) for loc in err.get("loc", [])) for err in exc.errors()]
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,

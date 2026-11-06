@@ -11,8 +11,9 @@ Caminho A: await asyncio.to_thread(get_identity_vault().store, cpf) + await emit
 from __future__ import annotations
 
 import hashlib
-import hmac
+import json
 import logging
+import re
 import secrets
 import urllib.parse
 from datetime import datetime, timedelta, timezone
@@ -20,10 +21,11 @@ from uuid import UUID, uuid4
 
 import httpx
 
-from src.api.models import ConsentResponse, ConsentStatus
-from src.core.config import consents_db, env, env_bool
+from src.api.models import ConsentResponse, ConsentStatus, ConsentStatusResponse
+from src.core.config import ConfigurationError, consents_db, env, env_bool, require_env
+from src.core.dates import parse_utc
 from src.core.errors import ServiceError
-from src.privacy.pseudonymization import pseudonymize_cpf
+from src.privacy.pseudonymization import PseudonymizationKeyError, pseudonymize_cpf
 from src.storage.store import DocumentStore
 
 logger = logging.getLogger(__name__)
@@ -35,17 +37,16 @@ logger = logging.getLogger(__name__)
 VALID_SCOPES = {"debts:read", "simulation:read", "recommendation:read"}
 AWAITING_EXPIRES_MINUTES = 10
 
+# Padrão de nome de instituição: começa com letra, pode ter dígitos/hífen/underscore — máx 32 chars
+_INSTITUTION_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+
 
 # ---------------------------------------------------------------------------
-# Helpers: data
+# Helper: data
 # ---------------------------------------------------------------------------
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def _utcnow_iso() -> str:
-    return _utcnow().isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -57,16 +58,20 @@ def _pseudonymize(cpf: str) -> str:
     Caminho B: HMAC-SHA256 determinístico via src/privacy/pseudonymization.
     Caminho A: trocar por await asyncio.to_thread(get_identity_vault().store, cpf).
     """
-    return pseudonymize_cpf(cpf)
+    try:
+        return pseudonymize_cpf(cpf)
+    except PseudonymizationKeyError as exc:
+        raise ServiceError(503, "NOT_CONFIGURED", "Chave de pseudonimização não configurada.") from exc
 
 
 def _audit(event: str, **fields) -> None:
     """
-    Caminho B: log estruturado sem CPF.
+    Caminho B: log estruturado sem CPF. Campos serializados como JSON para evitar
+    injeção de linhas de log via valores fornecidos pelo usuário.
     Caminho A: trocar por await emit(event, **fields) de src/privacy/audit_bridge.
     Tratada como melhor-esforço: nunca propaga exceção nem devolve trace_id ao cliente.
     """
-    logger.info("audit event=%s %s", event, " ".join(f"{k}={v}" for k, v in fields.items()))
+    logger.info("audit event=%s %s", event, json.dumps(fields, default=str))
 
 
 # ---------------------------------------------------------------------------
@@ -74,8 +79,12 @@ def _audit(event: str, **fields) -> None:
 # ---------------------------------------------------------------------------
 
 def _is_valid_cpf(cpf: str) -> bool:
-    """Valida dígitos verificadores. Rejeita sequências repetidas (ex.: 11111111111)."""
-    if len(cpf) != 11 or not cpf.isdigit():
+    """
+    Valida dígitos verificadores. Rejeita:
+    - Valores não-ASCII (dígitos unicode de outras escritas passariam em isdigit())
+    - Sequências repetidas (ex.: 11111111111)
+    """
+    if not cpf.isascii() or len(cpf) != 11 or not cpf.isdigit():
         return False
     if len(set(cpf)) == 1:
         return False
@@ -103,20 +112,28 @@ def _state_hash(state: str) -> str:
 def _build_redirect_url(consent_id: str, state: str) -> str:
     """
     Modo sandbox: aponta para o próprio callback (code=sandbox).
-    Modo real: monta URL do Authorization Server.
-    Sem sandbox e sem OPEN_FINANCE_AUTHORIZE_URL → ServiceError 503.
+    Modo real: monta URL do Authorization Server com client_id e redirect_uri.
+    Sem sandbox e sem OPEN_FINANCE_AUTHORIZE_URL, CLIENT_ID ou REDIRECT_URI → ServiceError 503.
+
+    Nota: a troca code→token (PKCE) e a introspecção são responsabilidade do IBM API Connect,
+    não do backend.
     """
     if env_bool("OPEN_FINANCE_AUTH_SANDBOX"):
-        base = env("PUBLIC_BASE_URL", "http://localhost:8000")
+        base = env("PUBLIC_BASE_URL", "http://localhost:8000").rstrip("/")
         params = urllib.parse.urlencode({"state": state, "code": "sandbox"})
         return f"{base}/consent/callback?{params}"
 
-    authorize_url = env("OPEN_FINANCE_AUTHORIZE_URL")
-    if not authorize_url:
-        raise ServiceError(
-            503, "NOT_CONFIGURED",
-            "OPEN_FINANCE_AUTHORIZE_URL não configurado e OPEN_FINANCE_AUTH_SANDBOX não ativo.",
+    # Modo real — exige as três variáveis
+    try:
+        require_env(
+            "OPEN_FINANCE_AUTHORIZE_URL",
+            "OPEN_FINANCE_CLIENT_ID",
+            "OPEN_FINANCE_REDIRECT_URI",
         )
+    except ConfigurationError as exc:
+        raise ServiceError(503, "NOT_CONFIGURED", str(exc)) from exc
+
+    authorize_url = env("OPEN_FINANCE_AUTHORIZE_URL")
     client_id = env("OPEN_FINANCE_CLIENT_ID")
     redirect_uri = env("OPEN_FINANCE_REDIRECT_URI")
     params = urllib.parse.urlencode({
@@ -139,19 +156,32 @@ async def create_consent(store: DocumentStore, body) -> ConsentResponse:
     if not _is_valid_cpf(body.cpf):
         raise ServiceError(400, "INVALID_CPF", "CPF inválido.")
 
-    # --- normalizar institutions ---
+    # --- normalizar e validar institutions ---
     seen: set[str] = set()
     institutions: list[str] = []
     for inst in body.institutions:
         norm = inst.strip().lower()
+        if not norm:
+            raise ServiceError(400, "INVALID_REQUEST", "Nome de instituição não pode ser vazio.")
+        if not _INSTITUTION_PATTERN.match(norm):
+            raise ServiceError(400, "INVALID_REQUEST",
+                               "Nome de instituição inválido: use apenas letras, dígitos, hífen e underscore (máx 32).")
         if norm not in seen:
             seen.add(norm)
             institutions.append(norm)
 
-    # --- validar scopes ---
+    # --- validar e deduplicar scopes ---
+    seen_scopes: set[str] = set()
+    scopes: list[str] = []
     for scope in body.scopes:
         if scope not in VALID_SCOPES:
-            raise ServiceError(400, "INVALID_SCOPE", f"Escopo '{scope}' não reconhecido.")
+            raise ServiceError(
+                400, "INVALID_SCOPE",
+                f"Escopo não reconhecido. Escopos aceitos: {', '.join(sorted(VALID_SCOPES))}.",
+            )
+        if scope not in seen_scopes:
+            seen_scopes.add(scope)
+            scopes.append(scope)
 
     # --- pseudonimização (CPF não sai daqui) ---
     pseudonym_id = _pseudonymize(body.cpf)
@@ -173,7 +203,7 @@ async def create_consent(store: DocumentStore, body) -> ConsentResponse:
         "consent_id": consent_id,
         "pseudonym_id": pseudonym_id,
         "institutions": institutions,
-        "scopes": list(body.scopes),
+        "scopes": scopes,
         "status": ConsentStatus.AWAITING_AUTHORISATION.value,
         "created_at": created_at,
         "expires_at": expires_at,
@@ -193,8 +223,8 @@ async def create_consent(store: DocumentStore, body) -> ConsentResponse:
     _audit(
         "consent.created",
         consent_id=consent_id,
-        institutions=",".join(institutions),
-        scopes=",".join(body.scopes),
+        institutions=institutions,
+        scopes=scopes,
         expires_at=expires_at,
     )
 
@@ -216,39 +246,46 @@ async def authorise_callback(
     state: str | None,
     code: str | None,
     error: str | None,
-):
+) -> ConsentStatusResponse:
     """Transiciona AWAITING_AUTHORISATION → AUTHORISED ou REJECTED."""
     if not state:
         raise ServiceError(400, "INVALID_REQUEST", "Parâmetro 'state' obrigatório.")
     if not code and not error:
         raise ServiceError(400, "INVALID_REQUEST", "Parâmetro 'code' ou 'error' obrigatório.")
 
+    # Validação de code por modo (B2)
+    is_sandbox = env_bool("OPEN_FINANCE_AUTH_SANDBOX")
+    if code:
+        if is_sandbox and code != "sandbox":
+            raise ServiceError(400, "INVALID_REQUEST",
+                               "Modo sandbox: o único code aceito é 'sandbox'.")
+        if not is_sandbox and code == "sandbox":
+            raise ServiceError(400, "INVALID_REQUEST",
+                               "code 'sandbox' não é válido em modo real.")
+
     expected_hash = _state_hash(state)
     docs = await store.find(consents_db(), {"state_hash": expected_hash}, limit=1)
     if not docs:
-        raise ServiceError(404, "CONSENT_NOT_FOUND", "Consentimento não encontrado para o state informado.")
+        raise ServiceError(404, "CONSENT_NOT_FOUND",
+                           "Consentimento não encontrado para o state informado.")
 
     doc = docs[0]
     consent_id = doc["consent_id"]
     status = doc.get("status")
-
-    # idempotência: já AUTHORISED e chegou code → devolve 200 sem regravar
-    if status == ConsentStatus.AUTHORISED.value and code:
-        return _to_status_response(doc)
 
     if status != ConsentStatus.AWAITING_AUTHORISATION.value:
         raise ServiceError(409, "CONSENT_INVALID_STATE",
                            f"Consentimento com status {status} não pode ser autorizado.")
 
     now = _utcnow()
-    # verificar expiração do prazo de autorização
+    # Verificar expiração do prazo de autorização.
+    # Campo ausente ou inválido = tratar como vencido (B5 — falha fechada).
     try:
-        from src.core.dates import parse_utc
         awaiting_exp = parse_utc(doc["awaiting_expires_at"])
-    except (KeyError, ValueError):
-        awaiting_exp = None
+    except (KeyError, ValueError, TypeError):
+        awaiting_exp = now - timedelta(seconds=1)  # ausente/inválido → tratar como vencido
 
-    if awaiting_exp and now > awaiting_exp:
+    if now >= awaiting_exp:
         doc["status"] = ConsentStatus.REJECTED.value
         doc["rejected_at"] = now.isoformat()
         doc["rejection_reason"] = "AUTHORISATION_TIMEOUT"
@@ -279,7 +316,7 @@ async def authorise_callback(
 # GET /consent/{consent_id}
 # ---------------------------------------------------------------------------
 
-async def get_consent_status(store: DocumentStore, consent_id: str):
+async def get_consent_status(store: DocumentStore, consent_id: str) -> ConsentStatusResponse:
     doc = await _load_consent(store, consent_id)
     return _to_status_response(doc)
 
@@ -302,6 +339,7 @@ async def revoke_consent(store: DocumentStore, consent_id: str) -> None:
     doc["revocation_reason"] = "CUSTOMER_REQUEST"
     doc["revoked_by"] = "customer"
 
+    # Gravar REVOKED antes de tentar revogar tokens (C3 — estado consistente mesmo em falha)
     token_revocation = await _revoke_tokens(consent_id)
     doc["token_revocation"] = token_revocation
 
@@ -320,35 +358,36 @@ async def revoke_consent(store: DocumentStore, consent_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 async def _load_consent(store: DocumentStore, consent_id: str) -> dict:
-    """Tenta get direto (novo formato com _id==consent_id), depois find (docs legados do seed)."""
+    """Carrega consentimento pelo _id (= consent_id por contrato)."""
     doc = await store.get(consents_db(), consent_id)
-    if doc is None:
-        found = await store.find(consents_db(), {"consent_id": consent_id}, limit=1)
-        doc = found[0] if found else None
     if doc is None:
         raise ServiceError(404, "CONSENT_NOT_FOUND", "Consentimento não encontrado.")
     return doc
 
 
-def _to_status_response(doc: dict) -> dict:
-    """Devolve os campos públicos do ConsentStatusResponse (sem pseudonym_id, state_hash)."""
-    return {
-        "consent_id": doc["consent_id"],
-        "status": doc["status"],
-        "institutions": doc.get("institutions", []),
-        "scopes": doc.get("scopes", []),
-        "created_at": doc.get("created_at"),
-        "expires_at": doc.get("expires_at"),
-        "authorised_at": doc.get("authorised_at"),
-        "revoked_at": doc.get("revoked_at"),
-    }
+def _to_status_response(doc: dict) -> ConsentStatusResponse:
+    """Devolve ConsentStatusResponse público (sem pseudonym_id, state_hash)."""
+    return ConsentStatusResponse(
+        consent_id=doc["consent_id"],
+        status=ConsentStatus(doc["status"]),
+        institutions=doc.get("institutions", []),
+        scopes=doc.get("scopes", []),
+        created_at=doc.get("created_at"),
+        expires_at=doc.get("expires_at"),
+        authorised_at=doc.get("authorised_at"),
+        revoked_at=doc.get("revoked_at"),
+    )
 
 
 async def _revoke_tokens(consent_id: str) -> str:
     """
-    Chama POST OAUTH_REVOKE_URL para invalidar tokens.
+    Chama POST OAUTH_REVOKE_URL para invalidar tokens associados ao consentimento.
     Falha não impede a revogação (LGPD Art. 8º §5).
     Retorna: "ok" | "failed" | "skipped"
+
+    Pendência: o contrato exato do endpoint de revogação do IBM API Connect
+    (parâmetros, autenticação) precisa ser definido pela equipe de API. O backend
+    não detém os tokens — eles ficam no API Connect. Ver docs/m1-consent-flow.md.
     """
     revoke_url = env("OAUTH_REVOKE_URL")
     if not revoke_url:
@@ -358,6 +397,6 @@ async def _revoke_tokens(consent_id: str) -> str:
             resp = await client.post(revoke_url, json={"consent_id": consent_id})
             resp.raise_for_status()
         return "ok"
-    except Exception as exc:
+    except httpx.HTTPError as exc:
         logger.warning("Revogação de token falhou para consent_id=%s: %s", consent_id, type(exc).__name__)
         return "failed"
