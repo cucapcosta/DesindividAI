@@ -87,7 +87,7 @@ física de documentos vencidos fica com a retenção do M4.
 # by-state-hash — busca no GET /consent/callback
 {"index": {"fields": ["state_hash"]}, "name": "by-state-hash", "ddoc": "idx-state-hash"}
 
-# by-consent-id — busca do M2 (get_consent) e fallback do M1
+# by-consent-id — busca do M2 (get_consent) e do M3 (ensure_consent)
 {"index": {"fields": ["consent_id"]}, "name": "by-consent-id", "ddoc": "idx-consent-id"}
 ```
 
@@ -120,6 +120,15 @@ Quando o consentimento expira naturalmente:
 
 ---
 
+## Escopos do M1 no gateway
+
+| Endpoint | Escopo |
+|---|---|
+| `POST /consent`, `DELETE /consent/{consentId}` | `consent:write` |
+| `GET /consent/{consentId}` | `consent:read` |
+
+---
+
 ## Fluxo de Revogação
 
 ### Por requisição do titular (`DELETE /consent/{consentId}`)
@@ -130,7 +139,8 @@ Quando o consentimento expira naturalmente:
 3. Backend:
    a. Atualiza consent_registry: status → REVOKED, revoked_at, reason → "CUSTOMER_REQUEST"
    b. Tenta POST OAUTH_REVOKE_URL (se configurado); falha não impede a revogação
-   c. Grava token_revocation: "ok" | "failed" | "skipped"
+   c. Relê o documento e grava token_revocation: "ok" | "failed" | "skipped";
+      se um callback concorrente sobrescreveu o REVOKED, reaplica a revogação
 4. Agente 1 não consegue mais buscar dados — consent check retorna REVOKED
 5. Dados ficam retidos 90 dias; deleção física fica com o M4
 ```

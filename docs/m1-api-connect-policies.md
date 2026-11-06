@@ -22,7 +22,7 @@ Configuração do provedor OAuth nativo no API Connect (Cloud Manager → Resour
 | Token format | JWT (opaque não recomendado — requer introspection em cada chamada) | JWT permite validação local no gateway sem round-trip |
 | Token revocation | Native (DataPower) | Revogação síncrona via endpoint `/oauth/revoke` |
 | Introspection path | `/oauth/introspect` | RFC 7662 — expõe metadata do token para microserviços internos |
-| Scopes | `openid consent:write debts:read simulation:read recommendation:read` | Princípio do menor privilégio por endpoint |
+| Scopes | `openid consent:read consent:write debts:read simulation:read recommendation:read` | Princípio do menor privilégio por endpoint |
 
 ### Configuração de Tokens (`oauth_native_tokens_apim`)
 

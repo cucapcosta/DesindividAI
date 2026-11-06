@@ -37,8 +37,10 @@ logger = logging.getLogger(__name__)
 VALID_SCOPES = {"debts:read", "simulation:read", "recommendation:read"}
 AWAITING_EXPIRES_MINUTES = 10
 
-# Padrão de nome de instituição: começa com letra, pode ter dígitos/hífen/underscore — máx 32 chars
-_INSTITUTION_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+# Código de instituição: minúsculas, dígitos (aceita código COMPE como "001"), hífen e underscore.
+_INSTITUTION_PATTERN = re.compile(r"^[a-z0-9_-]{1,32}$")
+# 11 dígitos seguidos podem ser um CPF digitado no campo errado — nunca persistir.
+_CPF_LIKE = re.compile(r"\d{11}")
 
 
 # ---------------------------------------------------------------------------
@@ -157,31 +159,18 @@ async def create_consent(store: DocumentStore, body) -> ConsentResponse:
         raise ServiceError(400, "INVALID_CPF", "CPF inválido.")
 
     # --- normalizar e validar institutions ---
-    seen: set[str] = set()
-    institutions: list[str] = []
-    for inst in body.institutions:
-        norm = inst.strip().lower()
-        if not norm:
-            raise ServiceError(400, "INVALID_REQUEST", "Nome de instituição não pode ser vazio.")
-        if not _INSTITUTION_PATTERN.match(norm):
-            raise ServiceError(400, "INVALID_REQUEST",
-                               "Nome de instituição inválido: use apenas letras, dígitos, hífen e underscore (máx 32).")
-        if norm not in seen:
-            seen.add(norm)
-            institutions.append(norm)
+    institutions = list(dict.fromkeys(inst.strip().lower() for inst in body.institutions))
+    if any(not _INSTITUTION_PATTERN.match(i) or _CPF_LIKE.search(i) for i in institutions):
+        raise ServiceError(400, "INVALID_REQUEST",
+                           "Instituição inválida: use letras minúsculas, dígitos, hífen e underscore (máx 32).")
 
     # --- validar e deduplicar scopes ---
-    seen_scopes: set[str] = set()
-    scopes: list[str] = []
-    for scope in body.scopes:
-        if scope not in VALID_SCOPES:
-            raise ServiceError(
-                400, "INVALID_SCOPE",
-                f"Escopo não reconhecido. Escopos aceitos: {', '.join(sorted(VALID_SCOPES))}.",
-            )
-        if scope not in seen_scopes:
-            seen_scopes.add(scope)
-            scopes.append(scope)
+    if any(scope not in VALID_SCOPES for scope in body.scopes):
+        raise ServiceError(
+            400, "INVALID_SCOPE",
+            f"Escopo não reconhecido. Escopos aceitos: {', '.join(sorted(VALID_SCOPES))}.",
+        )
+    scopes = list(dict.fromkeys(body.scopes))
 
     # --- pseudonimização (CPF não sai daqui) ---
     pseudonym_id = _pseudonymize(body.cpf)

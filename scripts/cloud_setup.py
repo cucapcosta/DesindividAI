@@ -9,7 +9,7 @@ Agente 1 (M2) deve gravar (ver docs/m3-simulation-engine.md) e usa um pseudonym_
 
 Índices criados em consent_registry (M1):
   - by-state-hash: busca por state_hash (GET /consent/callback)
-  - by-consent-id: busca por consent_id (fallback _load_consent e M2 get_consent)
+  - by-consent-id: busca por consent_id (M2 get_consent, M3 ensure_consent)
 """
 
 from __future__ import annotations
@@ -89,7 +89,8 @@ async def _ensure_consent_indexes(store: CloudantStore) -> None:
             "POST", f"{db}/_index",
             json={"index": {"fields": idx["fields"]}, "name": idx["name"], "ddoc": idx["ddoc"]},
         )
-        result = resp.json().get("result", "unknown")
+        store._check(resp)  # erro do Cloudant vira ServiceError em vez de "[OK]"
+        result = resp.json()["result"]
         print(f"[OK] índice {idx['name']} em {db}: {result}")
 
 

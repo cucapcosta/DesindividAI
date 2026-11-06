@@ -14,14 +14,22 @@ import hashlib
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import httpx
 import pytest
+import yaml
 
-from src.api.models import ConsentStatus
-from src.core.config import consents_db, snapshots_db
+import src.privacy.pseudonymization as ps
 import src.services.consent_service as svc
+from src.api.models import ConsentStatus
+from src.api.routers.debts import _consent_error
+from src.core.config import consents_db, snapshots_db
+from src.core.dates import parse_utc
 from src.services.consent_service import _is_valid_cpf
+
+OPENAPI_YAML = Path(__file__).resolve().parent.parent / "openapi" / "openapi.yaml"
 
 CPF_VALID = "52998224725"
 CPF_BAD_DV = "52998224726"      # dígito verificador errado
@@ -33,11 +41,8 @@ CPF_REPEATED = "11111111111"    # sequência repetida
 # ===========================================================================
 
 def _assert_tz(value: str, label: str = "") -> None:
-    """Assert that an ISO-8601 string contains explicit timezone info (F1)."""
-    dt = datetime.fromisoformat(value)
-    assert dt.tzinfo is not None, (
-        f"Campo {label!r} sem fuso horário: {value!r}"
-    )
+    """Data ISO-8601 com fuso explícito (sem parse_utc, que completaria o fuso)."""
+    assert datetime.fromisoformat(value).tzinfo is not None, f"{label} sem fuso: {value!r}"
 
 
 def _post_consent(client, **overrides):
@@ -108,7 +113,6 @@ def test_create_dates_have_timezone(client, monkeypatch, store):
     doc = asyncio.run(store.get(consents_db(), body["consent_id"]))
     for field in ("created_at", "expires_at", "awaiting_expires_at"):
         _assert_tz(doc[field], field)
-    from src.core.dates import parse_utc
     delta = parse_utc(body["expires_at"]) - parse_utc(body["created_at"])
     assert delta.days == 90  # default expiration_days
 
@@ -116,7 +120,6 @@ def test_create_dates_have_timezone(client, monkeypatch, store):
 def test_create_expires_at_respects_expiration_days(client, monkeypatch, store):
     monkeypatch.setenv("OPEN_FINANCE_AUTH_SANDBOX", "true")
     body = _created(client, expiration_days=30)
-    from src.core.dates import parse_utc
     delta = parse_utc(body["expires_at"]) - parse_utc(body["created_at"])
     assert delta.days == 30
 
@@ -229,6 +232,25 @@ def test_create_institution_blank_returns_400(client, monkeypatch):
     resp = _post_consent(client, institutions=["  "])
     assert resp.status_code == 400
     assert resp.json()["code"] == "INVALID_REQUEST"
+
+
+def test_create_institution_compe_code_accepted(client, monkeypatch, store):
+    """Código COMPE numérico ("001") é instituição válida (S2)."""
+    monkeypatch.setenv("OPEN_FINANCE_AUTH_SANDBOX", "true")
+    resp = _post_consent(client, institutions=["001"])
+    assert resp.status_code == 201
+    doc = asyncio.run(store.get(consents_db(), resp.json()["consent_id"]))
+    assert doc["institutions"] == ["001"]
+
+
+def test_create_institution_with_embedded_cpf_returns_400(client, monkeypatch, store):
+    """CPF com prefixo de letra ("a52998224725") não pode virar instituição (S2)."""
+    monkeypatch.setenv("OPEN_FINANCE_AUTH_SANDBOX", "true")
+    resp = _post_consent(client, institutions=["a" + CPF_VALID])
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "INVALID_REQUEST"
+    assert CPF_VALID not in resp.text
+    assert not store._dbs.get(consents_db())
 
 
 def test_create_sandbox_base_url_trailing_slash(client, monkeypatch):
@@ -417,6 +439,8 @@ def test_callback_real_mode_rejects_sandbox_code(client, monkeypatch, store):
     resp = client.get("/consent/callback", params={"state": state, "code": "sandbox"})
     assert resp.status_code == 400
     assert resp.json()["code"] == "INVALID_REQUEST"
+    doc = asyncio.run(store.get(consents_db(), consent_id))
+    assert doc["status"] == ConsentStatus.AWAITING_AUTHORISATION.value
 
 
 # ===========================================================================
@@ -516,7 +540,6 @@ def test_revoke_with_failing_oauth_url_still_returns_204(client, monkeypatch, st
     monkeypatch.setenv("OAUTH_REVOKE_URL", "http://nowhere.invalid/revoke")
     consent_id = _authorised_consent(client, monkeypatch)
 
-    import httpx
 
     async def _fail_post(*args, **kwargs):
         raise httpx.HTTPError("network error")
@@ -542,9 +565,6 @@ def test_revoke_persists_revoked_before_token_call(client, monkeypatch, store):
     consent_id = _authorised_consent(client, monkeypatch)
 
     status_seen_during_revoke: list[str] = []
-
-    import src.services.consent_service as svc
-    original_revoke_tokens = svc._revoke_tokens
 
     async def capturing_revoke(cid):
         # Lê o documento do store no momento em que _revoke_tokens é chamado
@@ -598,7 +618,6 @@ def test_m1_consent_passes_debts_consent_error(client, monkeypatch, store):
     consent_id, state = _get_state(client, monkeypatch)
     client.get("/consent/callback", params={"state": state, "code": "sandbox"})
     doc = asyncio.run(store.get(consents_db(), consent_id))
-    from src.api.routers.debts import _consent_error
     assert _consent_error(doc) is None
 
 
@@ -717,8 +736,8 @@ def test_lgpd_validation_error_no_cpf_in_response(client, monkeypatch):
 # Grupo: openapi contract  (O8)
 # ===========================================================================
 
-# Expected error codes per operation (ignoring 200/201/204, 401, 429).
-# These are the codes that BOTH the YAML and app.openapi() must declare.
+# Códigos de erro por operação que o YAML e o app.openapi() precisam declarar
+# (sem 200/201/204, 401 e 429).
 _CONSENT_EXPECTED_ERRORS: dict[str, dict[str, set[str]]] = {
     "/consent": {
         "post": {"400", "503"},
@@ -733,11 +752,9 @@ _CONSENT_EXPECTED_ERRORS: dict[str, dict[str, set[str]]] = {
 }
 
 
-def _yaml_error_codes(yaml_path: str, route: str, method: str) -> set[str]:
-    """Return error response codes from openapi.yaml (ignores 200/201/204, 401, 429)."""
-    import yaml
-    with open(yaml_path) as f:
-        spec = yaml.safe_load(f)
+def _yaml_error_codes(route: str, method: str) -> set[str]:
+    """Códigos de erro do openapi.yaml (ignora sucesso, 401 e 429, que vêm do gateway)."""
+    spec = yaml.safe_load(OPENAPI_YAML.read_text())
     responses = spec["paths"][route][method]["responses"]
     return {
         str(k) for k in responses
@@ -746,8 +763,7 @@ def _yaml_error_codes(yaml_path: str, route: str, method: str) -> set[str]:
 
 
 def _fastapi_error_codes(app_spec: dict, route: str, method: str) -> set[str]:
-    """Return error response codes from FastAPI-generated spec."""
-    # FastAPI uses /consent/{consent_id} internally; YAML uses /consent/{consentId}
+    """Códigos de erro do spec gerado pelo FastAPI (rota com {consent_id}; no YAML é {consentId})."""
     fastapi_route = route.replace("{consentId}", "{consent_id}")
     responses = app_spec["paths"][fastapi_route][method]["responses"]
     return {
@@ -757,14 +773,12 @@ def _fastapi_error_codes(app_spec: dict, route: str, method: str) -> set[str]:
 
 
 def test_openapi_consent_responses_match_yaml_and_code(client):
-    """O8: YAML, app.openapi(), and expected table all agree on error codes."""
-    import os
-    yaml_path = os.path.join(os.path.dirname(__file__), "..", "openapi", "openapi.yaml")
+    """O8: YAML, app.openapi() e a tabela têm exatamente os mesmos códigos de erro."""
     app_spec = client.app.openapi()
 
     for route, methods in _CONSENT_EXPECTED_ERRORS.items():
         for method, expected_errors in methods.items():
-            yaml_codes = _yaml_error_codes(yaml_path, route, method)
+            yaml_codes = _yaml_error_codes(route, method)
             fastapi_codes = _fastapi_error_codes(app_spec, route, method)
             assert yaml_codes == expected_errors, (
                 f"{method.upper()} {route}: YAML has {yaml_codes}, expected {expected_errors}"
@@ -773,7 +787,7 @@ def test_openapi_consent_responses_match_yaml_and_code(client):
                 f"{method.upper()} {route}: FastAPI spec has {fastapi_codes}, expected {expected_errors}"
             )
 
-    # No /consent* operation should announce 422 in the FastAPI spec
+    # nenhuma operação /consent* anuncia 422 (o handler converte em 400)
     for route in app_spec["paths"]:
         if route.startswith("/consent"):
             for method_obj in app_spec["paths"][route].values():
@@ -781,7 +795,7 @@ def test_openapi_consent_responses_match_yaml_and_code(client):
                     f"{route}: FastAPI spec announces 422 (should be suppressed)"
                 )
 
-    # Every error response in app.openapi() for /consent* must reference ErrorResponse
+    # toda resposta de erro de /consent* referencia ErrorResponse
     error_response_ref = "#/components/schemas/ErrorResponse"
     for route in app_spec["paths"]:
         if not route.startswith("/consent"):
@@ -800,24 +814,20 @@ def test_openapi_consent_responses_match_yaml_and_code(client):
 # Grupo: configuração de produção  (C2, F5)
 # ===========================================================================
 
-@pytest.mark.parametrize("setup", [
-    # (a) APP_ENV=production sem chave
-    {"APP_ENV": "production", "del_key": True,  "set_key": None},
-    # (b) chave não-hex
-    {"APP_ENV": "development", "del_key": False, "set_key": "not-hex-value"},
-])
-def test_pseudonymization_key_error_returns_503(client, monkeypatch, setup):
-    """PseudonymizationKeyError → 503 NOT_CONFIGURED em qualquer cenário de chave inválida (C2/F5)."""
-    import src.privacy.pseudonymization as ps
+@pytest.mark.parametrize("app_env, key", [
+    ("production", None),               # produção sem chave
+    ("development", "not-hex-value"),   # chave não-hex
+], ids=["producao-sem-chave", "chave-nao-hex"])
+def test_pseudonymization_key_error_returns_503(client, monkeypatch, app_env, key):
+    """PseudonymizationKeyError → 503 NOT_CONFIGURED, sem vazar a mensagem original (C2/F5)."""
     monkeypatch.setenv("OPEN_FINANCE_AUTH_SANDBOX", "true")
-    if setup["APP_ENV"]:
-        monkeypatch.setenv("APP_ENV", setup["APP_ENV"])
+    monkeypatch.setenv("APP_ENV", app_env)
+    if key is None:
+        monkeypatch.delenv("PSEUDONYM_HMAC_KEY", raising=False)
+    else:
+        monkeypatch.setenv("PSEUDONYM_HMAC_KEY", key)
     ps._master_key.cache_clear()
     try:
-        if setup["del_key"]:
-            monkeypatch.delenv("PSEUDONYM_HMAC_KEY", raising=False)
-        else:
-            monkeypatch.setenv("PSEUDONYM_HMAC_KEY", setup["set_key"])
         resp = _post_consent(client)
     finally:
         ps._master_key.cache_clear()

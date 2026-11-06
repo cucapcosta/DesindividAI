@@ -17,13 +17,18 @@ para Open Finance fase 2 (dados de crédito). Diferença crítica em relação a
 
 ## Diagrama de Sequência
 
+> **Especificação de produção, não o comportamento do backend.** A troca `code → token`,
+> o PKCE, a introspecção e a validação de escopo acontecem no IBM API Connect. O backend do
+> M1 só grava o consentimento no Cloudant e, no callback, valida o `state` (ver seção 4 e
+> "Modo Sandbox").
+
 ```
 Cliente (App/Canal)          API Connect (Gateway)          Auth Server (FAPI)         Agente 1 (LangChain)
         │                           │                               │                          │
         │── POST /consent ─────────▶│                               │                          │
         │   {cpf, institutions,     │── valida Bearer token ───────▶│                          │
         │    scopes, expiration}    │◀─ 200 token valid ────────────│                          │
-        │                           │── persist consent_registry ──▶│(MongoDB)                 │
+        │                           │── persist consent_registry ──▶│(Cloudant)                │
         │◀─ 201 {consent_id,        │                               │                          │
         │        redirect_url,      │                               │                          │
         │        status:AWAITING}──│                               │                          │
@@ -118,7 +123,7 @@ curl -s "$(echo "$R" | python -c 'import sys,json;print(json.load(sys.stdin)["re
 
 | Gatilho | Ação |
 |---|---|
-| `DELETE /consent/{consentId}` (titular ou BB) | (1) grava `REVOKED` no banco; (2) tenta `POST OAUTH_REVOKE_URL`; (3) atualiza `token_revocation` — `"ok"` / `"failed"` / `"skipped"` |
+| `DELETE /consent/{consentId}` (titular ou BB) | (1) grava `REVOKED` no banco; (2) tenta `POST OAUTH_REVOKE_URL`; (3) relê e atualiza `token_revocation` — `"ok"` / `"failed"` / `"skipped"`, reaplicando `REVOKED` se um callback concorrente o sobrescreveu |
 | `expiration_days` atingido | Consentimento recusado pelos consumidores via `expires_at` (expiração preguiçosa) |
 | Fraude detectada | Time de segurança do BB revoga via API interna do OAuth Provider |
 | Requisição LGPD Art. 18 (direito ao esquecimento) | `POST /internal/erase` (M4) + revogação |

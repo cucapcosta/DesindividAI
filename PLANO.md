@@ -119,7 +119,7 @@ Definir como o cliente autoriza o acesso aos seus dados financeiros via Open Fin
 - [`src/api/routers/consent.py`](src/api/routers/consent.py) — 4 rotas implementadas (POST, GET /callback, GET /{id}, DELETE)
 - [`src/api/models.py`](src/api/models.py) — `ConsentStatusResponse`; `Field(example=…)` → `json_schema_extra`; `cpf` pattern ASCII-only
 - [`src/main.py`](src/main.py) — handler de `RequestValidationError` para `/consent` e `/consent/*` (400 sem ecoar CPF)
-- [`tests/test_consent_api.py`](tests/test_consent_api.py) — 48 testes (create, callback, status, revoke, integração M2/M3, lgpd, openapi contract)
+- [`tests/test_consent_api.py`](tests/test_consent_api.py) — 56 casos de teste (create, callback, status, revoke, integração M2/M3, lgpd, openapi contract)
 - [`.env.example`](.env.example) — bloco M1 (`OPEN_FINANCE_AUTH_SANDBOX`, `PUBLIC_BASE_URL`, `OPEN_FINANCE_AUTHORIZE_URL`, `OPEN_FINANCE_CLIENT_ID`, `OPEN_FINANCE_REDIRECT_URI`, `OAUTH_REVOKE_URL`)
 - [`scripts/cloud_setup.py`](scripts/cloud_setup.py) — índices `by-state-hash` e `by-consent-id` em `consent_registry`
 
