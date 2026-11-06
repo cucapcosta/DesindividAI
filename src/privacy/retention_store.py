@@ -19,14 +19,47 @@ from __future__ import annotations
 
 import logging
 import os
+import time as _time
 from functools import lru_cache
-from typing import Iterator, Optional, Protocol
+from typing import Callable, Iterator, Optional, Protocol, TypeVar
 
 from src.core.config import decisions_db as _decisions_db
 
 logger = logging.getLogger(__name__)
 
 _PAGE_SIZE = 200
+
+_T = TypeVar("_T")
+
+
+def _with_429_retry(
+    fn: Callable[[], _T],
+    *,
+    attempts: int = 5,
+    base_delay: float = 1.0,
+    sleep: Callable[[float], None] = _time.sleep,
+) -> _T:
+    """
+    Executa fn(); se levantar ApiException 429, faz back-off exponencial e tenta de novo.
+    Após esgotar todas as tentativas, relança a última exceção.
+    Qualquer outro erro propaga imediatamente.
+    """
+    from ibm_cloud_sdk_core import ApiException
+
+    last_exc: Exception | None = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except ApiException as exc:
+            status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+            if status == 429:
+                last_exc = exc
+                delay = min(base_delay * (2 ** i), 8.0)
+                logger.warning("429 too_many_requests (tentativa %d/%d), aguardando %.1fs", i + 1, attempts, delay)
+                sleep(delay)
+            else:
+                raise
+    raise last_exc  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +232,7 @@ class CloudantRetentionStore:
             kwargs: dict = {"db": db, "selector": selector, "limit": _PAGE_SIZE}
             if bookmark:
                 kwargs["bookmark"] = bookmark
-            result = self._client.post_find(**kwargs).get_result()
+            result = _with_429_retry(lambda kw=kwargs: self._client.post_find(**kw).get_result())
             docs = result.get("docs", [])
             for doc in docs:
                 yield doc
@@ -218,14 +251,16 @@ class CloudantRetentionStore:
         if not rev:
             # Fetch _rev if not present
             try:
-                fetched = self._client.get_document(db=db, doc_id=doc_id).get_result()
+                fetched = _with_429_retry(
+                    lambda: self._client.get_document(db=db, doc_id=doc_id).get_result()
+                )
                 rev = fetched.get("_rev", "")
             except ApiException as exc:
                 if exc.code == 404:
                     return
                 raise
         try:
-            self._client.delete_document(db=db, doc_id=doc_id, rev=rev)
+            _with_429_retry(lambda: self._client.delete_document(db=db, doc_id=doc_id, rev=rev))
         except ApiException as exc:
             if exc.code == 404:
                 return
@@ -239,10 +274,12 @@ class CloudantRetentionStore:
     def update_consent(self, doc: dict) -> None:
         from ibmcloudant.cloudant_v1 import Document
 
-        self._client.put_document(
-            db=self._consents_db,
-            doc_id=doc["_id"],
-            document=Document.from_dict(doc),
+        _with_429_retry(
+            lambda: self._client.put_document(
+                db=self._consents_db,
+                doc_id=doc["_id"],
+                document=Document.from_dict(doc),
+            )
         )
 
     def delete_consent(self, doc: dict) -> None:
@@ -287,7 +324,7 @@ def ensure_databases(client) -> None:
 
     for db in (vault_db, audit_db, decisions_db):
         try:
-            client.put_database(db=db).get_result()
+            _with_429_retry(lambda d=db: client.put_database(db=d).get_result())
             logger.info("ensure_databases: banco criado: %s", db)
         except ApiException as exc:
             if exc.code == 412:
@@ -321,12 +358,14 @@ def ensure_indexes(client) -> None:
 
     for db, fields, name in indexes:
         try:
-            client.post_index(
-                db=db,
-                index={"fields": fields},
-                name=name,
-                type="json",
-            ).get_result()
+            _with_429_retry(
+                lambda d=db, f=fields, n=name: client.post_index(
+                    db=d,
+                    index={"fields": f},
+                    name=n,
+                    type="json",
+                ).get_result()
+            )
             logger.debug("ensure_indexes: índice criado/verificado: %s/%s", db, name)
         except ApiException as exc:
             if exc.code == 409:

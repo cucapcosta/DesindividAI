@@ -60,9 +60,10 @@ A classe `SecretsManagerKeyProvider` em [`src/privacy/key_provider.py`](../src/p
 | `pseudonymize_cpf()` / `pseudonymize_contract()` | Gerar `pseudonym_id` e `debt_id` | `pseudonym` (versão ativa) | `SecretsReader` (grupo do projeto) | Chamado no M1 (criação do consentimento) e M2 (`pseudonymize_contract` em `src/agents/agent1/analysis.py`) |
 | `IdentityVault.store()` | Cifrar CPF novo do titular | `pseudonym` + `vault_kek` (ativas) | `SecretsReader` | Chamado no seed e no provisionamento do titular |
 | `IdentityVault.reveal()` | Decifrar CPF para re-identificação | `vault_kek` (versão registrada no doc) | `SecretsReader` | Sempre auditado; `purpose` restrito a `SERASA_QUERY` ou `LEGAL_REQUEST` |
+| `IdentityVault.resolve_for_serasa()` | Re-identificar titular para o Serasa real | `vault_kek` (via `reveal()`) | `SecretsReader` | **Implementado (Parte B):** chamado pelo `HttpSerasaClient` real via `resolver` injetável; CPF apenas no corpo do POST |
 | `IdentityVault.shred()` | Destruir material criptográfico | **Nenhuma chave (shred só remove campos)** | Nenhuma chave necessária | Não precisa acessar a KEK |
 | Job de retenção (`retention.py`) | Executar regras de expiração | **Nenhuma chave (shred só remove campos)** na regra e; `vault_kek` indireta apenas se `reveal` for chamado | `SecretsReader` | Apenas na regra e (shred automático) |
-| `POST /internal/erase` | Apagamento LGPD Art. 18 | **Nenhuma chave (shred só remove campos)** | `SecretsReader` | Autenticado por `X-Internal-Token` |
+| `POST /internal/erase` | Apagamento LGPD Art. 18 | **Nenhuma chave (shred só remove campos)** | `SecretsReader` | Autenticado por `X-Internal-Token`; cobre `decision_traces` (Parte B) |
 | Testes unitários | Verificar comportamento | Chaves fixas de teste em `tests/conftest.py` | Nenhuma (sem rede) | Nunca usam a chave real do `.env` |
 
 ---
@@ -100,34 +101,39 @@ A rotação da KEK requer re-wrapping das DEKs existentes (opcional) ou manuten�
 
 ---
 
-## 5. Re-identificação para o Serasa — Plano / pendente
+## 5. Re-identificação para o Serasa — Implementado (Parte B)
 
 > **Estado atual:** `HttpSerasaClient.fetch_report(pseudonym_id)` em
-> [`src/agents/agent1/sources.py`](../src/agents/agent1/sources.py) envia apenas o
-> `pseudonym_id` ao sandbox Serasa. `IdentityVault.resolve_for_serasa()` existe e é
-> testado, mas **não é chamado pelo cliente** — a integração com o Serasa real está
-> pendente (Parte B).
+> [`src/agents/agent1/sources.py`](../src/agents/agent1/sources.py) recebe um `resolver`
+> injetável. No cliente **real**, o `resolver` padrão é `get_identity_vault().resolve_for_serasa`,
+> que resolve o CPF via cofre e o envia **somente no corpo** do `POST /reports`.
+> O sandbox continua usando apenas o `pseudonym_id` (sem re-identificação).
 
-O fluxo previsto para quando o cliente Serasa real for integrado:
+O fluxo implementado:
 
 ```
 get_serasa_data(ctx, pseudonym_id)
         │
         ▼
-HttpSerasaClient.fetch_report(pseudonym_id)          ← hoje: envia só pseudonym_id ao sandbox
+HttpSerasaClient.fetch_report(pseudonym_id)
         │
-        ▼  (integração pendente — Parte B)
+        ▼  resolver(pseudonym_id)  ← injetado; padrão: get_identity_vault().resolve_for_serasa
 IdentityVault.resolve_for_serasa(pseudonym_id)
    = reveal(purpose="SERASA_QUERY", actor="agent1")
         │
         ├─ Busca doc no identity_vault
         ├─ Desembrulha DEK com KEK
         ├─ Decifra CPF com DEK
-        ├─ Registra vault.reveal (OK=true/false) em audit_trail + COS
-        └─ Retorna CPF em memória → HttpSerasaClient → Serasa API real
+        ├─ Registra vault.reveal (ok=true/false) em audit_trail + COS
+        └─ Retorna CPF em memória
+                │
+                ▼
+        POST /reports  ← CPF no corpo JSON apenas; nunca em URL, header ou log
 ```
 
-Quando integrado, o CPF **nunca sairá do escopo de `reveal()`** em direção a outras camadas. O Agente 1 nunca verá o CPF.
+O CPF **nunca sai do escopo de `reveal()`** em direção a outras camadas. O Agente 1 nunca vê o CPF. Erros (titular sem cofre, cofre destruído pós-shred) levantam erro claro sem vazar dados pessoais.
+
+> **Sandbox inalterado:** o `SandboxSerasaClient` continua usando apenas o `pseudonym_id`; o `resolver` não é chamado nesse caminho.
 
 ---
 

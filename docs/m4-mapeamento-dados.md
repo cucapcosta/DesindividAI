@@ -1,6 +1,6 @@
 # M4 — Mapeamento de Dados Pessoais e Financeiros
 
-Este documento cataloga todos os campos pessoais e financeiros tratados pelo sistema DesindividAI (M1 + M2 + M4), indicando origem, finalidade, onde cada dado é armazenado e qual tratamento de privacidade é aplicado. A fonte da verdade é o código; este documento reflete o estado **Implementado (Parte A)**.
+Este documento cataloga todos os campos pessoais e financeiros tratados pelo sistema DesindividAI (M1 + M2 + M3 + M4), indicando origem, finalidade, onde cada dado é armazenado e qual tratamento de privacidade é aplicado. A fonte da verdade é o código; este documento reflete o estado **Implementado (Parte A e Parte B)**.
 
 ---
 
@@ -60,7 +60,7 @@ O snapshot **nunca contém CPF, nome, número de contrato ou score exato**. Camp
 | `pseudonym_id` | Associar o snapshot ao titular | Pseudônimo |
 | `consent_id` | Rastrear qual consentimento originou o snapshot | Referência opaca |
 | `generated_at` | Data/hora da geração | Sem dado pessoal |
-| `expires_at` | `expires_at do consentimento + 90 dias` | Base para o job de retenção |
+| `expires_at` | `expires_at do consentimento + 90 dias` (calculado pelo Agente 1 ao persistir o snapshot) | Base para o job de retenção |
 | `total_outstanding` | Saldo total devedor (R$) | Dado financeiro agregado; sem identificador |
 | `total_monthly_payment` | Parcela mensal total (R$) | Dado financeiro agregado |
 | `weighted_avg_cet` | CET médio ponderado (%) | Dado financeiro calculado |
@@ -83,7 +83,57 @@ O snapshot **nunca contém CPF, nome, número de contrato ou score exato**. Camp
 
 ---
 
-## 5. Trilha de auditoria (`audit_trail`)
+## 5. Simulações e recomendações (`decision_traces`)
+
+O banco `decision_traces` (configurado em `CLOUDANT_DB_DECISIONS`; padrão: `"decision_traces"`) armazena dois tipos de documento produzidos pelo Agente 2 (M3). Ambos os tipos passam pela guarda de PII (`assert_no_pii`) antes de ser persistidos e estão sujeitos à **regra a2** de retenção. O banco existe na cloud e é criado por `ensure_databases()`.
+
+### 5.1 Documento tipo `simulation` (`_id = simulation:<uuid>`)
+
+| Campo | Finalidade | Tratamento |
+|---|---|---|
+| `_id` | Identificador único da simulação | Prefixo `simulation:` + UUID-v4; sem dado pessoal |
+| `type` | Discriminador do tipo de documento | Literal `"simulation"` |
+| `pseudonym_id` | Associar a simulação ao titular | Pseudônimo; nunca CPF |
+| `consent_id` | Rastrear qual consentimento originou a simulação | Referência opaca |
+| `snapshot_id` | Snapshot financeiro que serviu de base | Referência opaca |
+| `monthly_budget` | Orçamento mensal informado pelo titular (R$) | Dado financeiro; sem identificador; `gt=0, le=1_000_000` |
+| `expires_at` | TTL herdado do snapshot (ou, para snapshots legados sem `expires_at`, `now + DECISION_RETENTION_DAYS`) | Base para a regra a2 de retenção |
+| `scenarios` | Lista de cenários simulados (juros, prazo, economia) | Dados financeiros calculados; sem identificador |
+
+### 5.2 Documento tipo `trace` (`_id = trace-<uuid>`)
+
+Campos registrados por `record_trace` em [`src/services/governance.py`](../src/services/governance.py):
+
+| Campo | Finalidade | Tratamento |
+|---|---|---|
+| `_id` (= `trace_id`) | Identificador único do trace (`_id = trace_id = "trace-<uuid>"`) | Prefixo `trace-` + UUID-v4; sem dado pessoal |
+| `type` | Discriminador do tipo de documento | Literal `"trace"` |
+| `trace_id` | Mesmo valor de `_id`; chave de correlação | Prefixo `trace-` + UUID-v4 |
+| `model_id` | Modelo LLM utilizado | Ex.: `"ibm/granite-4-h-small"` |
+| `selection_rule` | Regra de seleção do cenário recomendado | Metadado de decisão; sem dado pessoal |
+| `recorded_at` | Data/hora do registro | ISO-8601Z; sem dado pessoal |
+| `recommendation_id` | Identificador da recomendação (se presente no payload) | Referência opaca |
+| `simulation_id` | Simulação que originou este trace | Referência opaca |
+| `snapshot_id` | Snapshot financeiro que serviu de base | Referência opaca |
+| `pseudonym_id` | Associar o trace ao titular | Pseudônimo; nunca CPF |
+| `language_level` | Nível de linguagem solicitado | `simple` ou `technical` |
+| `recommended_scenario` | Identificador do cenário recomendado | Metadado; sem dado pessoal |
+| `consent_id` | Rastrear qual consentimento originou o trace | Referência opaca |
+| `prompt` | Texto completo do prompt enviado ao LLM | Texto do LLM, sem CPF (guarda de PII); apagado por retenção a2 e `/internal/erase` |
+| `output` | Texto completo da saída gerada pelo LLM | Texto do LLM, sem CPF (guarda de PII); apagado por retenção a2 e `/internal/erase` |
+| `expires_at` | TTL herdado do snapshot (ou `now + DECISION_RETENTION_DAYS` para snapshots legados) | Base para a regra a2 de retenção |
+| `prompt_sha256` | SHA-256 hex do prompt enviado ao LLM | Hash de integridade; campo adicional para correlacionar com o evento de auditoria |
+| `output_sha256` | SHA-256 hex da saída do LLM | Hash de integridade; campo adicional para correlacionar com o evento de auditoria |
+| `explanation_source` | Origem da explicação entregue ao cliente: `llm` (1ª tentativa ok), `llm_retry` (2ª tentativa usada após issues na 1ª), `fallback` (texto determinístico, nenhuma tentativa LLM passou na guarda) | Metadado de rastreabilidade; sem dado pessoal |
+| `guard_issues` | Lista de códigos de problema detectados pela guarda determinística na 1ª tentativa (ex.: `["UNGROUNDED_AMOUNT", "SAVINGS_CLAIM_BELOW_MINIMUMS"]`); vazia quando não há issues | Metadado de auditoria; contém apenas códigos, nunca texto do usuário ou da LLM |
+
+> **Prompt e output do LLM:** os textos completos do prompt e da saída são **mantidos** no trace — necessário para auditoria e explicabilidade. Os campos `prompt_sha256`/`output_sha256` são **adicionais**: permitem verificação de integridade e correlacionam o evento de auditoria (que carrega apenas os hashes, nunca o texto) com o trace, sem pôr texto na trilha. A guarda de PII (`assert_no_pii`) rejeita com HTTP 500 (`PII_BLOCKED`) qualquer documento que contenha CPF ou chave de dado pessoal antes de qualquer gravação; o prompt já contém apenas fatos financeiros pseudonimizados.
+
+> **Índices Mango em `decision_traces`:** `by-pseudonym` (`[pseudonym_id]`) e `by-type-expires` (`[type, expires_at]`), criados por `ensure_indexes()`.
+
+---
+
+## 6. Trilha de auditoria (`audit_trail`)
 
 | Campo | Finalidade | Tratamento |
 |---|---|---|
@@ -98,28 +148,30 @@ O snapshot **nunca contém CPF, nome, número de contrato ou score exato**. Camp
 
 ---
 
-## 6. Tipos de evento de auditoria (lista fechada)
+## 7. Tipos de evento de auditoria (lista fechada)
 
 Definidos em [`src/privacy/audit.py`](../src/privacy/audit.py) na constante `_ALLOWED_EVENT_TYPES`:
 
-| Evento | Quando ocorre |
-|---|---|
-| `consent.expired` | Consentimento `AUTHORISED` com `expires_at` < agora (job de retenção) |
-| `consent.erasure_requested` | Início de `POST /internal/erase/{pseudonym_id}` |
-| `erasure.completed` | Conclusão bem-sucedida do apagamento |
-| `vault.reveal` | Toda chamada a `IdentityVault.reveal()`, com sucesso ou falha |
-| `retention.run` | Conclusão do job de retenção (inclusive `dry_run`) |
-| `agent1.snapshot_persisted` | Snapshot gravado com sucesso em `persist_snapshot()` |
-| `audit.pii_blocked` | PII detectado em evento de auditoria — o evento original é substituído |
+| Evento | Quando ocorre | Parte |
+|---|---|---|
+| `consent.expired` | Consentimento `AUTHORISED` com `expires_at` < agora (job de retenção) | A |
+| `consent.erasure_requested` | Início de `POST /internal/erase/{pseudonym_id}` | A |
+| `erasure.completed` | Conclusão bem-sucedida do apagamento | A |
+| `vault.reveal` | Toda chamada a `IdentityVault.reveal()`, com sucesso ou falha | A |
+| `retention.run` | Conclusão do job de retenção (inclusive `dry_run`) | A |
+| `agent1.snapshot_persisted` | Snapshot gravado com sucesso em `persist_snapshot()` | A |
+| `audit.pii_blocked` | PII detectado em evento de auditoria — o evento original é substituído | A |
+| `agent2.simulation_created` | Simulação gravada com sucesso pelo Agente 2 | B |
+| `agent2.recommendation_generated` | Recomendação gerada e trace gravado pelo Agente 2 | B |
 
 ---
 
-## 7. Dados trafegados para terceiros
+## 8. Dados trafegados para terceiros
 
 | Terceiro | Dado enviado | Base legal | Controle |
 |---|---|---|---|
 | Open Finance (instituições autorizadas) | Apenas o consentimento — as instituições enviam dados para o sistema | Art. 7º, I LGPD; BCB Res. Conj. 3/2020 | Tokens OAuth; escopos limitados |
-| Serasa | CPF do titular via `resolve_for_serasa()` — **previsto quando o Serasa real for integrado; hoje o sandbox recebe apenas o `pseudonym_id`** | Art. 7º, I LGPD; Art. 7º LGPD base legítimo interesse (análise de crédito) | Re-identificação controlada pelo cofre; auditada como `vault.reveal` |
+| Serasa | CPF do titular via `resolve_for_serasa()` — **Implementado (Parte B): `HttpSerasaClient` real recebe o CPF resolvido pelo cofre no corpo do POST; sandbox continua usando apenas `pseudonym_id`** | Art. 7º, I LGPD; Art. 7º LGPD base legítimo interesse (análise de crédito) | Re-identificação controlada pelo cofre; auditada como `vault.reveal` |
 | IBM Cloud (Cloudant, COS, watsonx.ai) | Dados pseudonimizados; CPF apenas cifrado no cofre | Contrato de processamento de dados (DPA) com IBM | IAM; dados em repouso cifrados; cofre com envelope encryption |
 
 ---
@@ -133,7 +185,9 @@ Definidos em [`src/privacy/audit.py`](../src/privacy/audit.py) na constante `_AL
 | Cofre de identidade | [`src/privacy/identity_vault.py`](../src/privacy/identity_vault.py) |
 | Guarda de PII | [`src/privacy/pii_guard.py`](../src/privacy/pii_guard.py) |
 | Auditoria | [`src/privacy/audit.py`](../src/privacy/audit.py) |
+| Ponte auditoria async→sync | [`src/privacy/audit_bridge.py`](../src/privacy/audit_bridge.py) |
 | Retenção | [`src/privacy/retention.py`](../src/privacy/retention.py) |
 | Apagamento | [`src/privacy/erasure.py`](../src/privacy/erasure.py) |
 | Tools do Agente 1 | [`src/agents/agent1/tools.py`](../src/agents/agent1/tools.py) |
+| Serasa (re-identificação) | [`src/agents/agent1/sources.py`](../src/agents/agent1/sources.py) |
 | Schema do consentimento | [`docs/m1-consent-lifecycle.md`](m1-consent-lifecycle.md) |

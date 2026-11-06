@@ -1351,3 +1351,154 @@ def test_ensure_indexes_empty_decisions_env_uses_default(monkeypatch):
     assert "" not in called_dbs, (
         f"Nome de banco vazio encontrado em {called_dbs}."
     )
+
+
+# ---------------------------------------------------------------------------
+# _with_429_retry — testes unitários do helper de back-off
+# ---------------------------------------------------------------------------
+
+def _make_api_exc(code: int) -> "ApiException":
+    from ibm_cloud_sdk_core import ApiException
+    # ApiException(code) sets status_code=code; .code is a read-only property alias
+    return ApiException(code=code, message=f"HTTP {code}")
+
+
+def test_retry_429_twice_then_success():
+    """429 duas vezes e depois sucesso → resultado correto, 3 chamadas totais."""
+    from src.privacy.retention_store import _with_429_retry
+
+    calls = []
+    slept: list[float] = []
+
+    def fn():
+        calls.append(1)
+        if len(calls) < 3:
+            raise _make_api_exc(429)
+        return "ok"
+
+    result = _with_429_retry(fn, base_delay=1.0, sleep=slept.append)
+
+    assert result == "ok"
+    assert len(calls) == 3
+    assert len(slept) == 2  # dormiu após a 1ª e a 2ª falha
+    assert slept[0] == 1.0   # base_delay * 2^0
+    assert slept[1] == 2.0   # base_delay * 2^1
+
+
+def test_retry_429_always_raises_after_attempts():
+    """429 em todas as tentativas → relança após 5 tentativas."""
+    from ibm_cloud_sdk_core import ApiException
+    from src.privacy.retention_store import _with_429_retry
+
+    calls = []
+
+    def fn():
+        calls.append(1)
+        raise _make_api_exc(429)
+
+    with pytest.raises(ApiException) as exc_info:
+        _with_429_retry(fn, attempts=5, base_delay=0.1, sleep=lambda _: None)
+
+    assert len(calls) == 5
+    assert exc_info.value.code == 429
+
+
+def test_retry_500_propagates_immediately():
+    """500 não é retentado; propaga na primeira tentativa."""
+    from ibm_cloud_sdk_core import ApiException
+    from src.privacy.retention_store import _with_429_retry
+
+    calls = []
+
+    def fn():
+        calls.append(1)
+        raise _make_api_exc(500)
+
+    with pytest.raises(ApiException) as exc_info:
+        _with_429_retry(fn, attempts=5, base_delay=0.1, sleep=lambda _: None)
+
+    assert len(calls) == 1
+    assert exc_info.value.code == 500
+
+
+def test_retry_delay_capped_at_8s():
+    """Delay é limitado a 8s (base_delay * 2^i, máx 8)."""
+    from src.privacy.retention_store import _with_429_retry
+
+    slept: list[float] = []
+    calls = []
+
+    def fn():
+        calls.append(1)
+        if len(calls) < 5:
+            raise _make_api_exc(429)
+        return "done"
+
+    result = _with_429_retry(fn, attempts=5, base_delay=4.0, sleep=slept.append)
+
+    assert result == "done"
+    # delays: 4*1=4, 4*2=8, 4*4=16→cap=8, 4*8=32→cap=8
+    assert slept == [4.0, 8.0, 8.0, 8.0]
+
+
+def test_ensure_indexes_429_intermittent_succeeds(monkeypatch):
+    """ensure_indexes com 429 intermitente nos primeiros índices conclui sem erro."""
+    from unittest.mock import MagicMock
+    from src.privacy.retention_store import ensure_indexes
+
+    monkeypatch.setenv("CLOUDANT_DB_DECISIONS", "decision_traces")
+    # Evita sleep real causado pelo back-off do _with_429_retry.
+    # O default sleep=_time.sleep é capturado em tempo de definição da função,
+    # portanto a única forma de substituí-lo sem tocar em retention_store.py é
+    # envolver _with_429_retry forçando sleep=noop.
+    import src.privacy.retention_store as _rs_mod
+    _orig_retry = _rs_mod._with_429_retry
+
+    def _fast_retry(fn, **kwargs):
+        kwargs.setdefault("sleep", lambda _: None)
+        return _orig_retry(fn, **kwargs)
+
+    monkeypatch.setattr(_rs_mod, "_with_429_retry", _fast_retry)
+
+    call_count = [0]
+
+    def post_index_side_effect(**kwargs):
+        call_count[0] += 1
+        # Primeiras 3 chamadas levantam 429 uma vez cada
+        if call_count[0] <= 3:
+            call_count[0] += 1  # avança para não repetir o 429 nessa chamada
+            raise _make_api_exc(429)
+        result = MagicMock()
+        result.get_result.return_value = {}
+        return result
+
+    # Usa MagicMock real mas com side_effect controlado
+    client = MagicMock()
+    # Sequência: 429 → ok → 429 → ok → ok → ok → ok (7 índices; primeiras 3 chamadas
+    # disparam 429 uma vez, depois ok)
+    responses = []
+    for i in range(7):
+        if i < 3:
+            ok_result = MagicMock()
+            ok_result.get_result.return_value = {}
+            responses.extend([_make_api_exc(429), ok_result])
+        else:
+            ok_result = MagicMock()
+            ok_result.get_result.return_value = {}
+            responses.append(ok_result)
+
+    side_effects = iter(responses)
+
+    def post_index_side(**kwargs):
+        val = next(side_effects)
+        if isinstance(val, Exception):
+            raise val
+        return val
+
+    client.post_index.side_effect = post_index_side
+
+    # Não deve lançar exceção
+    ensure_indexes(client)
+
+    # Deve ter chamado post_index pelo menos 7 vezes (7 índices, com retries extras)
+    assert client.post_index.call_count >= 7

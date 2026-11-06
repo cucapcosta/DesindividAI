@@ -34,7 +34,7 @@ import pytest  # noqa: E402  (o ambiente acima precisa existir antes dos imports
 from fastapi.testclient import TestClient  # noqa: E402
 from langchain_core.language_models.fake_chat_models import FakeListChatModel  # noqa: E402
 
-from src.agents.recommendation_agent import build_llm  # noqa: E402
+from src.agents.recommendation_agent import get_llm  # noqa: E402
 from src.main import app  # noqa: E402
 from src.storage.store import MemoryStore, get_store  # noqa: E402
 
@@ -67,6 +67,6 @@ def client(store):
         "total_outstanding": 25000.0, "generated_at": "2026-01-01T00:00:00Z",
     }))
     app.dependency_overrides[get_store] = lambda: store
-    app.dependency_overrides[build_llm] = lambda: FakeListChatModel(responses=["Explicação de teste."])
+    app.dependency_overrides[get_llm] = lambda: FakeListChatModel(responses=["Explicação de teste."])
     yield TestClient(app)
     app.dependency_overrides.clear()

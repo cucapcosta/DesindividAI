@@ -206,7 +206,7 @@ Projetar o Agente 2 responsável por simular cenários de quitação e gerar a r
 
 ### Sub-Tarefa 4 — Dados, Pseudonimização, HSM e Governança LGPD
 **Responsável:** M4
-**Status:** Parte A concluída (Parte B — integração com M3 — pendente)
+**Status:** Parte A e Parte B concluídas
 
 #### Intent
 Projetar a camada de dados garantindo que informações pessoais financeiras sejam pseudonimizadas antes de qualquer persistência, com chave de re-identificação segregada em HSM, e que toda operação seja auditável para conformidade com a LGPD.
@@ -232,24 +232,31 @@ Projetar a camada de dados garantindo que informações pessoais financeiras sej
 - [x] Registrar cada operação sobre dados do titular na trilha de auditoria (`src/privacy/audit.py`); `WatsonxGovernanceSink` como esqueleto (plano / produção)
 - [x] Documentar ROPA (mapeamento de tratamento de dados pessoais) conforme LGPD
 - [x] Definir alertas de acesso anômalo — especificados em `docs/m4-auditoria-governanca.md` (plano / produção)
-- [ ] Ligar `resolve_for_serasa` ao cliente Serasa real (Parte B)
+- [x] Ligar `resolve_for_serasa` ao cliente Serasa real (Parte B — `HttpSerasaClient` real usa `resolver` injetável; CPF apenas no corpo do POST)
+- [x] Retenção e erase cobrem `decision_traces` (regra a2, campo `decisions_deleted`) — Parte B
+- [x] Guarda de PII e auditoria no Agente 2 (`agent2.simulation_created`, `agent2.recommendation_generated`, hashes `prompt_sha256`/`output_sha256`) — Parte B
+- [x] `src/privacy/audit_bridge.py` (ponte async→sync, tolerante) — Parte B
+- [x] Retry com backoff exponencial para 429 do Cloudant Lite (`_with_429_retry`) — Parte B
+- [x] `vault.reveal` ligado em produção (corrigido `_default_audit` tolerante) — Parte B
 
 #### Entregáveis
 - [`src/privacy/key_provider.py`](src/privacy/key_provider.py) — `KeyProvider`, `EnvKeyProvider`, `SecretsManagerKeyProvider` (esqueleto)
 - [`src/privacy/pseudonymization.py`](src/privacy/pseudonymization.py) — HMAC-SHA256 + `current_key_version()` + `pseudonymize_cpf_with_version()`
 - [`src/privacy/identity_vault.py`](src/privacy/identity_vault.py) — cofre AES-256-GCM com DEK por titular; `store`, `reveal` (auditado), `shred`, `resolve_for_serasa`
-- [`src/privacy/pii_guard.py`](src/privacy/pii_guard.py) — `assert_no_pii()` recursivo
+- [`src/privacy/pii_guard.py`](src/privacy/pii_guard.py) — `assert_no_pii()` recursivo; detecta CPF em 4 formatos (0 falsos positivos em 5.000 textos financeiros)
 - [`src/privacy/audit.py`](src/privacy/audit.py) — `record_event()`, `AuditRepository`, cópia COS, `GovernanceSink`
-- [`src/privacy/retention.py`](src/privacy/retention.py) — `run_retention()`, `ensure_indexes()`, `ensure_databases()`; CLI `python -m src.privacy.retention [--dry-run] [--ensure]`
-- [`src/privacy/retention_store.py`](src/privacy/retention_store.py) — repositórios de retenção
-- [`src/privacy/erasure.py`](src/privacy/erasure.py) — lógica de apagamento LGPD Art. 18
+- [`src/privacy/audit_bridge.py`](src/privacy/audit_bridge.py) — ponte async→sync para o M3 (Parte B)
+- [`src/privacy/retention.py`](src/privacy/retention.py) — `run_retention()`, `ensure_indexes()`, `ensure_databases()`; CLI `python -m src.privacy.retention [--dry-run] [--ensure]`; regra a2 para `decision_traces` (Parte B)
+- [`src/privacy/retention_store.py`](src/privacy/retention_store.py) — repositórios de retenção; retry 429 (`_with_429_retry`); `iter_decisions`, `delete_decision` (Parte B)
+- [`src/privacy/erasure.py`](src/privacy/erasure.py) — lógica de apagamento LGPD Art. 18; `decisions_deleted` (Parte B)
 - [`src/api/routers/internal.py`](src/api/routers/internal.py) — `POST /internal/erase/{pseudonym_id}`, `POST /internal/retention/run`
 - [`tests/m4/`](tests/m4/) — testes unitários e de integração da camada de privacidade
-- [`docs/m4-mapeamento-dados.md`](docs/m4-mapeamento-dados.md) — mapeamento de todos os campos pessoais/financeiros
+- [`docs/m4-mapeamento-dados.md`](docs/m4-mapeamento-dados.md) — mapeamento de todos os campos pessoais/financeiros (inclui `decision_traces`)
 - [`docs/m4-ropa.md`](docs/m4-ropa.md) — ROPA LGPD
 - [`docs/m4-retencao-e-delecao.md`](docs/m4-retencao-e-delecao.md) — política de retenção e deleção
 - [`docs/m4-chaves-e-iam.md`](docs/m4-chaves-e-iam.md) — gestão de chaves e IAM
 - [`docs/m4-auditoria-governanca.md`](docs/m4-auditoria-governanca.md) — auditoria e governança
+- `TEST_FINAL.md` — relatório de testes final (gerado pelo orquestrador)
 
 #### Relevant Context
 - IBM Cloud Secrets Manager: `docs_ibm_cloud_secrets_manager`

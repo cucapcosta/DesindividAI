@@ -70,9 +70,9 @@ def test_recommendation_trace_has_prompt_and_output(client, store):
 
 def test_recommendation_without_llm_config_503(client, monkeypatch):
     monkeypatch.delenv("WATSONX_URL", raising=False)
-    from src.agents.recommendation_agent import build_llm
+    from src.agents.recommendation_agent import get_llm
     from src.main import app
-    app.dependency_overrides.pop(build_llm)
+    app.dependency_overrides.pop(get_llm)
     resp = client.post("/recommendation", json={"simulation_id": str(uuid4())})
     assert resp.status_code == 503
 
@@ -80,20 +80,20 @@ def test_recommendation_without_llm_config_503(client, monkeypatch):
 def test_build_llm_prefers_space_id(monkeypatch):
     import langchain_ibm
 
-    from src.agents.recommendation_agent import _cached_llm, build_llm
+    from src.agents.recommendation_agent import build_llm, clear_llm_cache
 
     captured = {}
     monkeypatch.setattr(langchain_ibm, "ChatWatsonx", lambda **kw: captured.update(kw) or object())
     for name, value in {"WATSONX_URL": "u", "IBM_CLOUD_API_KEY": "k",
                         "WATSONX_PROJECT_ID": "proj", "WATSONX_SPACE_ID": "space"}.items():
         monkeypatch.setenv(name, value)
-    _cached_llm.cache_clear()
+    clear_llm_cache()
     build_llm()
     assert captured["space_id"] == "space" and "project_id" not in captured
 
     monkeypatch.delenv("WATSONX_SPACE_ID")
     captured.clear()
-    _cached_llm.cache_clear()
+    clear_llm_cache()
     build_llm()
     assert captured["project_id"] == "proj" and "space_id" not in captured
 
@@ -278,3 +278,131 @@ def test_memory_store_delete_nonexistent():
     s = MemoryStore()
     result = asyncio.run(s.delete("db", "nope"))
     assert result is False
+
+
+# ---------------------------------------------------------------------------
+# B4 — Guarda determinística de números (explanation_guard)
+# ---------------------------------------------------------------------------
+# Nota: budget=3000 garante budget_below=False (min_total≈1200 com os debts do fixture).
+# A resposta "ruim" inventa R$ 99.999,99 → UNGROUNDED_AMOUNT.
+# A resposta "boa" não tem nenhum valor R$ → sem issues.
+
+_BAD_EXPLANATION = (
+    "O cenário agressivo é o recomendado. Os juros totais são R$ 99.999,99 "
+    "e você quita em 48 meses."
+)
+_GOOD_EXPLANATION = "O cenário agressivo é o recomendado. Quita em 48 meses."
+
+
+def _simulate_high_budget(client):
+    """Simula com orçamento alto para garantir budget_below=False."""
+    return client.post("/simulation", json={"snapshot_id": SNAPSHOT_ID, "monthly_budget": 3000})
+
+
+def test_guard_retry_on_bad_first_response(store):
+    """(a) 1ª resposta com valor inventado, 2ª correta → 200, explanation=2ª, source='llm_retry'."""
+    import asyncio
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+    from src.agents.recommendation_agent import get_llm
+    from src.main import app
+
+    asyncio.run(store.put("financial_snapshots", SNAPSHOT_ID, {
+        "pseudonym_id": "abc123", "snapshot_id": SNAPSHOT_ID,
+        "debts": __import__("tests.conftest", fromlist=["DEBTS"]).DEBTS,
+        "total_outstanding": 25000.0, "generated_at": "2026-01-01T00:00:00Z",
+    }))
+
+    from fastapi.testclient import TestClient
+    from src.storage.store import get_store
+    app.dependency_overrides[get_store] = lambda: store
+    app.dependency_overrides[get_llm] = lambda: FakeListChatModel(
+        responses=[_BAD_EXPLANATION, _GOOD_EXPLANATION]
+    )
+    try:
+        client = TestClient(app)
+        sim = _simulate_high_budget(client).json()
+        resp = client.post("/recommendation", json={"simulation_id": sim["simulation_id"]})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["explanation"] == _GOOD_EXPLANATION
+
+        trace = asyncio.run(store.get(decisions_db(), body["trace_id"]))
+        assert trace["explanation_source"] == "llm_retry"
+        assert "UNGROUNDED_AMOUNT" in trace["guard_issues"]
+        # output_sha256 deve bater com a explicação entregue
+        import hashlib
+        expected_sha = hashlib.sha256(_GOOD_EXPLANATION.encode()).hexdigest()
+        assert trace["output_sha256"] == expected_sha
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_guard_fallback_on_two_bad_responses(store):
+    """(b) Duas respostas ruins → 200, explanation=fallback, source='fallback'."""
+    import asyncio
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+    from src.agents.recommendation_agent import get_llm
+    from src.main import app
+
+    asyncio.run(store.put("financial_snapshots", SNAPSHOT_ID, {
+        "pseudonym_id": "abc123", "snapshot_id": SNAPSHOT_ID,
+        "debts": __import__("tests.conftest", fromlist=["DEBTS"]).DEBTS,
+        "total_outstanding": 25000.0, "generated_at": "2026-01-01T00:00:00Z",
+    }))
+
+    from fastapi.testclient import TestClient
+    from src.storage.store import get_store
+    app.dependency_overrides[get_store] = lambda: store
+    app.dependency_overrides[get_llm] = lambda: FakeListChatModel(
+        responses=[_BAD_EXPLANATION, _BAD_EXPLANATION]
+    )
+    try:
+        client = TestClient(app)
+        sim = _simulate_high_budget(client).json()
+        resp = client.post("/recommendation", json={"simulation_id": sim["simulation_id"]})
+        assert resp.status_code == 200
+        body = resp.json()
+        # fallback não deve conter o valor inventado
+        assert "99.999" not in body["explanation"]
+
+        trace = asyncio.run(store.get(decisions_db(), body["trace_id"]))
+        assert trace["explanation_source"] == "fallback"
+        assert "UNGROUNDED_AMOUNT" in trace["guard_issues"]
+        # output_sha256 deve bater com a explicação fallback entregue
+        import hashlib
+        expected_sha = hashlib.sha256(body["explanation"].encode()).hexdigest()
+        assert trace["output_sha256"] == expected_sha
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_guard_source_llm_on_good_response(store):
+    """(c) Resposta boa → source='llm'."""
+    import asyncio
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+    from src.agents.recommendation_agent import get_llm
+    from src.main import app
+
+    asyncio.run(store.put("financial_snapshots", SNAPSHOT_ID, {
+        "pseudonym_id": "abc123", "snapshot_id": SNAPSHOT_ID,
+        "debts": __import__("tests.conftest", fromlist=["DEBTS"]).DEBTS,
+        "total_outstanding": 25000.0, "generated_at": "2026-01-01T00:00:00Z",
+    }))
+
+    from fastapi.testclient import TestClient
+    from src.storage.store import get_store
+    app.dependency_overrides[get_store] = lambda: store
+    app.dependency_overrides[get_llm] = lambda: FakeListChatModel(
+        responses=[_GOOD_EXPLANATION]
+    )
+    try:
+        client = TestClient(app)
+        sim = _simulate_high_budget(client).json()
+        resp = client.post("/recommendation", json={"simulation_id": sim["simulation_id"]})
+        assert resp.status_code == 200
+
+        trace = asyncio.run(store.get(decisions_db(), resp.json()["trace_id"]))
+        assert trace["explanation_source"] == "llm"
+        assert trace["guard_issues"] == []
+    finally:
+        app.dependency_overrides.clear()

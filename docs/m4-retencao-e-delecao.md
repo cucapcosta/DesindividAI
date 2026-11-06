@@ -1,6 +1,6 @@
 # M4 — Política de Retenção e Deleção
 
-Este documento descreve as regras de retenção de dados, o funcionamento do job de expurgo, o fluxo de apagamento a pedido do titular (LGPD Art. 18) e a técnica de crypto-shredding adotada. A fonte da verdade é o código; este documento reflete o estado **Implementado (Parte A)**.
+Este documento descreve as regras de retenção de dados, o funcionamento do job de expurgo, o fluxo de apagamento a pedido do titular (LGPD Art. 18) e a técnica de crypto-shredding adotada. A fonte da verdade é o código; este documento reflete o estado **Implementado (Parte A e Parte B)**.
 
 ---
 
@@ -29,6 +29,7 @@ POST /internal/retention/run?dry_run=false
 | # | Objeto | Condição | Ação |
 |---|---|---|---|
 | a | Snapshot (`financial_snapshots`) | `expires_at < agora` (ou `min(expires_at, revoked_at + 90 dias)` se o consentimento vinculado estiver `REVOKED`) | Apagar o documento |
+| a2 | Decisão (`decision_traces`, `type = simulation` ou `trace`) | Limite = `expires_at`; se o `consent_id` associado estiver `REVOKED` com `revoked_at`, limite = `min(expires_at, revoked_at + 90 dias)`; limite < agora → apagar. Documento sem `expires_at` válido → `skipped_invalid` | Apagar o documento (ou contar como `skipped_invalid`) |
 | b | Consentimento `AWAITING_AUTHORISATION` | `awaiting_expires_at < agora` | Apagar o documento |
 | c | Consentimento `AUTHORISED` | `expires_at < agora` | Marcar como `REVOKED`, `revocation_reason=EXPIRED`, `revoked_at=agora`; emitir evento `consent.expired` |
 | d | Consentimento `REVOKED` | `revoked_at + 90 dias < agora` | Apagar o documento |
@@ -37,11 +38,15 @@ POST /internal/retention/run?dry_run=false
 
 > **Carência de 24 h (regra e):** o cofre só é destruído automaticamente após 24 horas da criação, para evitar race conditions no provisionamento inicial do titular.
 
+> **Regra a2 — detalhamento:** o limite efetivo de um documento de decisão é `min(expires_at, revoked_at + RETENTION_AFTER_REVOCATION_DAYS)` quando o consentimento associado estiver `REVOKED` com `revoked_at` preenchido. Documentos sem `expires_at` válido (ex.: documentos legados sem data) são contados como `skipped_invalid` e ignorados pelo job, sem geração de erro.
+
 > **`RETENTION_AFTER_REVOCATION_DAYS`:** variável de ambiente; padrão = 90 dias (conforme `docs/m1-consent-lifecycle.md`).
 
 > **Idempotência:** segunda execução com o mesmo `now` → todas as contagens = 0. O job verifica as condições antes de agir.
 
 > **`dry_run`:** o modo de simulação percorre todos os documentos, calcula as contagens **identicamente** ao modo real, mas **não escreve nada**. Ao final, emite o evento `retention.run` com `dry_run=true`.
+
+> **`RetentionReport`:** inclui o campo `decisions_deleted: int` (contagem de documentos apagados pela regra a2) além dos campos das regras a–e.
 
 ---
 
@@ -91,6 +96,7 @@ sequenceDiagram
     participant API as POST /internal/erase
     participant Consent as consent_registry
     participant Snap as financial_snapshots
+    participant Dec as decision_traces
     participant Vault as identity_vault
     participant Audit as audit_trail + COS
 
@@ -108,11 +114,17 @@ sequenceDiagram
         API->>Snap: delete_snapshot(doc)
     end
 
+    API->>Dec: iter_decisions({pseudonym_id}) via índice by-pseudonym
+    loop Para cada decisão do titular
+        API->>Dec: delete_decision(doc)
+    end
+    Note right of Dec: decisions_deleted contabilizado
+
     API->>Vault: shred(pseudonym_id)
     Note right of Vault: Remove wrapped_dek, dek_nonce,\ncpf_ciphertext, nonce;\npreenche shredded_at
 
-    API->>Audit: record_event("erasure.completed",\nconsents_revoked, snapshots_deleted,\nvault_shredded, request_trace_id)
-    API-->>Equipe: 200 {consents_revoked, snapshots_deleted,\nvault_shredded, trace_id}
+    API->>Audit: record_event("erasure.completed",\nconsents_revoked, snapshots_deleted,\ndecisions_deleted, vault_shredded, request_trace_id)
+    API-->>Equipe: 200 {consents_revoked, snapshots_deleted,\ndecisions_deleted, vault_shredded, trace_id}
 ```
 
 ### 4.1 Idempotência
@@ -121,6 +133,7 @@ Segunda chamada ao mesmo `pseudonym_id`:
 
 - `consents_revoked = 0` (já estão `REVOKED`).
 - `snapshots_deleted = 0` (já foram apagados).
+- `decisions_deleted = 0` (já foram apagadas).
 - `vault_shredded = false` (DEK já não existe; `shred()` retorna `False`).
 
 O evento `erasure.completed` ainda é registrado com contagens zero, para rastreabilidade.
@@ -128,7 +141,6 @@ O evento `erasure.completed` ainda é registrado com contagens zero, para rastre
 ### 4.2 O que NÃO é feito neste endpoint
 
 - **Revogação do token OAuth**: responsabilidade do M1 (`DELETE /consent/{id}` → IBM API Connect). O endpoint `/internal/erase` revoga o *consentimento* no banco, mas não invalida tokens OAuth diretamente.
-- **Deleção de dados do M3** (decisões, simulações): será tratado na Parte B, após a integração com o M3.
 
 ---
 
@@ -146,10 +158,13 @@ O prazo está previsto no Art. 19, II da LGPD e referenciado em [`docs/m1-consen
 |---|---|
 | `consent_registry` | `by-status-awaiting-expires` (`[status, awaiting_expires_at]`), `by-expires-at` (`[expires_at]`), `by-pseudonym-status` (`[pseudonym_id, status]`) |
 | `financial_snapshots` | `by-pseudonym` (M2, campos: `[pseudonym_id, generated_at]`), `by-expiry` (M2, campo: `[expires_at]`) |
+| `decision_traces` | `by-pseudonym` (`[pseudonym_id]`) e `by-type-expires` (`[type, expires_at]`) — criados na Parte B |
 | `identity_vault` | Sem índice dedicado — busca por `{shredded_at: null}` (varredura) |
 | `audit_trail` | `by-pseudonym-recorded` (`[pseudonym_id, recorded_at]`), `by-event-recorded` (`[event_type, recorded_at]`) |
 
-Os índices são criados/verificados por `ensure_indexes()` em [`src/privacy/retention_store.py`](../src/privacy/retention_store.py), idempotente.
+Os índices são criados/verificados por `ensure_indexes()` em [`src/privacy/retention_store.py`](../src/privacy/retention_store.py), idempotente. O banco `decision_traces` é criado automaticamente por `ensure_databases()` se não existir.
+
+> **Retry em `ensure_indexes` e `ensure_databases`:** operações de criação de índice/banco que retornam HTTP 429 (Cloudant Lite rate limit) são re-tentadas com backoff exponencial (`_with_429_retry`, até 5 tentativas, máximo de 8 segundos entre tentativas). O mesmo retry protege operações de escrita e leitura do `CloudantRetentionStore`.
 
 ---
 

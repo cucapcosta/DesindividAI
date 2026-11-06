@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from uuid import UUID, uuid4
 
 from langchain_core.runnables import Runnable
 
+from src.agents.explanation_guard import explanation_issues, fallback_explanation
 from src.agents.recommendation_agent import build_chain
 from src.api.models import LanguageLevel, RecommendationResponse, ScenarioId, SimulationScenario
 from src.core.errors import ServiceError
@@ -14,6 +16,8 @@ from src.services.governance import record_trace
 from src.services.simulation_service import decisions_db, ensure_consent, load_snapshot, now_iso
 from src.simulation.engine import CONSOLIDATED_DEBT_ID, minimum_payments_total
 from src.storage.store import DocumentStore
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_text(valor, limite: int = 40) -> str:
@@ -69,18 +73,55 @@ async def create_recommendation(
         min_total = None
         budget_below = any(s.total_savings_vs_minimum < 0 for s in scenarios)
 
+    chain_inputs = {
+        "scenarios": scenarios,
+        "language_level": language_level,
+        "first_steps": _first_steps(scenarios, debts),
+        "orcamento_abaixo_dos_minimos": budget_below,
+        "soma_dos_minimos": min_total,
+    }
+
     try:
-        result = await build_chain(llm).ainvoke(
-            {
-                "scenarios": scenarios,
-                "language_level": language_level,
-                "first_steps": _first_steps(scenarios, debts),
-                "orcamento_abaixo_dos_minimos": budget_below,
-                "soma_dos_minimos": min_total,
-            }
-        )
+        result = await build_chain(llm).ainvoke(chain_inputs)
     except Exception as exc:  # falha do provedor LLM
         raise ServiceError(503, "SERVICE_UNAVAILABLE", "Modelo de linguagem indisponível.") from exc
+
+    issues_1st = explanation_issues(
+        result["explanation"],
+        result["facts_json"],
+        budget_below=budget_below,
+    )
+
+    explanation_prompt = result["prompt_text"]
+
+    if issues_1st:
+        logger.warning(
+            "explanation_guard issues on 1st attempt: %s simulation_id=%s",
+            issues_1st,
+            simulation_id,
+        )
+        # Retry once with the same inputs
+        try:
+            result2 = await build_chain(llm).ainvoke(chain_inputs)
+            issues_2nd = explanation_issues(
+                result2["explanation"],
+                result2["facts_json"],
+                budget_below=budget_below,
+            )
+            if not issues_2nd:
+                final_explanation = result2["explanation"]
+                source = "llm_retry"
+                explanation_prompt = result2["prompt_text"]
+            else:
+                final_explanation = fallback_explanation(result["facts_json"], language_level)
+                source = "fallback"
+        except Exception:
+            # provider failure on retry → use fallback (1st call succeeded)
+            final_explanation = fallback_explanation(result["facts_json"], language_level)
+            source = "fallback"
+    else:
+        final_explanation = result["explanation"]
+        source = "llm"
 
     recommendation_id = uuid4()
     trace_id = await record_trace(
@@ -91,15 +132,17 @@ async def create_recommendation(
         pseudonym_id=sim.get("pseudonym_id"),
         language_level=language_level.value,
         recommended_scenario=result["recommended"].value,
-        prompt=result["prompt_text"],
-        output=result["explanation"],
+        prompt=explanation_prompt,
+        output=final_explanation,
         expires_at=sim.get("expires_at"),
         consent_id=sim.get("consent_id"),
+        explanation_source=source,
+        guard_issues=issues_1st,
     )
     return RecommendationResponse(
         recommendation_id=recommendation_id,
         recommended_scenario=result["recommended"],
-        explanation=result["explanation"].strip(),
+        explanation=final_explanation.strip(),
         scenarios=scenarios,
         generated_at=now_iso(),
         trace_id=trace_id,

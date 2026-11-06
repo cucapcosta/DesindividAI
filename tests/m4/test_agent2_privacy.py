@@ -20,7 +20,7 @@ from unittest.mock import MagicMock
 import pytest
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
-from src.agents.recommendation_agent import build_llm
+from src.agents.recommendation_agent import get_llm
 from src.main import app
 from src.services.simulation_service import decisions_db
 from src.storage.store import get_store
@@ -166,7 +166,7 @@ def test_recommendation_cpf_in_llm_output_blocked(client, store, monkeypatch):
     fake = _make_fake_logger_fixture(monkeypatch)
 
     # LLM que responde com CPF válido
-    app.dependency_overrides[build_llm] = lambda: FakeListChatModel(
+    app.dependency_overrides[get_llm] = lambda: FakeListChatModel(
         responses=[f"Recomendamos quitar. seu CPF {_CPF_VALID} foi processado."]
     )
 

@@ -40,6 +40,7 @@ _ENV_KEYS = (
     "CLOUDANT_APIKEY",
     "CLOUDANT_DB_CONSENTS",
     "CLOUDANT_DB_SNAPSHOTS",
+    "CLOUDANT_DB_DECISIONS",
     "COS_ACCESS_KEY_ID",
     "COS_SECRET_ACCESS_KEY",
     "COS_BUCKET_NAME",
@@ -111,8 +112,10 @@ def real_env():
         pytest.skip("sem credenciais reais (CLOUDANT_URL ou CLOUDANT_APIKEY vazios no .env)")
 
     def _clear_caches():
-        """Limpa todos os lru_cache das factories do M4."""
+        """Limpa todos os lru_cache das factories do M4 e singletons do M3."""
+        import src.storage.store as _store_mod
         from src.agents.agent1.repository import get_repository
+        from src.agents.recommendation_agent import clear_llm_cache
         from src.privacy.audit import get_audit_logger, get_audit_repository
         from src.privacy.identity_vault import get_vault_repository
         from src.privacy.pseudonymization import _reset_key_cache
@@ -124,6 +127,10 @@ def real_env():
         get_audit_logger.cache_clear()
         get_retention_store.cache_clear()
         _reset_key_cache()
+        # Singleton do M3 (store.py)
+        _store_mod._store = None
+        # Cache do LLM do Agente 2 (por event loop)
+        clear_llm_cache()
 
         # Limpar dependency_overrides do app
         from src.main import app
@@ -201,8 +208,10 @@ def cleanup(real_env, cloudant_client):
 
     # --- teardown ---
     import os
+    from src.core.config import decisions_db as _decisions_db_fn
 
     audit_db = os.getenv("CLOUDANT_DB_AUDIT", "audit_trail")
+    decisions_db_name = _decisions_db_fn()
     cos_prefix = os.getenv("COS_AUDIT_PREFIX", "audit/")
 
     # Construir cliente COS uma vez (se disponível) para uso no teardown de auditoria e COS keys
@@ -248,8 +257,9 @@ def cleanup(real_env, cloudant_client):
         except Exception:
             logger.info("cleanup: _id=%s já inexistente ou erro ignorado", doc_id)
 
-    # Apagar eventos de auditoria para cada pseudonym registrado
+    # Apagar eventos de auditoria e decisões para cada pseudonym registrado
     for pid in c._pseudonyms:
+        # audit_trail
         bookmark = None
         while True:
             try:
@@ -289,6 +299,34 @@ def cleanup(real_env, cloudant_client):
             if not audit_docs or new_bookmark == bookmark:
                 break
             bookmark = new_bookmark
+
+        # decision_traces — varredura por pseudonym_id
+        dt_bookmark = None
+        while True:
+            try:
+                dt_kwargs: dict = dict(
+                    db=decisions_db_name,
+                    selector={"pseudonym_id": pid},
+                    limit=25,
+                )
+                if dt_bookmark:
+                    dt_kwargs["bookmark"] = dt_bookmark
+                dt_result = cloudant_client.post_find(**dt_kwargs).get_result()
+            except Exception:
+                break
+            dt_docs = dt_result.get("docs", [])
+            for ddoc in dt_docs:
+                ddoc_id = ddoc.get("_id", "")
+                try:
+                    rev = ddoc.get("_rev", "")
+                    cloudant_client.delete_document(db=decisions_db_name, doc_id=ddoc_id, rev=rev)
+                    logger.info("cleanup decisions: apagado %s/%s", decisions_db_name, ddoc_id)
+                except Exception:
+                    logger.info("cleanup decisions: _id=%s já inexistente ou erro ignorado", ddoc_id)
+            new_dt_bookmark = dt_result.get("bookmark")
+            if not dt_docs or new_dt_bookmark == dt_bookmark:
+                break
+            dt_bookmark = new_dt_bookmark
 
     # Apagar objetos COS rastreados explicitamente (add_cos)
     if c._cos_keys and cos_client is not None:
@@ -819,3 +857,287 @@ def test_retention_dry_run_real(real_env, test_cpf, real_vault, real_audit, clou
     assert doc_snap.get("_id") == snapshot_exp_id, (
         "snapshot expirado foi apagado em dry_run — não devia"
     )
+
+
+# ---------------------------------------------------------------------------
+# g. test_full_flow_m2_m3_m4
+# ---------------------------------------------------------------------------
+
+def test_full_flow_m2_m3_m4(real_env, real_vault, cloudant_client, cleanup):
+    """
+    Teste ponta a ponta M2 + M3 + M4 (Fase B4).
+    Pula se WATSONX_URL, WATSONX_PROJECT_ID ou IBM_CLOUD_API_KEY estiverem vazios.
+
+    Fluxo:
+      a. ensure_databases / ensure_indexes
+      b. Novo CPF aleatório → pseudonym via vault → consentimento AUTHORISED
+      c. GET /debts?consent_id=... (Granite real) → 200; guarda snapshot_id
+      d. POST /simulation {snapshot_id, monthly_budget: 6000} → 200 com 3 cenários
+      e. POST /recommendation {simulation_id, language_level: "simple"} (Granite real) → 200
+      f. audit_trail contém agent1.snapshot_persisted, agent2.simulation_created,
+         agent2.recommendation_generated (com decision_trace_id; sem prompt/output)
+      g. POST /internal/erase/{pseudonym} → 200, consents_revoked==1,
+         snapshots_deleted==1, decisions_deleted==2, vault_shredded True;
+         snapshot e decisões não existem mais; reveal falha com VaultError
+      h. segunda chamada ao erase → todos zero
+    """
+    import hashlib
+    import os
+    from ibmcloudant.cloudant_v1 import Document
+    from src.privacy.identity_vault import VaultError
+    from src.privacy.pii_guard import assert_no_pii
+    from src.privacy.retention_store import ensure_databases, ensure_indexes
+
+    # --- Pular se watsonx não configurado ---
+    if not (
+        os.getenv("WATSONX_URL", "")
+        and os.getenv("IBM_CLOUD_API_KEY", "")
+        and (os.getenv("WATSONX_PROJECT_ID", "") or os.getenv("WATSONX_SPACE_ID", ""))
+    ):
+        pytest.skip("credenciais watsonx ausentes — test_full_flow_m2_m3_m4 ignorado")
+
+    # --- a. ensure_databases / ensure_indexes ---
+    ensure_databases(cloudant_client)
+    ensure_indexes(cloudant_client)
+
+    # --- b. CPF + pseudonym + consentimento ---
+    cpf_b4 = _gen_random_cpf()
+    pseudonym_id = real_vault.store(cpf_b4)
+
+    vault_db = os.getenv("CLOUDANT_DB_IDENTITY_VAULT", "identity_vault")
+    consents_db_name = os.getenv("CLOUDANT_DB_CONSENTS", "consent_registry")
+    snapshots_db_name = os.getenv("CLOUDANT_DB_SNAPSHOTS", "financial_snapshots")
+    audit_db = os.getenv("CLOUDANT_DB_AUDIT", "audit_trail")
+    from src.core.config import decisions_db as _decisions_db_fn
+    decisions_db_name = _decisions_db_fn()
+    internal_token = os.getenv("INTERNAL_API_TOKEN", "test-internal-token-do-not-use-in-production")
+
+    cleanup.add_doc(vault_db, pseudonym_id)
+    cleanup.add_pseudonym(pseudonym_id)
+
+    now = datetime.now(timezone.utc)
+    consent_expires_at = (now + timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    consent_id = str(uuid.uuid4())
+    consent_doc = {
+        "_id": consent_id,
+        "consent_id": consent_id,
+        "pseudonym_id": pseudonym_id,
+        "institutions": ["bb", "itau", "nubank"],
+        "scopes": ["debts:read", "simulation:read", "recommendation:read"],
+        "status": "AUTHORISED",
+        "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "expires_at": consent_expires_at,
+        "test_fixture": True,
+    }
+    cloudant_client.put_document(
+        db=consents_db_name,
+        doc_id=consent_id,
+        document=Document.from_dict(consent_doc),
+    )
+    cleanup.add_doc(consents_db_name, consent_id)
+
+    # --- c. GET /debts → 200, snapshot_id ---
+    from src.main import app
+
+    with TestClient(app, raise_server_exceptions=False) as tc:
+        resp_debts = tc.get("/debts", params={"consent_id": consent_id})
+
+    assert resp_debts.status_code == 200, (
+        f"GET /debts retornou {resp_debts.status_code}: {resp_debts.text}"
+    )
+    debts_body = resp_debts.json()
+    snapshot_id = debts_body["snapshot_id"]
+
+    # Registrar snapshot para limpeza (o snapshot_id vem da resposta como string UUID)
+    cleanup.add_doc(snapshots_db_name, snapshot_id)
+
+    # Verificar snapshot no Cloudant (para obter o expires_at real do snapshot)
+    snap_doc = cloudant_client.get_document(
+        db=snapshots_db_name, doc_id=snapshot_id
+    ).get_result()
+    snap_expires_at = snap_doc.get("expires_at")
+    assert snap_expires_at, "snapshot sem expires_at"
+
+    # --- d. POST /simulation ---
+    with TestClient(app, raise_server_exceptions=False) as tc:
+        resp_sim = tc.post(
+            "/simulation",
+            json={"snapshot_id": snapshot_id, "monthly_budget": 6000.0},
+        )
+
+    assert resp_sim.status_code == 200, (
+        f"POST /simulation retornou {resp_sim.status_code}: {resp_sim.text}"
+    )
+    sim_body = resp_sim.json()
+    simulation_id = sim_body["simulation_id"]
+    assert len(sim_body["scenarios"]) == 3, "POST /simulation deve retornar 3 cenários"
+
+    # Documento simulation:<id> em decision_traces
+    sim_doc = cloudant_client.get_document(
+        db=decisions_db_name, doc_id=f"simulation:{simulation_id}"
+    ).get_result()
+    cleanup.add_doc(decisions_db_name, f"simulation:{simulation_id}")
+
+    assert sim_doc.get("expires_at") == snap_expires_at, (
+        f"simulation.expires_at={sim_doc.get('expires_at')!r} != "
+        f"snapshot.expires_at={snap_expires_at!r}"
+    )
+    assert sim_doc.get("consent_id") == consent_id, (
+        f"simulation.consent_id={sim_doc.get('consent_id')!r} != {consent_id!r}"
+    )
+    assert_no_pii(sim_doc)
+
+    # --- e. POST /recommendation ---
+    with TestClient(app, raise_server_exceptions=False) as tc:
+        resp_rec = tc.post(
+            "/recommendation",
+            json={"simulation_id": simulation_id, "language_level": "simple"},
+        )
+
+    assert resp_rec.status_code == 200, (
+        f"POST /recommendation retornou {resp_rec.status_code}: {resp_rec.text}"
+    )
+    rec_body = resp_rec.json()
+    trace_id = rec_body["trace_id"]
+
+    # Documento trace em decision_traces
+    trace_doc = cloudant_client.get_document(
+        db=decisions_db_name, doc_id=trace_id
+    ).get_result()
+    cleanup.add_doc(decisions_db_name, trace_id)
+
+    # prompt_sha256 e output_sha256 devem existir e estar corretos
+    assert "prompt_sha256" in trace_doc, "trace sem prompt_sha256"
+    assert "output_sha256" in trace_doc, "trace sem output_sha256"
+    prompt_text: str = trace_doc.get("prompt", "") or ""
+    output_text: str = trace_doc.get("output", "") or ""
+    if prompt_text:
+        expected_prompt_sha = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
+        assert trace_doc["prompt_sha256"] == expected_prompt_sha, (
+            "prompt_sha256 não bate com sha256(prompt)"
+        )
+    if output_text:
+        expected_output_sha = hashlib.sha256(output_text.encode("utf-8")).hexdigest()
+        assert trace_doc["output_sha256"] == expected_output_sha, (
+            "output_sha256 não bate com sha256(output)"
+        )
+
+    assert trace_doc.get("expires_at") == snap_expires_at, (
+        f"trace.expires_at={trace_doc.get('expires_at')!r} != "
+        f"snapshot.expires_at={snap_expires_at!r}"
+    )
+    assert trace_doc.get("consent_id") == consent_id, (
+        f"trace.consent_id={trace_doc.get('consent_id')!r} != {consent_id!r}"
+    )
+    assert_no_pii(trace_doc)
+
+    # --- f. audit_trail ---
+    # agent1.snapshot_persisted
+    audit_snap = cloudant_client.post_find(
+        db=audit_db,
+        selector={"pseudonym_id": pseudonym_id, "event_type": "agent1.snapshot_persisted"},
+        limit=5,
+    ).get_result().get("docs", [])
+    assert audit_snap, "evento agent1.snapshot_persisted não encontrado no audit_trail"
+
+    # agent2.simulation_created
+    audit_sim = cloudant_client.post_find(
+        db=audit_db,
+        selector={"pseudonym_id": pseudonym_id, "event_type": "agent2.simulation_created"},
+        limit=5,
+    ).get_result().get("docs", [])
+    assert audit_sim, "evento agent2.simulation_created não encontrado no audit_trail"
+
+    # agent2.recommendation_generated — deve ter decision_trace_id == trace_id e NÃO ter prompt/output
+    audit_rec = cloudant_client.post_find(
+        db=audit_db,
+        selector={"pseudonym_id": pseudonym_id, "event_type": "agent2.recommendation_generated"},
+        limit=5,
+    ).get_result().get("docs", [])
+    assert audit_rec, "evento agent2.recommendation_generated não encontrado no audit_trail"
+    rec_event = audit_rec[0]
+    assert rec_event.get("decision_trace_id") == trace_id, (
+        f"decision_trace_id={rec_event.get('decision_trace_id')!r} != {trace_id!r}"
+    )
+    assert "prompt" not in rec_event, "campo 'prompt' não deve aparecer no evento de auditoria"
+    assert "output" not in rec_event, "campo 'output' não deve aparecer no evento de auditoria"
+
+    # --- g. POST /internal/erase ---
+    from ibm_cloud_sdk_core import ApiException
+    from src.privacy.retention_store import get_retention_store
+    from src.privacy.audit import get_audit_logger
+
+    get_retention_store.cache_clear()
+    get_audit_logger.cache_clear()
+
+    with TestClient(app) as tc:
+        resp_erase = tc.post(
+            f"/internal/erase/{pseudonym_id}",
+            headers={"X-Internal-Token": internal_token},
+        )
+
+    assert resp_erase.status_code == 200, (
+        f"erase retornou {resp_erase.status_code}: {resp_erase.text}"
+    )
+    erase_body = resp_erase.json()
+    assert erase_body["consents_revoked"] == 1, (
+        f"consents_revoked={erase_body['consents_revoked']} != 1"
+    )
+    assert erase_body["snapshots_deleted"] == 1, (
+        f"snapshots_deleted={erase_body['snapshots_deleted']} != 1"
+    )
+    assert erase_body.get("decisions_deleted") == 2, (
+        f"decisions_deleted={erase_body.get('decisions_deleted')} != 2 "
+        f"(esperado: simulation + trace)"
+    )
+    assert erase_body["vault_shredded"] is True
+    assert "trace_id" in erase_body
+
+    erase_trace_id = erase_body["trace_id"]
+    cleanup.add_doc(audit_db, erase_trace_id)
+
+    # Snapshot não deve mais existir
+    try:
+        cloudant_client.get_document(db=snapshots_db_name, doc_id=snapshot_id).get_result()
+        assert False, "snapshot ainda existe após erase"
+    except ApiException as exc:
+        assert exc.status_code == 404
+
+    # simulation:<id> não deve mais existir
+    try:
+        cloudant_client.get_document(
+            db=decisions_db_name, doc_id=f"simulation:{simulation_id}"
+        ).get_result()
+        assert False, "documento de simulação ainda existe após erase"
+    except ApiException as exc:
+        assert exc.status_code == 404
+
+    # trace não deve mais existir
+    try:
+        cloudant_client.get_document(db=decisions_db_name, doc_id=trace_id).get_result()
+        assert False, "documento de trace ainda existe após erase"
+    except ApiException as exc:
+        assert exc.status_code == 404
+
+    # reveal deve falhar (vault shredded)
+    with pytest.raises(VaultError):
+        real_vault.reveal(pseudonym_id, purpose="LEGAL_REQUEST", actor="integration_test")
+
+    # --- h. Segunda chamada ao erase → todos zero ---
+    get_retention_store.cache_clear()
+    get_audit_logger.cache_clear()
+
+    with TestClient(app) as tc2:
+        resp_erase2 = tc2.post(
+            f"/internal/erase/{pseudonym_id}",
+            headers={"X-Internal-Token": internal_token},
+        )
+
+    assert resp_erase2.status_code == 200
+    erase_body2 = resp_erase2.json()
+    assert erase_body2["consents_revoked"] == 0
+    assert erase_body2["snapshots_deleted"] == 0
+    assert erase_body2.get("decisions_deleted") == 0
+    assert erase_body2["vault_shredded"] is False
+
+    cleanup.add_doc(audit_db, erase_body2["trace_id"])

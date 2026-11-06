@@ -570,3 +570,159 @@ def test_get_vault_repository_not_key_provider_error(monkeypatch):
         )
     finally:
         get_vault_repository.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# 13. get_identity_vault() — integração com get_audit_logger (monkeypatched)
+# ---------------------------------------------------------------------------
+
+class _FakeAuditLogger:
+    """Audit logger fake para testar get_identity_vault() sem rede."""
+
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    def record_event(self, event_type: str, *, pseudonym_id, actor, **fields) -> str:
+        import uuid as _uuid
+        self.events.append({
+            "event_type": event_type,
+            "pseudonym_id": pseudonym_id,
+            "actor": actor,
+            **fields,
+        })
+        return str(_uuid.uuid4())
+
+
+def _make_vault_via_factory(monkeypatch, fake_logger, cpf_to_store=None):
+    """
+    Cria um IdentityVault via get_identity_vault() com:
+      - get_vault_repository monkeypatchado para InMemoryVaultRepository
+      - get_audit_logger monkeypatchado para retornar fake_logger
+    Retorna (vault, pseudonym_id_or_None).
+    """
+    from src.privacy.identity_vault import (
+        InMemoryVaultRepository,
+        get_identity_vault,
+        get_vault_repository,
+    )
+    from src.privacy import audit as audit_mod
+
+    mem_repo = InMemoryVaultRepository()
+    monkeypatch.setattr(
+        "src.privacy.identity_vault.get_vault_repository",
+        lambda: mem_repo,
+    )
+    monkeypatch.setattr(audit_mod, "get_audit_logger", lambda: fake_logger)
+    # Also clear lru_cache on get_audit_logger if it was cached
+    try:
+        audit_mod.get_audit_logger.cache_clear()
+    except AttributeError:
+        pass
+
+    vault = get_identity_vault()
+    pid = vault.store(cpf_to_store) if cpf_to_store else None
+    return vault, pid
+
+
+def test_get_identity_vault_reveal_serasa_query_generates_audit_event(monkeypatch):
+    """
+    get_identity_vault() com get_audit_logger monkeypatchado:
+    reveal(SERASA_QUERY) gera evento vault.reveal com purpose e ok=True.
+    """
+    fake = _FakeAuditLogger()
+    vault, pid = _make_vault_via_factory(monkeypatch, fake, cpf_to_store=_CPF)
+
+    vault.reveal(pid, purpose="SERASA_QUERY", actor="agent1")
+
+    assert len(fake.events) == 1
+    ev = fake.events[0]
+    assert ev["event_type"] == "vault.reveal"
+    assert ev["pseudonym_id"] == pid
+    assert ev["actor"] == "agent1"
+    assert ev["purpose"] == "SERASA_QUERY"
+    assert ev["ok"] is True
+
+
+def test_get_identity_vault_reveal_nonexistent_generates_audit_event_ok_false(monkeypatch):
+    """
+    get_identity_vault() com get_audit_logger monkeypatchado:
+    reveal de titular inexistente gera vault.reveal ok=False.
+    """
+    from src.privacy.identity_vault import VaultError
+
+    fake = _FakeAuditLogger()
+    vault, _ = _make_vault_via_factory(monkeypatch, fake)
+
+    with pytest.raises(VaultError):
+        vault.reveal("nonexistent_id", purpose="SERASA_QUERY", actor="agent1")
+
+    assert len(fake.events) == 1
+    ev = fake.events[0]
+    assert ev["event_type"] == "vault.reveal"
+    assert ev["ok"] is False
+
+
+def test_get_identity_vault_configuration_error_uses_noop(monkeypatch):
+    """
+    Quando get_audit_logger levanta ConfigurationError,
+    get_identity_vault() ainda funciona (usa no-op silencioso).
+    """
+    from src.agents.agent1.config import ConfigurationError
+    from src.privacy.identity_vault import (
+        InMemoryVaultRepository,
+        get_identity_vault,
+    )
+    from src.privacy import audit as audit_mod
+
+    mem_repo = InMemoryVaultRepository()
+    monkeypatch.setattr(
+        "src.privacy.identity_vault.get_vault_repository",
+        lambda: mem_repo,
+    )
+
+    def _raise():
+        raise ConfigurationError("sem credenciais")
+
+    monkeypatch.setattr(audit_mod, "get_audit_logger", _raise)
+    try:
+        audit_mod.get_audit_logger.cache_clear()
+    except AttributeError:
+        pass
+
+    # Deve funcionar sem levantar
+    vault = get_identity_vault()
+    pid = vault.store(_CPF)
+    recovered = vault.reveal(pid, purpose="SERASA_QUERY", actor="agent1")
+    assert recovered == _CPF_DIGITS
+
+
+def test_get_identity_vault_audit_callback_raises_reveal_still_returns(monkeypatch):
+    """
+    Se o callback de auditoria levantar, reveal ainda retorna o CPF corretamente.
+    """
+    from src.privacy.identity_vault import (
+        InMemoryVaultRepository,
+        get_identity_vault,
+    )
+    from src.privacy import audit as audit_mod
+
+    class _BrokenLogger:
+        def record_event(self, event_type, *, pseudonym_id, actor, **fields):
+            raise RuntimeError("audit store indisponível")
+
+    mem_repo = InMemoryVaultRepository()
+    monkeypatch.setattr(
+        "src.privacy.identity_vault.get_vault_repository",
+        lambda: mem_repo,
+    )
+    monkeypatch.setattr(audit_mod, "get_audit_logger", lambda: _BrokenLogger())
+    try:
+        audit_mod.get_audit_logger.cache_clear()
+    except AttributeError:
+        pass
+
+    vault = get_identity_vault()
+    pid = vault.store(_CPF)
+    # Audit vai levantar, mas reveal deve retornar normalmente
+    recovered = vault.reveal(pid, purpose="SERASA_QUERY", actor="agent1")
+    assert recovered == _CPF_DIGITS

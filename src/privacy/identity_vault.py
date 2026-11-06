@@ -273,6 +273,16 @@ class IdentityVault:
     # reveal
     # ------------------------------------------------------------------
 
+    def _fire_audit(self, event_type: str, **kwargs) -> None:
+        """Chama self._audit absorvendo qualquer exceção (audit nunca derruba o fluxo)."""
+        try:
+            self._audit(event_type, **kwargs)
+        except Exception as exc:
+            logger.warning(
+                "audit callback levantou exceção; evento descartado: %s",
+                type(exc).__name__,
+            )
+
     def reveal(self, pseudonym_id: str, *, purpose: str, actor: str) -> str:
         """
         Decifra e retorna o CPF.
@@ -283,7 +293,7 @@ class IdentityVault:
         Sempre registra o evento vault.reveal via self._audit (nunca com o CPF).
         """
         if purpose not in _ALLOWED_PURPOSES:
-            self._audit(
+            self._fire_audit(
                 "vault.reveal",
                 pseudonym_id=pseudonym_id,
                 actor=actor,
@@ -299,7 +309,7 @@ class IdentityVault:
         doc = self._repo.get(pseudonym_id)
 
         if doc is None or doc.get("shredded_at") is not None:
-            self._audit(
+            self._fire_audit(
                 "vault.reveal",
                 pseudonym_id=pseudonym_id,
                 actor=actor,
@@ -330,7 +340,7 @@ class IdentityVault:
                 aad,
             )
         except Exception as exc:
-            self._audit(
+            self._fire_audit(
                 "vault.reveal",
                 pseudonym_id=pseudonym_id,
                 actor=actor,
@@ -341,7 +351,7 @@ class IdentityVault:
                 f"Falha ao decifrar CPF do titular {pseudonym_id!r}: {exc}"
             ) from exc
 
-        self._audit(
+        self._fire_audit(
             "vault.reveal",
             pseudonym_id=pseudonym_id,
             actor=actor,
@@ -398,11 +408,35 @@ class IdentityVault:
 # Factory
 # ---------------------------------------------------------------------------
 
+def _default_audit() -> Callable[..., None]:
+    """
+    Tenta obter get_audit_logger().record_event para uso como callback de auditoria.
+
+    Se get_audit_logger() levantar qualquer exceção (ex: ConfigurationError quando
+    CLOUDANT_URL/APIKEY não estão configurados), retorna um no-op e registra um
+    warning com o tipo da exceção (sem dados de configuração ou PII).
+
+    Import local de src.privacy.audit para evitar import circular
+    (audit → pii_guard; identity_vault → key_provider, pseudonymization).
+    """
+    try:
+        from src.privacy.audit import get_audit_logger  # local — evita import circular
+
+        return get_audit_logger().record_event
+    except Exception as exc:
+        logger.warning(
+            "get_audit_logger() falhou; vault usará no-op para auditoria: %s",
+            type(exc).__name__,
+        )
+        return lambda event_type, **kw: None
+
+
 def get_identity_vault() -> IdentityVault:
     """
-    Retorna uma instância de IdentityVault com o repositório Cloudant real.
+    Retorna uma instância de IdentityVault com o repositório Cloudant real
+    e o AuditLogger padrão (get_audit_logger().record_event).
 
     Equivalente a get_repository() do M2, mas sem @lru_cache no nível da
     vault (o repositório já é cacheado por get_vault_repository()).
     """
-    return IdentityVault(repository=get_vault_repository())
+    return IdentityVault(repository=get_vault_repository(), audit=_default_audit())

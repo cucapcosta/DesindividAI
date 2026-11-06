@@ -8,8 +8,9 @@ pelo Motor de Simulação. O LLM só vê dados pseudonimizados.
 
 from __future__ import annotations
 
+import asyncio
 import json
-from functools import lru_cache
+import weakref
 from operator import itemgetter
 from typing import Any
 
@@ -93,8 +94,20 @@ def _facts(inputs: dict[str, Any]) -> str:
     )
 
 
-@lru_cache(maxsize=1)
-def _cached_llm() -> Runnable:
+# ---------------------------------------------------------------------------
+# Cache de LLM por event loop
+#
+# WeakKeyDictionary garante que, quando o loop for coletado pelo GC, a entrada
+# seja removida automaticamente, sem risco de vazar clientes HTTP de loops mortos.
+# ---------------------------------------------------------------------------
+
+_LLM_BY_LOOP: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, Runnable
+] = weakref.WeakKeyDictionary()
+
+
+def _build_llm_instance() -> Runnable:
+    """Constrói um novo cliente ChatWatsonx. Lança ServiceError em caso de falha."""
     try:
         require_env(*WATSONX_VARS)
         scope = watsonx_scope()
@@ -117,19 +130,49 @@ def _cached_llm() -> Runnable:
         ) from exc
 
 
+def clear_llm_cache() -> None:
+    """Limpa o cache de LLM de todos os event loops conhecidos."""
+    _LLM_BY_LOOP.clear()
+
+
 def build_llm() -> Runnable:
     """
     Granite via watsonx.ai. Falha com 503 se as credenciais não estiverem configuradas.
     Usa WATSONX_SPACE_ID (espaço de implementação) se definido; senão WATSONX_PROJECT_ID.
-    Usa cache (lru_cache) para evitar recriar o cliente a cada requisição.
-    Exceções não ficam em cache: _cached_llm é chamada diretamente.
+
+    Cache por event loop: dentro do mesmo loop (uvicorn, pytest async), reutiliza o
+    cliente HTTP; em loops distintos (dois asyncio.run() seguidos, TestClient sem
+    context manager) cria um cliente novo, evitando RuntimeError: Event loop is closed.
+
+    Exceções nunca ficam em cache: a próxima chamada sempre tentará reconstruir.
     """
     try:
-        return _cached_llm()
-    except ServiceError:
-        # Exceção não deve ser cacheada: limpar o cache para que a próxima chamada tente novamente.
-        _cached_llm.cache_clear()
-        raise
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # Nenhum loop rodando: constrói sem cache (caso de uso fora de contexto async).
+        return _build_llm_instance()
+
+    cached = _LLM_BY_LOOP.get(loop)
+    if cached is not None:
+        return cached
+
+    # Constrói; se falhar, a exceção propaga sem guardar nada no cache.
+    instance = _build_llm_instance()
+    _LLM_BY_LOOP[loop] = instance
+    return instance
+
+
+async def get_llm() -> Runnable:
+    """
+    Dependência FastAPI assíncrona que delega para build_llm.
+
+    Motivo: o FastAPI executa dependências síncronas num threadpool sem event
+    loop ativo, fazendo asyncio.get_running_loop() lançar RuntimeError e
+    impedindo o cache por loop de funcionar. Declarar a dependência como
+    corrotina faz o FastAPI chamá-la diretamente no event loop da requisição,
+    garantindo que build_llm encontre o loop e reutilize o cliente cacheado.
+    """
+    return build_llm()
 
 
 def build_chain(llm: Runnable) -> Runnable:
@@ -148,8 +191,11 @@ def build_chain(llm: Runnable) -> Runnable:
     return (
         RunnablePassthrough.assign(recommended=RunnableLambda(lambda x: select_recommended(x["scenarios"])))
         | RunnableLambda(with_steps)
+        | RunnablePassthrough.assign(facts_json=RunnableLambda(_facts))
         | RunnablePassthrough.assign(
-            prompt_value=RunnableLambda(lambda x: {"style": STYLES[x["language_level"]], "facts": _facts(x)})
+            prompt_value=RunnableLambda(
+                lambda x: {"style": STYLES[x["language_level"]], "facts": x["facts_json"]}
+            )
             | PROMPT
         )
         | RunnablePassthrough.assign(

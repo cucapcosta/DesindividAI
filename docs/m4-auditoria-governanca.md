@@ -1,6 +1,6 @@
 # M4 — Auditoria e Governança
 
-Este documento descreve a arquitetura de trilha de auditoria, os destinos de gravação, a estrutura dos eventos, o plano de governança com watsonx.governance (AI Factsheets) e os alertas de acesso anômalo planejados para o Activity Tracker. Distingue o que está **Implementado (Parte A)** do que é **Plano / produção**. A fonte da verdade é o código.
+Este documento descreve a arquitetura de trilha de auditoria, os destinos de gravação, a estrutura dos eventos, o plano de governança com watsonx.governance (AI Factsheets) e os alertas de acesso anômalo planejados para o Activity Tracker. Distingue o que está **Implementado (Parte A e Parte B)** do que é **Plano / produção**. A fonte da verdade é o código.
 
 ---
 
@@ -25,15 +25,17 @@ Falhas em qualquer destino (3, 4 ou 5) são registradas como `logger.error` estr
 
 Definidos em [`src/privacy/audit.py`](../src/privacy/audit.py), constante `_ALLOWED_EVENT_TYPES`. Qualquer `event_type` fora desta lista levanta `ValueError` imediatamente.
 
-| Evento | Quando ocorre | Actor típico |
-|---|---|---|
-| `consent.expired` | Consentimento `AUTHORISED` com `expires_at` expirado detectado pelo job de retenção | `"retention"` |
-| `consent.erasure_requested` | Início do endpoint `POST /internal/erase/{pseudonym_id}` | `"internal_api"` |
-| `erasure.completed` | Conclusão bem-sucedida do apagamento (contagens incluídas) | `"internal_api"` |
-| `vault.reveal` | Toda chamada a `IdentityVault.reveal()`, com sucesso (`ok=true`) ou falha (`ok=false`) | `"agent1"` (Serasa) ou outro |
-| `retention.run` | Conclusão do job de retenção (inclusive `dry_run=true`) | `"retention"` |
-| `agent1.snapshot_persisted` | Snapshot gravado com sucesso em `persist_snapshot()` | `"agent1"` |
-| `audit.pii_blocked` | PII detectado em campos de outro evento — o evento original é descartado e substituído por este | `"agent1"` / original |
+| Evento | Quando ocorre | Actor típico | Parte |
+|---|---|---|---|
+| `consent.expired` | Consentimento `AUTHORISED` com `expires_at` expirado detectado pelo job de retenção | `"retention"` | A |
+| `consent.erasure_requested` | Início do endpoint `POST /internal/erase/{pseudonym_id}` | `"internal_api"` | A |
+| `erasure.completed` | Conclusão bem-sucedida do apagamento (contagens incluídas, inclusive `decisions_deleted`) | `"internal_api"` | A+B |
+| `vault.reveal` | Toda chamada a `IdentityVault.reveal()`, com sucesso (`ok=true`) ou falha (`ok=false`) — **inclui chamadas do Serasa real (Parte B)** | `"agent1"` (Serasa) ou outro | A+B |
+| `retention.run` | Conclusão do job de retenção (inclusive `dry_run=true`) | `"retention"` | A |
+| `agent1.snapshot_persisted` | Snapshot gravado com sucesso em `persist_snapshot()` | `"agent1"` | A |
+| `audit.pii_blocked` | PII detectado em campos de outro evento — o evento original é descartado e substituído por este | `"agent1"` / original | A |
+| `agent2.simulation_created` | Simulação gravada com sucesso pelo Agente 2 | `"agent2"` | B |
+| `agent2.recommendation_generated` | Recomendação gerada e trace gravado pelo Agente 2 | `"agent2"` | B |
 
 ---
 
@@ -65,11 +67,13 @@ Definidos em [`src/privacy/audit.py`](../src/privacy/audit.py), constante `_ALLO
 |---|---|
 | `consent.expired` | `consent_id` |
 | `consent.erasure_requested` | _(apenas os campos base)_ |
-| `erasure.completed` | `consents_revoked`, `snapshots_deleted`, `vault_shredded` (bool), `request_trace_id` |
+| `erasure.completed` | `consents_revoked`, `snapshots_deleted`, `decisions_deleted`, `vault_shredded` (bool), `request_trace_id` |
 | `vault.reveal` | `purpose` (`SERASA_QUERY` ou `LEGAL_REQUEST`), `ok` (bool), `reason` (apenas em falha) |
-| `retention.run` | `snapshots_deleted`, `consents_awaiting_deleted`, `consents_expired`, `consents_revoked_deleted`, `vault_shredded`, `skipped_invalid`, `dry_run` |
+| `retention.run` | `snapshots_deleted`, `decisions_deleted`, `consents_awaiting_deleted`, `consents_expired`, `consents_revoked_deleted`, `vault_shredded`, `skipped_invalid`, `dry_run` |
 | `agent1.snapshot_persisted` | `snapshot_id`, `consent_id`, `model_id`, `tool_calls` (lista de nomes) |
 | `audit.pii_blocked` | `blocked_event_type`, `violation_path` |
+| `agent2.simulation_created` | `simulation_id`, `snapshot_id`, `consent_id` — nunca prompt ou output |
+| `agent2.recommendation_generated` | `decision_trace_id`, `simulation_id`, `recommended_scenario`, `model_id`, `prompt_sha256`, `output_sha256` — **nunca** o texto do prompt ou da saída |
 
 ---
 
@@ -103,7 +107,19 @@ Definidos em [`src/privacy/audit.py`](../src/privacy/audit.py), constante `_ALLO
 
 ---
 
-## 6. Plano — watsonx.governance e AI Factsheets (Parte B)
+## 6. Integração async→sync — `audit_bridge.py` (Implementado, Parte B)
+
+O M3 usa `async` em toda a sua camada de serviço. O SDK de auditoria do M4 (`record_event`) é síncrono. A ponte [`src/privacy/audit_bridge.py`](../src/privacy/audit_bridge.py) resolve essa incompatibilidade:
+
+- Chama `record_event` via `asyncio.to_thread`, sem bloquear o event loop do M3.
+- Obtém o logger de auditoria de forma **tolerante**: se o `AuditLogger` não estiver configurado (ex.: `ConfigurationError` ao construir o repositório Cloudant), registra `logger.warning` e **não propaga a falha**. A requisição principal nunca é derrubada por falha de auditoria.
+- Garantia: mesmo com o `audit_trail` indisponível, as respostas do Agente 2 (`/simulation`, `/recommendation`) continuam sendo entregues.
+
+> **`vault.reveal` em produção:** a correção detectada na Parte B: `get_identity_vault()` criava o cofre **sempre** sem callback de auditoria (não apenas quando o repositório padrão não estava configurado). A função agora liga `get_audit_logger().record_event` via `_default_audit` tolerante, garantindo que eventos `vault.reveal` chegam ao `audit_trail` no Cloudant real mesmo em falhas parciais de configuração.
+
+---
+
+## 7. Plano — watsonx.governance e AI Factsheets
 
 > Este bloco é **plano / produção**: a integração não está implementada. `WatsonxGovernanceSink` é um esqueleto em [`src/privacy/audit.py`](../src/privacy/audit.py) que levanta `NotImplementedError`.
 
@@ -116,16 +132,17 @@ Definidos em [`src/privacy/audit.py`](../src/privacy/audit.py), constante `_ALLO
 | `WATSONX_GOVERNANCE_URL` | URL da instância watsonx.governance |
 | `WATSONX_PROJECT_ID` | ID do projeto associado ao Agente 1 |
 
-**Fluxo previsto (Parte B):**
+**Fluxo previsto:**
 
 1. `WatsonxGovernanceSink.send(record)` recebe o registro de auditoria já sanitizado (sem PII).
 2. O `trace_id` é usado como **chave de correlação** entre o evento de auditoria e a entrada no AI Factsheets.
 3. O campo `tool_calls` do evento `agent1.snapshot_persisted` alimenta o rastreamento de quais ferramentas o modelo invocou.
-4. Autenticação via `IAMAuthenticator` com `IBM_CLOUD_API_KEY`.
+4. Os campos `prompt_sha256`/`output_sha256` do evento `agent2.recommendation_generated` permitem correlacionar o trace com a inferência no watsonx.ai, sem expor o texto.
+5. Autenticação via `IAMAuthenticator` com `IBM_CLOUD_API_KEY`.
 
 ---
 
-## 7. Plano — Alertas de acesso anômalo (Activity Tracker)
+## 8. Plano — Alertas de acesso anômalo (Activity Tracker)
 
 > Este bloco é **plano / produção**. O Activity Tracker da IBM Cloud pode ser configurado para detectar padrões suspeitos nos eventos do Cloudant e COS.
 
@@ -150,7 +167,7 @@ Definidos em [`src/privacy/audit.py`](../src/privacy/audit.py), constante `_ALLO
 
 ---
 
-## 8. Conformidade — o que o `audit_trail` nunca deve conter
+## 9. Conformidade — o que o `audit_trail` nunca deve conter
 
 A guarda de PII ([`src/privacy/pii_guard.py`](../src/privacy/pii_guard.py)) é aplicada antes de gravar qualquer evento. Se detectar PII:
 
@@ -167,6 +184,7 @@ Isso garante que nenhum CPF, número de contrato ou outro dado pessoal chegue ao
 | Módulo | Caminho |
 |---|---|
 | AuditLogger, eventos, destinos | [`src/privacy/audit.py`](../src/privacy/audit.py) |
+| Ponte async→sync | [`src/privacy/audit_bridge.py`](../src/privacy/audit_bridge.py) |
 | Guarda de PII | [`src/privacy/pii_guard.py`](../src/privacy/pii_guard.py) |
 | Integração no persist_snapshot | [`src/agents/agent1/tools.py`](../src/agents/agent1/tools.py) |
 | Integração no cofre (vault.reveal) | [`src/privacy/identity_vault.py`](../src/privacy/identity_vault.py) |

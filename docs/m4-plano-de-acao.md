@@ -390,13 +390,13 @@ Mesmas da Parte A:
 
 ### Definição de Pronto (Parte B)
 
-- [ ] Fase B1 concluída: retenção e erase cobrem `decision_traces`
-- [ ] Fase B2 concluída: guarda de PII e auditoria no Agente 2
-- [ ] Fase B3 concluída: reidentificação para o Serasa real
-- [ ] Fase B4 concluída: teste ponta a ponta na cloud real verde e sem resíduo
-- [ ] Fase B5 concluída: documentação atualizada
-- [ ] `pytest -q` verde (M2 + M3 + M4, sem regressão)
-- [ ] `pytest -q -m integration` verde e sem resíduo em `decision_traces` nem COS
-- [ ] Nenhum prompt ou saída do LLM com CPF persistido (verificado por teste)
-- [ ] Erase cobre `decision_traces` (campo `decisions_deleted` na resposta)
-- [ ] Nenhum commit feito pelo executor (`git log` inalterado; commits só pelo usuário)
+- [x] Fase B1 concluída: retenção e erase cobrem `decision_traces`
+- [x] Fase B2 concluída: guarda de PII e auditoria no Agente 2
+- [x] Fase B3 concluída: reidentificação para o Serasa real
+- [x] Fase B4 concluída: teste ponta a ponta na cloud real verde e sem resíduo
+- [x] Fase B5 concluída: documentação atualizada
+- [x] `pytest -q` verde (M2 + M3 + M4, sem regressão)
+- [x] `pytest -q -m integration` verde e sem resíduo em `decision_traces` nem COS
+- [x] Nenhum prompt ou saída do LLM com CPF persistido (verificado por teste)
+- [x] Erase cobre `decision_traces` (campo `decisions_deleted` na resposta)
+- [x] Nenhum commit feito pelo executor (`git log` inalterado; commits só pelo usuário)
