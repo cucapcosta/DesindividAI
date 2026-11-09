@@ -8,7 +8,11 @@ Inicie com:
 Documentação interativa (gerada automaticamente pelo FastAPI):
     http://localhost:8000/docs       ← Swagger UI
     http://localhost:8000/redoc      ← ReDoc
+    http://localhost:8000/demo/      ← interface de demonstração (fora de produção)
 """
+
+import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, status
@@ -19,6 +23,7 @@ from fastapi.exceptions import HTTPException as FastAPIHTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 load_dotenv()  # lê .env (na raiz do repo ou no cwd) antes de qualquer módulo consultar o ambiente
 
@@ -70,6 +75,11 @@ app.include_router(debts.router)         # M2 — GET /debts
 app.include_router(simulation.router)    # M3 — POST /simulation
 app.include_router(recommendation.router)  # M3 — POST /recommendation
 app.include_router(internal.router)      # M4 — POST /internal/erase, POST /internal/retention/run
+
+# Interface de demonstração (demo/index.html): só fora de produção.
+_DEMO_DIR = Path(__file__).resolve().parent.parent / "demo"
+if _DEMO_DIR.is_dir() and os.getenv("APP_ENV", "development").lower() != "production":
+    app.mount("/demo", StaticFiles(directory=_DEMO_DIR, html=True), name="demo")
 
 # ---------------------------------------------------------------------------
 # Handlers de exceção
