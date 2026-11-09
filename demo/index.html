@@ -1,0 +1,1124 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>DesendividAÍ</title>
+<meta name="description" content="Aplicativo de demonstração do DesendividAÍ: conecta suas contas via Open Finance, mostra qual dívida custa mais e monta um plano de quitação que cabe no mês.">
+<style>
+/* Fontes do sistema de propósito: a demo roda sem internet pública (sem CDN, sem webfont). taste-skill-ignore */
+:root {
+  --stage: #e4e7ec;
+  --ground: #f2f4f7;
+  --surface: #ffffff;
+  --raised: #e8ebf0;
+  --line: #dde1e7;
+  --ink: #111418;
+  --muted: #5a616c;
+  --action: #141619;
+  --action-hover: #33373d;
+  --signal: #1d5fbf;
+  --signal-soft: #e6eefa;
+  --negative: #b3261e;
+  --negative-hover: #8f1e18;
+  --negative-soft: #fdecea;
+  --positive: #2b6e2f;
+  --positive-soft: #e5f3e6;
+  --bezel: #1a1c20;
+  --portal: #0f3d33;
+  --portal-hover: #0b2e26;
+  --portal-soft: #e7f0ed;
+
+  --font-text: system-ui, -apple-system, "Segoe UI", "Noto Sans", "Liberation Sans", sans-serif;
+  --font-code: ui-monospace, "SF Mono", "Cascadia Mono", "DejaVu Sans Mono", monospace; /* taste-skill-ignore: só no painel técnico da apresentação */
+
+  --fs-hero: 26px;
+  --fs-title: 22px;
+  --fs-figure: 34px;
+  --fs-body: 15px;
+  --fs-small: 13px;
+
+  --radius: 12px;
+  --radius-control: 10px;
+  --control-h: 48px;
+  --pad: 20px;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--stage); color: var(--ink);
+  font: 400 var(--fs-body)/1.5 var(--font-text);
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3, p, ul, ol { margin: 0; }
+ul, ol { padding: 0; list-style: none; }
+.num { font-variant-numeric: tabular-nums; }
+:focus-visible { outline: 3px solid var(--signal); outline-offset: 2px; }
+[tabindex="-1"]:focus { outline: none; }
+
+/* ---------- palco e aparelho ---------- */
+.stage {
+  min-height: 100%; display: flex; align-items: center; justify-content: center; gap: 32px;
+  padding: 24px;
+}
+.phone {
+  width: 390px; height: min(820px, calc(100vh - 48px)); min-height: 600px;
+  background: var(--ground); border: 10px solid var(--bezel); border-radius: 46px;
+  overflow: hidden; position: relative; display: flex; flex-direction: column; flex: none;
+}
+.statusbar {
+  height: 34px; flex: none; display: flex; align-items: center; justify-content: space-between;
+  padding: 0 26px; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums;
+}
+.statusbar i { width: 22px; height: 11px; border: 1.5px solid var(--ink); border-radius: 3px; display: block; position: relative; }
+.statusbar i::after { content: ""; position: absolute; inset: 1.5px 5px 1.5px 1.5px; background: var(--ink); border-radius: 1px; }
+.presenter-link {
+  position: fixed; left: 16px; bottom: 12px; color: var(--muted);
+  background: none; border: 0; padding: 4px; cursor: pointer; text-decoration: underline; font: inherit; font-size: 12px;
+}
+.presenter-link:hover { color: var(--ink); }
+
+/* ---------- telas ---------- */
+.screens { position: relative; flex: 1; min-height: 0; }
+.screen {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  background: var(--ground);
+  animation: enter 200ms ease-out;
+}
+.screen.back { animation-name: enter-back; }
+@keyframes enter { from { opacity: 0; transform: translateX(14px); } to { opacity: 1; transform: none; } }
+@keyframes enter-back { from { opacity: 0; transform: translateX(-14px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .screen { animation: none; } }
+
+.appbar {
+  height: 52px; flex: none; display: flex; align-items: center; gap: 4px; padding: 0 8px;
+}
+.appbar h1 { font-size: 16px; font-weight: 600; flex: 1; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.icon {
+  width: 44px; height: 44px; border-radius: 50%; border: 0; background: transparent; color: var(--ink);
+  display: grid; place-items: center; cursor: pointer; flex: none; padding: 0;
+}
+.icon:hover { background: var(--raised); }
+.icon:active { background: var(--line); }
+.icon svg { width: 22px; height: 22px; }
+.icon.ghost { visibility: hidden; }
+
+.content { flex: 1; min-height: 0; overflow-y: auto; padding: 4px var(--pad) 24px; }
+.content > * + * { margin-top: 16px; }
+.foot { flex: none; padding: 12px var(--pad) 18px; background: var(--ground); display: flex; flex-direction: column; gap: 8px; }
+
+.title { font-size: var(--fs-title); line-height: 1.3; font-weight: 700; letter-spacing: -0.01em; text-wrap: balance; }
+.lede { color: var(--muted); }
+.small { font-size: var(--fs-small); color: var(--muted); }
+
+/* botões */
+.btn {
+  height: var(--control-h); width: 100%; border: 0; border-radius: var(--radius-control);
+  font: inherit; font-weight: 600; font-size: 16px; cursor: pointer;
+  background: var(--action); color: var(--surface);
+  transition: background-color 120ms ease;
+}
+.btn:hover:not(:disabled) { background: var(--action-hover); }
+.btn:active:not(:disabled) { transform: translateY(1px); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn[aria-busy="true"] { opacity: 0.75; cursor: progress; }
+.btn.secondary { background: var(--raised); color: var(--ink); }
+.btn.secondary:hover:not(:disabled) { background: var(--line); }
+.btn.danger { background: var(--negative); }
+.btn.danger:hover:not(:disabled) { background: var(--negative-hover); }
+
+/* blocos */
+.panel { background: var(--surface); border-radius: var(--radius); padding: 16px; }
+.notice { border-radius: var(--radius-control); padding: 12px 14px; font-size: 14px; }
+.notice.bad { background: var(--negative-soft); }
+.notice.good { background: var(--positive-soft); }
+.notice b { display: block; margin-bottom: 2px; }
+.notice .actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+.notice .actions .btn { height: 40px; font-size: 14px; width: auto; padding: 0 14px; }
+.devcode { display: none; font-family: var(--font-code); font-size: 12px; color: var(--muted); margin-top: 6px; overflow-wrap: anywhere; }
+body.present .devcode { display: block; }
+
+/* ---------- boas-vindas ---------- */
+.welcome .content { display: flex; flex-direction: column; padding-bottom: 8px; }
+.welcome-top { flex: 1; padding-top: 8px; }
+.wordmark { font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
+.wordmark span { color: var(--signal); }
+.hero { font-size: var(--fs-hero); line-height: 1.15; font-weight: 700; letter-spacing: -0.02em; text-wrap: balance; }
+.how { counter-reset: h; }
+.how li { counter-increment: h; display: grid; grid-template-columns: 28px 1fr; gap: 10px; padding: 8px 0; align-items: start; }
+.how li::before {
+  content: counter(h); width: 26px; height: 26px; border-radius: 50%;
+  background: var(--surface); display: grid; place-items: center; font-weight: 600; font-size: 13px;
+}
+
+/* ---------- formulário ---------- */
+.label { display: block; font-weight: 600; margin-bottom: 6px; }
+.tag { display: inline-block; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; background: var(--raised); color: var(--muted); vertical-align: 1px; margin-left: 6px; }
+.tag.signal { background: var(--signal); color: var(--surface); }
+.field {
+  width: 100%; height: var(--control-h); padding: 0 14px; font: inherit; font-size: 17px;
+  font-variant-numeric: tabular-nums; color: var(--ink); background: var(--surface);
+  border: 1px solid #b8bec8; border-radius: var(--radius-control); /* campo de formulário. taste-skill-ignore */
+}
+.field:hover { border-color: var(--muted); }
+.field[aria-invalid="true"] { border-color: var(--negative); }
+.field:focus-visible { outline-offset: 0; }
+
+.toggles { background: var(--surface); border-radius: var(--radius); }
+.toggles li + li { border-top: 2px solid var(--ground); }
+.toggle { display: flex; align-items: center; gap: 12px; padding: 10px 16px; cursor: pointer; min-height: 58px; }
+.toggle .mono {
+  width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; flex: none;
+  font-weight: 700; font-size: 13px; background: var(--raised); color: var(--ink);
+}
+.toggle .txt { flex: 1; }
+.toggle .txt small { display: block; color: var(--muted); font-size: var(--fs-small); }
+input.switch {
+  appearance: none; -webkit-appearance: none; margin: 0; flex: none; cursor: pointer;
+  width: 46px; height: 28px; border-radius: 999px; background: #a9b0ba; position: relative;
+  transition: background-color 150ms ease;
+}
+input.switch::after {
+  content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%;
+  background: var(--surface); transition: transform 150ms ease;
+}
+input.switch:checked { background: var(--action); }
+input.switch:checked::after { transform: translateX(18px); }
+@media (prefers-reduced-motion: reduce) { input.switch, input.switch::after, .btn { transition: none; } }
+
+.share li { position: relative; padding-left: 16px; }
+.share li + li { margin-top: 6px; }
+.share li::before { content: ""; position: absolute; left: 2px; top: 9px; width: 5px; height: 5px; border-radius: 50%; background: var(--muted); }
+.accept { display: flex; gap: 12px; align-items: flex-start; cursor: pointer; }
+.accept input { width: 20px; height: 20px; margin: 2px 0 0; accent-color: var(--action); flex: none; }
+
+/* ---------- portal simulado (outro ambiente, outra cor) ---------- */
+.portal { background: var(--portal-soft); }
+.portal .appbar { background: var(--portal); color: var(--surface); }
+.portal .foot { background: var(--portal-soft); }
+.portal .btn:not(.secondary) { background: var(--portal); }
+.portal .btn:not(.secondary):hover:not(:disabled) { background: var(--portal-hover); }
+.secure { display: flex; gap: 8px; align-items: center; font-size: var(--fs-small); color: var(--portal); font-weight: 600; }
+.secure svg { width: 16px; height: 16px; flex: none; }
+.center { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 16px; padding: 0 28px; }
+.spinner {
+  width: 36px; height: 36px; border-radius: 50%; border: 3px solid var(--raised); border-top-color: var(--signal);
+  animation: spin 0.9s linear infinite; flex: none;
+}
+.portal .spinner { border-color: #cfe0da; border-top-color: var(--portal); }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }
+dl { margin: 0; }
+.kvlist div { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; }
+.kvlist div + div { border-top: 2px solid var(--ground); }
+.kvlist dt { color: var(--muted); }
+.kvlist dd { margin: 0; font-weight: 600; text-align: right; }
+
+/* ---------- analisando ---------- */
+.steps-live { text-align: left; width: 100%; max-width: 280px; }
+.steps-live li { display: flex; gap: 10px; align-items: center; padding: 6px 0; color: var(--muted); }
+.steps-live li::before { content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--line); flex: none; }
+.steps-live li.now { color: var(--ink); font-weight: 600; }
+.steps-live li.now::before { background: var(--signal); }
+.steps-live li.done { color: var(--ink); }
+.steps-live li.done::before { background: var(--positive); }
+
+/* ---------- dívidas ---------- */
+.figure { font-size: var(--fs-figure); font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; font-variant-numeric: tabular-nums; }
+.debts li { background: var(--surface); border-radius: var(--radius); padding: 14px 16px; }
+.debts li + li { margin-top: 8px; }
+.row { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+.debts .prod { font-weight: 600; }
+.debts .bal { font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.meta { color: var(--muted); font-size: var(--fs-small); font-variant-numeric: tabular-nums; }
+.costline { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; margin-top: 10px; }
+.costbar { height: 6px; background: var(--raised); border-radius: 3px; overflow: hidden; }
+.costbar i { display: block; height: 100%; background: var(--signal); border-radius: 3px; }
+.costline span:last-child { font-size: var(--fs-small); font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 17ch; text-align: right; }
+.debts li.first .costline span:last-child { color: var(--signal); font-weight: 600; }
+
+/* ---------- orçamento ---------- */
+.money { position: relative; }
+.money span { position: absolute; left: 16px; top: 50%; transform: translateY(-50%); font-size: 22px; font-weight: 600; color: var(--muted); pointer-events: none; }
+.money .field { height: 68px; font-size: 32px; font-weight: 700; padding-left: 58px; }
+input[type="range"] { width: 100%; accent-color: var(--action); margin: 4px 0 0; height: 28px; cursor: pointer; }
+.scale { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; margin-top: 0 !important; }
+.minline { font-size: 14px; }
+.minline b { font-variant-numeric: tabular-nums; }
+.minline.warn { color: var(--negative); }
+
+/* ---------- plano ---------- */
+.pick { background: var(--surface); border-radius: var(--radius); padding: 18px 16px; outline: 2px solid var(--signal); outline-offset: -2px; }
+.pick .tag { margin-left: 0; }
+.pick h2 { font-size: 26px; letter-spacing: -0.015em; margin-top: 8px; }
+.pick .desc { color: var(--muted); font-size: 14px; margin-top: 4px; }
+.facts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 12px; margin-top: 16px; }
+.facts span { display: block; font-size: var(--fs-small); color: var(--muted); }
+.facts strong { font-size: 19px; font-variant-numeric: tabular-nums; }
+.facts small { display: block; font-size: var(--fs-small); color: var(--muted); }
+.facts .wide { grid-column: 1 / -1; }
+.gain { color: var(--positive); }
+.loss { color: var(--negative); }
+.why h2 { font-size: 16px; margin-bottom: 8px; }
+.explain { font-size: 15px; line-height: 1.6; }
+.explain > * + * { margin-top: 10px; }
+.explain > :first-child { margin-top: 0; }
+.explain ul { padding-left: 20px; list-style: disc; margin-bottom: 0; }
+.explain li + li { margin-top: 4px; }
+.explain strong { font-weight: 650; }
+.others li { background: var(--surface); border-radius: var(--radius); padding: 12px 16px; }
+.others li + li { margin-top: 8px; }
+.others .name { font-weight: 600; }
+.loading-line { display: flex; align-items: center; gap: 12px; color: var(--muted); padding: 24px 0; }
+.loading-line .spinner { width: 22px; height: 22px; border-width: 2px; }
+.h-sec { font-size: 15px; font-weight: 600; }
+
+/* ---------- autorizações ---------- */
+.status-pill { display: inline-block; font-size: 13px; font-weight: 600; padding: 2px 10px; border-radius: 999px; }
+.status-pill.on { background: var(--positive-soft); color: var(--positive); }
+.status-pill.off { background: var(--negative-soft); color: var(--negative); }
+
+/* ---------- menu (folha inferior) ---------- */
+.sheet-backdrop { position: absolute; inset: 0; background: rgba(17, 20, 24, 0.35); z-index: 5; }
+.sheet {
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 6; background: var(--surface);
+  border-radius: 18px 18px 0 0; padding: 10px 12px 18px;
+}
+.sheet::before { content: ""; display: block; width: 40px; height: 4px; border-radius: 2px; background: var(--line); margin: 0 auto 8px; }
+.sheet button {
+  width: 100%; text-align: left; background: transparent; border: 0; font: inherit; font-size: 16px;
+  padding: 14px 12px; border-radius: 10px; cursor: pointer; color: var(--ink);
+}
+.sheet button:hover { background: var(--ground); }
+.sheet button small { display: block; color: var(--muted); font-size: var(--fs-small); }
+
+/* ---------- painel técnico (modo apresentação) ---------- */
+.log {
+  width: 420px; height: min(820px, calc(100vh - 48px)); background: var(--surface); border-radius: var(--radius);
+  display: flex; flex-direction: column; overflow: hidden; flex: none;
+}
+.log header { padding: 14px 16px 10px; display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.log header h2 { font-size: 15px; }
+.log ol { flex: 1; overflow-y: auto; padding: 0 8px 12px; font-family: var(--font-code); font-size: 12.5px; }
+.log li { display: grid; grid-template-columns: 56px 1fr auto; gap: 8px; padding: 7px 8px; border-radius: 6px; align-items: baseline; }
+.log li:nth-child(odd) { background: var(--ground); }
+.log .m { font-weight: 700; }
+.log .p { overflow-wrap: anywhere; }
+.log .s { font-weight: 700; }
+.log .s.ok { color: var(--positive); }
+.log .s.wait { color: var(--signal); }
+.log .s.bad { color: var(--negative); }
+.log .c { grid-column: 2 / -1; color: var(--muted); font-size: 11.5px; }
+.log .empty { display: block; padding: 8px; color: var(--muted); font-family: var(--font-text); font-size: 13px; background: none; }
+
+@media (max-width: 899px) { .log { display: none; } }
+@media (max-width: 520px) {
+  .stage { padding: 0; display: block; }
+  .phone { width: 100%; height: 100vh; height: 100dvh; /* 100vh só como fallback. taste-skill-ignore */ min-height: 0; border: 0; border-radius: 0; }
+  .statusbar, .presenter-link { display: none; }
+}
+</style>
+</head>
+<body>
+
+<div class="stage">
+  <div class="phone" id="phone">
+    <div class="statusbar" aria-hidden="true"><span id="clock">9:41</span><i></i></div>
+    <div class="screens" id="screens">
+
+      <!-- boas-vindas -->
+      <section class="screen welcome" data-screen="welcome" aria-label="Boas-vindas">
+        <div class="content">
+          <div class="welcome-top"><p class="wordmark">Desendivid<span>AÍ</span></p></div>
+          <h1 class="hero">Saia das dívidas começando pela mais cara.</h1>
+          <p class="lede">Juntamos o que você deve em cada banco, mostramos o custo real de cada contrato e montamos um plano que cabe no seu mês.</p>
+          <ol class="how">
+            <li><span>Você conecta suas contas pelo Open Finance.</span></li>
+            <li><span>Organizamos suas dívidas da mais cara para a mais barata.</span></li>
+            <li><span>Você diz quanto pode pagar e recebe um plano explicado.</span></li>
+          </ol>
+        </div>
+        <div class="foot">
+          <button class="btn" type="button" data-go="connect">Organizar minhas dívidas</button>
+          <p class="small" style="text-align:center;text-wrap:balance">Só com a sua autorização, que você cancela quando quiser.</p>
+        </div>
+      </section>
+
+      <!-- conectar contas (consentimento) -->
+      <section class="screen" data-screen="connect" aria-labelledby="t-connect" hidden>
+        <div class="appbar">
+          <button class="icon" type="button" data-back aria-label="Voltar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></button>
+          <h1 id="t-connect">Conectar contas</h1>
+          <span class="icon ghost"></span>
+        </div>
+        <form class="content" id="f-connect" novalidate>
+          <div class="notice bad" id="n-connect" role="alert" hidden></div>
+          <div>
+            <label class="label" for="cpf">Seu CPF <span class="tag">CPF de demonstração</span></label>
+            <input class="field" type="text" id="cpf" inputmode="numeric" autocomplete="off" maxlength="14" value="529.982.247-25">
+          </div>
+          <div>
+            <p class="label" id="l-inst">De onde buscar suas dívidas</p>
+            <ul class="toggles" aria-labelledby="l-inst">
+              <li><label class="toggle"><span class="mono" aria-hidden="true">BB</span><span class="txt">Banco do Brasil<small>Conta, cartão e empréstimos</small></span><input class="switch" type="checkbox" role="switch" name="inst" value="bb" checked></label></li>
+              <li><label class="toggle"><span class="mono" aria-hidden="true">It</span><span class="txt">Itaú<small>Conta, cartão e empréstimos</small></span><input class="switch" type="checkbox" role="switch" name="inst" value="itau" checked></label></li>
+              <li><label class="toggle"><span class="mono" aria-hidden="true">Nu</span><span class="txt">Nubank<small>Cartão e empréstimos</small></span><input class="switch" type="checkbox" role="switch" name="inst" value="nubank" checked></label></li>
+            </ul>
+          </div>
+          <div class="panel">
+            <p class="h-sec" style="margin-bottom:8px">O que vamos ver</p>
+            <ul class="share">
+              <li>Seus contratos de crédito: saldo, parcelas e taxas.</li>
+              <li>Pendências no Serasa ligadas ao seu CPF.</li>
+              <li>Só para montar seu plano. Nada é vendido ou repassado.</li>
+            </ul>
+            <p class="small" style="margin-top:10px">Vale por 90 dias. Você pode revogar antes, quando quiser, em Minhas autorizações.</p>
+          </div>
+          <label class="accept"><input type="checkbox" id="accept"><span>Autorizo o DesendividAÍ a consultar esses dados para montar meu plano.</span></label>
+        </form>
+        <div class="foot">
+          <button class="btn" type="submit" form="f-connect" id="b-connect" disabled>Continuar</button>
+        </div>
+      </section>
+
+      <!-- redirecionando -->
+      <section class="screen portal" data-screen="redirect" aria-label="Redirecionando" hidden>
+        <div class="center">
+          <div class="spinner" aria-hidden="true"></div>
+          <p class="title" style="font-size:19px">Você está sendo levado ao ambiente seguro da sua instituição</p>
+          <p class="small">Lá você confirma o que pode ser compartilhado. Nenhuma senha passa pelo DesendividAÍ.</p>
+        </div>
+      </section>
+
+      <!-- portal da instituição (simulado) -->
+      <section class="screen portal" data-screen="portal" aria-labelledby="t-portal" hidden>
+        <div class="appbar">
+          <span class="icon ghost"></span>
+          <h1 id="t-portal">Open Finance · sua instituição</h1>
+          <span class="icon ghost"></span>
+        </div>
+        <div class="content">
+          <p class="secure"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/></svg>Ambiente simulado para a demonstração</p>
+          <h2 class="title">O DesendividAÍ quer acessar seus dados de crédito</h2>
+          <div class="panel">
+            <dl class="kvlist">
+              <div><dt>Quem pede</dt><dd>DesendividAÍ</dd></div>
+              <div><dt>Instituições</dt><dd id="o-portal-inst"></dd></div>
+              <div><dt>Dados</dt><dd>Operações de crédito</dd></div>
+              <div><dt>Validade</dt><dd>90 dias</dd></div>
+            </dl>
+          </div>
+          <p class="small">Ao autorizar, você volta para o DesendividAÍ. Dá para cancelar o acesso depois, pelo app ou pelo seu banco.</p>
+          <div class="notice bad" id="n-portal" role="alert" hidden></div>
+        </div>
+        <div class="foot">
+          <button class="btn" type="button" id="b-authorise">Autorizar</button>
+          <button class="btn secondary" type="button" id="b-cancel">Cancelar</button>
+        </div>
+      </section>
+
+      <!-- analisando -->
+      <section class="screen" data-screen="analyzing" aria-label="Analisando" hidden>
+        <div class="center">
+          <div class="spinner" id="a-spin" aria-hidden="true"></div>
+          <p class="title" style="font-size:20px" id="a-title">Analisando suas dívidas</p>
+          <ol class="steps-live" id="a-steps" aria-live="polite">
+            <li>Buscando seus contratos</li>
+            <li>Consultando o Serasa</li>
+            <li>Calculando o custo de cada dívida</li>
+            <li>Colocando em ordem de urgência</li>
+          </ol>
+          <div class="notice bad" id="n-analyzing" role="alert" style="text-align:left;width:100%" hidden></div>
+        </div>
+      </section>
+
+      <!-- suas dívidas -->
+      <section class="screen" data-screen="debts" aria-labelledby="t-debts" hidden>
+        <div class="appbar">
+          <button class="icon" type="button" data-menu aria-label="Menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h10"/></svg></button>
+          <h1 id="t-debts">Suas dívidas</h1>
+          <button class="icon" type="button" data-go="privacy" aria-label="Minhas autorizações"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8.5-7 10-4-1.5-7-5.5-7-10V6l7-3z"/></svg></button>
+        </div>
+        <div class="content">
+          <div>
+            <p class="small">Você deve, somando tudo</p>
+            <p class="figure" id="o-total"></p>
+            <p class="small" id="o-total-sub"></p>
+          </div>
+          <p class="small">Da mais cara para a mais barata. O custo total ao ano (CET) junta juros, tarifas e seguros: é ele que diz qual dívida pesa mais.</p>
+          <ul class="debts" id="o-debts"></ul>
+        </div>
+        <div class="foot"><button class="btn" type="button" data-go="budget">Montar meu plano</button></div>
+      </section>
+
+      <!-- quanto você pode pagar -->
+      <section class="screen" data-screen="budget" aria-labelledby="t-budget" hidden>
+        <div class="appbar">
+          <button class="icon" type="button" data-back aria-label="Voltar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></button>
+          <h1 id="t-budget">Seu plano</h1>
+          <button class="icon" type="button" data-go="privacy" aria-label="Minhas autorizações"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8.5-7 10-4-1.5-7-5.5-7-10V6l7-3z"/></svg></button>
+        </div>
+        <form class="content" id="f-budget" novalidate>
+          <h2 class="title"><label for="budget">Quanto você consegue pagar por mês?</label></h2>
+          <p class="lede">Pense no que sobra depois das contas da casa. Dá para mudar depois.</p>
+          <div class="money"><span aria-hidden="true">R$</span><input class="field" type="text" id="budget" inputmode="numeric" autocomplete="off" value="4.000" aria-describedby="minline"></div>
+          <div>
+            <input type="range" id="budget-range" min="1000" max="10000" step="50" value="4000" aria-label="Ajustar valor mensal">
+            <div class="scale" aria-hidden="true"><span>R$ 1 mil</span><span>R$ 10 mil</span></div>
+          </div>
+          <p class="minline" id="minline"></p>
+          <div class="notice bad" id="n-budget" role="alert" hidden></div>
+        </form>
+        <div class="foot"><button class="btn" type="submit" form="f-budget" id="b-budget">Ver opções</button></div>
+      </section>
+
+      <!-- seu plano -->
+      <section class="screen" data-screen="plan" aria-labelledby="t-plan" hidden>
+        <div class="appbar">
+          <button class="icon" type="button" data-back aria-label="Voltar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></button>
+          <h1 id="t-plan">Seu plano</h1>
+          <button class="icon" type="button" data-go="privacy" aria-label="Minhas autorizações"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8.5-7 10-4-1.5-7-5.5-7-10V6l7-3z"/></svg></button>
+        </div>
+        <div class="content">
+          <div class="loading-line" id="p-loading" role="status"><span class="spinner" aria-hidden="true"></span><span>Escolhendo o melhor caminho para você…</span></div>
+          <div class="notice bad" id="n-plan" role="alert" hidden></div>
+          <div id="p-pick"></div>
+          <div class="panel why" id="p-why" hidden>
+            <h2>Por que esse plano?</h2>
+            <div class="explain" id="o-explain"></div>
+          </div>
+          <div id="p-others" hidden>
+            <p class="h-sec" id="p-others-h" style="margin-bottom:8px">Outras opções para comparar</p>
+            <ul class="others" id="o-others"></ul>
+          </div>
+        </div>
+        <div class="foot"><button class="btn secondary" type="button" data-back>Mudar o valor mensal</button></div>
+      </section>
+
+      <!-- minhas autorizações -->
+      <section class="screen" data-screen="privacy" aria-labelledby="t-privacy" hidden>
+        <div class="appbar">
+          <button class="icon" type="button" data-back aria-label="Voltar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></button>
+          <h1 id="t-privacy">Minhas autorizações</h1>
+          <span class="icon ghost"></span>
+        </div>
+        <div class="content">
+          <p class="lede">Pela LGPD, você decide quem acessa seus dados e pode retirar a permissão a qualquer momento.</p>
+          <div class="panel">
+            <div class="row" style="align-items:center;margin-bottom:8px">
+              <p class="h-sec">Open Finance</p><span class="status-pill on" id="o-priv-status">Ativa</span>
+            </div>
+            <dl class="kvlist">
+              <div><dt>Instituições</dt><dd id="o-priv-inst"></dd></div>
+              <div><dt>Autorizada em</dt><dd class="num" id="o-priv-at"></dd></div>
+              <div><dt id="o-priv-until-l">Válida até</dt><dd class="num" id="o-priv-until"></dd></div>
+            </dl>
+          </div>
+          <div class="notice good" id="n-revoked" role="status" hidden><b>Acesso revogado.</b>O DesendividAÍ não consegue mais ler suas dívidas nem montar planos com esses dados. Para voltar a usar, conecte suas contas de novo.</div>
+          <div class="notice bad" id="n-privacy" role="alert" hidden></div>
+        </div>
+        <div class="foot"><button class="btn danger" type="button" id="b-revoke">Revogar acesso</button></div>
+      </section>
+
+    </div>
+
+    <div class="sheet-backdrop" id="sheet-bg" hidden></div>
+    <div class="sheet" id="sheet" role="dialog" aria-label="Menu" hidden>
+      <button type="button" id="m-privacy">Minhas autorizações<small>Ver e revogar o acesso às suas contas</small></button>
+      <button type="button" id="m-restart">Recomeçar a demonstração<small>Volta para a tela inicial e esquece tudo</small></button>
+    </div>
+  </div>
+
+  <aside class="log" id="log" aria-label="Chamadas à API" hidden>
+    <header><h2>Chamadas à API</h2><span class="small" id="log-mode"></span></header>
+    <ol id="log-list"><li class="empty">Nenhuma chamada ainda.</li></ol>
+  </aside>
+</div>
+<button class="presenter-link" type="button" id="b-present" aria-pressed="false">Modo apresentação (tecla ?)</button>
+
+<script>
+(() => {
+  "use strict";
+
+  const $ = (id) => document.getElementById(id);
+  const params = new URLSearchParams(location.search);
+  const MOCK = params.get("mock") === "1";
+
+  const PRODUCT = {
+    CREDIT_CARD: "Cartão de crédito",
+    PERSONAL_LOAN: "Empréstimo pessoal",
+    PAYROLL_LOAN: "Consignado",
+    OVERDRAFT: "Cheque especial",
+    VEHICLE_LOAN: "Financiamento de veículo",
+    MORTGAGE: "Financiamento imobiliário",
+  };
+  const SCENARIO = { aggressive: "Agressivo", consolidation: "Consolidação", minimum_viable: "Mínimo viável" };
+  const INST = { bb: "Banco do Brasil", itau: "Itaú", nubank: "Nubank" };
+  // slug desconhecido vira título legível: "lojas-exemplo" → "Lojas Exemplo"
+  const instName = (k) => INST[k] || String(k || "").split(/[-_\s]+/).filter(Boolean)
+    .map((w) => w.charAt(0).toLocaleUpperCase("pt-BR") + w.slice(1)).join(" ");
+  const REVOLVING = new Set(["CREDIT_CARD", "OVERDRAFT"]);
+  function termText(x) {
+    const n = x.remaining_installments;
+    if (n > 0) return n + (n === 1 ? " parcela" : " parcelas");
+    return REVOLVING.has(x.product_type) ? "crédito rotativo" : "";
+  }
+  const CLIENT_DESC = {
+    aggressive: "Concentra o que sobra do orçamento na dívida mais cara até quitá-la, depois passa para a próxima.",
+    consolidation: "Junta as dívidas mais caras numa linha do Banco do Brasil com custo menor e usa o que sobra para antecipar.",
+    minimum_viable: "Paga o mínimo de cada dívida e o restante vai para a mais cara.",
+  };
+
+  const brl = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
+  const pct = new Intl.NumberFormat("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  const intf = new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 0 });
+  const dateFmt = new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "short", year: "numeric" });
+  const fmtDate = (s) => { const d = new Date(s); return isNaN(d) ? "" : dateFmt.format(d); };
+  const months = (n) => {
+    if (n < 12) return n + (n === 1 ? " mês" : " meses");
+    const y = Math.floor(n / 12), m = n % 12;
+    const ys = y + (y === 1 ? " ano" : " anos");
+    return m ? ys + " e " + m + (m === 1 ? " mês" : " meses") : ys;
+  };
+  const listPt = (a) => a.length < 2 ? a.join("") : a.slice(0, -1).join(", ") + " e " + a[a.length - 1];
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // ---------- estado (só em memória; o CPF nunca vai para storage nem console) ----------
+  let S, gen = 0;
+  const fresh = () => ({ consentId: null, state: null, institutions: [], expiresAt: null, authorisedAt: null,
+    revokedAt: null, snapshotId: null, minimum: 0, simulationId: null, scenarios: [], revoked: false });
+
+  // ---------- API + registro do modo apresentação ----------
+  const HUMAN = {
+    REDE_INDISPONIVEL: "Não conseguimos falar com o servidor agora. Confira a conexão e tente de novo.",
+    CONSENT_NOT_AUTHORISED: "Sua autorização não está ativa. Conecte suas contas novamente.",
+    CONSENT_REQUIRED: "Sua autorização não está ativa. Conecte suas contas novamente.",
+    CONSENT_EXPIRED: "Sua autorização venceu. Conecte suas contas novamente.",
+    CONSENT_REJECTED: "A autorização foi cancelada. Nada foi compartilhado.",
+    CONSENT_NOT_FOUND: "Essa autorização não existe mais. Comece de novo.",
+    INSUFFICIENT_SCOPE: "Faltou uma permissão na autorização. Conecte suas contas novamente.",
+    VALIDATION_ERROR: "Algum dado não está no formato esperado. Confira e tente de novo.",
+  };
+  const human = (err) => HUMAN[err.code] || "Algo deu errado do nosso lado. Tente de novo em instantes.";
+
+  function logCall(method, path, status, code) {
+    const list = $("log-list");
+    const empty = list.querySelector(".empty"); if (empty) empty.remove();
+    const li = document.createElement("li");
+    const m = document.createElement("span"); m.className = "m"; m.textContent = method;
+    const p = document.createElement("span"); p.className = "p";
+    p.textContent = path.replace(/state=[^&]+/, (x) => x.slice(0, 14) + "…");
+    const s = document.createElement("span");
+    s.className = "s " + (status === 202 ? "wait" : status && status < 400 ? "ok" : "bad");
+    s.textContent = status || "rede";
+    li.append(m, p, s);
+    if (code) { const c = document.createElement("span"); c.className = "c"; c.textContent = code; li.append(c); }
+    list.prepend(li);
+  }
+
+  async function api(method, path, body) {
+    const opts = { method, headers: { Accept: "application/json" } };
+    if (body !== undefined) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
+    let res;
+    try {
+      res = await (MOCK ? mockFetch(method, path, body) : fetch(path, opts));
+    } catch (_) {
+      logCall(method, path, 0, "REDE_INDISPONIVEL");
+      throw Object.assign(new Error("Falha de rede"), { code: "REDE_INDISPONIVEL" });
+    }
+    let data = null;
+    if (res.status !== 204) { try { data = await res.json(); } catch (_) { data = null; } }
+    const code = !res.ok || res.status === 202 ? (data && data.code) || ("HTTP_" + res.status) : "";
+    logCall(method, path, res.status, code && (code + (data && data.message ? " · " + data.message : "")));
+    if (!res.ok) throw Object.assign(new Error((data && data.message) || ("HTTP " + res.status)), { code, status: res.status });
+    return { status: res.status, data };
+  }
+
+  function notice(box, err, opts = {}) {
+    box.textContent = "";
+    const b = document.createElement("b"); b.textContent = opts.title || human(err);
+    box.append(b);
+    if (opts.text) box.append(document.createTextNode(opts.text));
+    const dev = document.createElement("span"); dev.className = "devcode";
+    dev.textContent = (err.code || "ERRO") + (err.status ? " · HTTP " + err.status : "") + (err.message ? " · " + err.message : "");
+    box.append(dev);
+    if (opts.actions) {
+      const row = document.createElement("div"); row.className = "actions";
+      for (const [label, fn, cls] of opts.actions) {
+        const btn = document.createElement("button"); btn.type = "button"; btn.className = "btn " + (cls || "");
+        btn.textContent = label; btn.addEventListener("click", fn); row.append(btn);
+      }
+      box.append(row);
+    }
+    box.hidden = false;
+    box.scrollIntoView({ block: "nearest" });
+  }
+  const clear = (box) => { box.hidden = true; box.textContent = ""; };
+  function busy(btn, on) { btn.disabled = on; btn.setAttribute("aria-busy", on ? "true" : "false"); }
+
+  // ---------- navegação ----------
+  let stack = [];
+  function show(name, { back = false, replace = false } = {}) {
+    if (back) stack.pop();
+    else if (replace && stack.length) stack[stack.length - 1] = name;
+    else if (stack[stack.length - 1] !== name) stack.push(name);
+    document.querySelectorAll(".screen").forEach((s) => {
+      const on = s.dataset.screen === name;
+      s.hidden = !on;
+      if (on) { s.classList.toggle("back", back); s.style.animation = "none"; void s.offsetWidth; s.style.animation = ""; }
+    });
+    closeMenu();
+    const scr = document.querySelector('.screen[data-screen="' + name + '"]');
+    const c = scr.querySelector(".content"); if (c) c.scrollTop = 0;
+    if (name === "privacy") renderPrivacy();
+    const h = scr.querySelector("h1, .hero");
+    if (h) { h.setAttribute("tabindex", "-1"); h.focus({ preventScroll: true }); }
+  }
+  function goBack() { if (stack.length > 1) show(stack[stack.length - 2], { back: true }); }
+  document.addEventListener("click", (ev) => {
+    const go = ev.target.closest("[data-go]");
+    if (go) { ev.preventDefault(); show(go.dataset.go); return; }
+    if (ev.target.closest("[data-back]")) { ev.preventDefault(); goBack(); return; }
+    if (ev.target.closest("[data-menu]")) openMenu();
+  });
+
+  function openMenu() { $("sheet-bg").hidden = false; $("sheet").hidden = false; $("m-privacy").focus(); }
+  function closeMenu() { $("sheet-bg").hidden = true; $("sheet").hidden = true; }
+  $("sheet-bg").addEventListener("click", closeMenu);
+  $("m-privacy").addEventListener("click", () => show("privacy"));
+  $("m-restart").addEventListener("click", () => restart());
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && !$("sheet").hidden) closeMenu();
+    if (ev.key === "?" && !/^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)) togglePresent();
+  });
+
+  // ---------- modo apresentação ----------
+  function togglePresent(force) {
+    const on = force !== undefined ? force : !document.body.classList.contains("present");
+    document.body.classList.toggle("present", on);
+    $("log").hidden = !on;
+    $("b-present").setAttribute("aria-pressed", String(on));
+    $("b-present").textContent = on ? "Esconder painel técnico (tecla ?)" : "Modo apresentação (tecla ?)";
+  }
+  $("b-present").addEventListener("click", () => togglePresent());
+  $("log-mode").textContent = MOCK ? "respostas simuladas (?mock=1)" : "backend real";
+
+  // ---------- conectar contas ----------
+  const cpfDigits = () => $("cpf").value.replace(/\D/g, "");
+  function maskCpf() {
+    const d = cpfDigits().slice(0, 11);
+    let out = d.slice(0, 3);
+    if (d.length > 3) out += "." + d.slice(3, 6);
+    if (d.length > 6) out += "." + d.slice(6, 9);
+    if (d.length > 9) out += "-" + d.slice(9, 11);
+    $("cpf").value = out;
+  }
+  const checkedInst = () => [...document.querySelectorAll('input[name="inst"]:checked')].map((i) => i.value);
+  function syncConnect() {
+    $("b-connect").disabled = !($("accept").checked && checkedInst().length && cpfDigits().length === 11);
+  }
+  $("cpf").addEventListener("input", () => { maskCpf(); $("cpf").removeAttribute("aria-invalid"); syncConnect(); });
+  $("f-connect").addEventListener("change", syncConnect);
+
+  $("f-connect").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const box = $("n-connect"); clear(box);
+    const cpf = cpfDigits(), institutions = checkedInst();
+    if (cpf.length !== 11) { $("cpf").setAttribute("aria-invalid", "true"); notice(box, { code: "CPF_INVALIDO" }, { title: "Confira o CPF: são 11 números." }); return; }
+    const my = gen; const btn = $("b-connect"); busy(btn, true);
+    try {
+      const { data } = await api("POST", "/consent", { cpf, institutions, scopes: ["debts:read", "simulation:read", "recommendation:read"] });
+      if (my !== gen) return;
+      S = fresh();
+      S.consentId = data.consent_id; S.institutions = institutions; S.expiresAt = data.expires_at;
+      try { S.state = new URL(data.redirect_url, location.origin).searchParams.get("state"); } catch (_) { S.state = null; }
+      $("o-portal-inst").textContent = listPt(institutions.map(instName));
+      clear($("n-portal"));
+      show("redirect");
+      await wait(MOCK ? 900 : 1400);
+      if (my !== gen) return;
+      show("portal", { replace: true });
+      if (!S.state) notice($("n-portal"), { code: "SEM_STATE", message: "redirect_url sem state" }, { title: "Não conseguimos abrir a autorização. Volte e tente de novo." });
+    } catch (err) {
+      if (my !== gen) return;
+      notice(box, err);
+    } finally { if (my === gen) { busy(btn, false); syncConnect(); } }
+  });
+
+  // ---------- portal ----------
+  async function portal(approve) {
+    const box = $("n-portal"); clear(box);
+    const q = "state=" + encodeURIComponent(S.state || "") + (approve ? "&code=sandbox" : "&error=access_denied");
+    const my = gen; const btn = approve ? $("b-authorise") : $("b-cancel");
+    busy(btn, true); $("b-authorise").disabled = $("b-cancel").disabled = true;
+    try {
+      const { data } = await api("GET", "/consent/callback?" + q);
+      if (my !== gen) return;
+      if (data.status === "AUTHORISED") {
+        S.authorisedAt = data.authorised_at; S.expiresAt = data.expires_at || S.expiresAt;
+        stack = ["welcome", "analyzing"]; show("analyzing", { replace: true });
+        loadDebts();
+      } else cancelled({ code: data.status });
+    } catch (err) {
+      if (my !== gen) return;
+      if (err.code === "CONSENT_REJECTED" || err.code === "CONSENT_AUTHORISATION_EXPIRED") cancelled(err);
+      else notice(box, err);
+    } finally { if (my === gen) { busy(btn, false); $("b-authorise").disabled = $("b-cancel").disabled = false; } }
+  }
+  function cancelled(err) {
+    S.consentId = null; S.state = null;
+    stack = ["welcome", "connect", "portal"]; show("connect", { back: true });
+    notice($("n-connect"), err, { title: "Você cancelou a autorização.", text: "Nada foi compartilhado. Se quiser, é só continuar de novo." });
+  }
+  $("b-authorise").addEventListener("click", () => portal(true));
+  $("b-cancel").addEventListener("click", () => portal(false));
+
+  // ---------- analisando (polling em 202) ----------
+  async function loadDebts() {
+    const my = gen;
+    const items = [...$("a-steps").children];
+    const box = $("n-analyzing"); clear(box);
+    $("a-spin").hidden = false; $("a-steps").hidden = false; $("a-title").textContent = "Analisando suas dívidas";
+    items.forEach((li) => { li.className = ""; });
+    let step = 0; items[0].className = "now";
+    const ticker = setInterval(() => {
+      if (step < items.length - 1) { items[step].className = "done"; step++; items[step].className = "now"; }
+    }, MOCK ? 900 : 2200);
+    try {
+      let r;
+      for (let i = 0; i < 60; i++) {
+        r = await api("GET", "/debts?consent_id=" + encodeURIComponent(S.consentId));
+        if (my !== gen) return;
+        if (r.status !== 202) break;
+        await wait(2000);
+        if (my !== gen) return;
+      }
+      if (r.status === 202) throw Object.assign(new Error("Tempo esgotado"), { code: "PROCESSING" });
+      clearInterval(ticker);
+      items.forEach((li) => { li.className = "done"; });
+      renderDebts(r.data);
+      await wait(400);
+      if (my !== gen) return;
+      stack = ["welcome", "debts"]; show("debts", { replace: true });
+    } catch (err) {
+      clearInterval(ticker);
+      if (my !== gen) return;
+      $("a-spin").hidden = true; $("a-steps").hidden = true; $("a-title").textContent = "Não deu para terminar a análise";
+      notice(box, err, {
+        title: err.code === "PROCESSING" ? "A análise está demorando mais que o normal." : human(err),
+        actions: [["Tentar de novo", () => loadDebts()], ["Voltar ao início", () => restart(), "secondary"]],
+      });
+    }
+  }
+
+  function renderDebts(d) {
+    S.snapshotId = d.snapshot_id;
+    const debts = [...d.debts].sort((a, b) => a.priority_rank - b.priority_rank);
+    const maxCet = Math.max(...debts.map((x) => x.cet_annual), 1);
+    S.minimum = Math.round(debts.reduce((s, x) => s + x.monthly_payment, 0) * 100) / 100;
+    $("o-total").textContent = brl.format(d.total_outstanding);
+    $("o-total-sub").textContent = debts.length + (debts.length === 1 ? " dívida" : " dívidas") + " · " + brl.format(S.minimum) + " de parcelas por mês";
+    const ul = $("o-debts"); ul.textContent = "";
+    debts.forEach((x, i) => {
+      const li = document.createElement("li"); if (i === 0) li.className = "first";
+      const r1 = document.createElement("div"); r1.className = "row";
+      const prod = document.createElement("span"); prod.className = "prod"; prod.textContent = PRODUCT[x.product_type] || x.product_type;
+      if (i === 0) { const t = document.createElement("span"); t.className = "tag signal"; t.textContent = "mais cara"; prod.append(t); }
+      const bal = document.createElement("span"); bal.className = "bal"; bal.textContent = brl.format(x.outstanding_balance);
+      r1.append(prod, bal);
+      const r2 = document.createElement("div"); r2.className = "row meta";
+      const a = document.createElement("span"); a.textContent = [instName(x.institution), termText(x)].filter(Boolean).join(" · ");
+      const b = document.createElement("span"); b.textContent = x.monthly_payment > 0 ? brl.format(x.monthly_payment) + "/mês" : "sem parcela informada";
+      r2.append(a, b);
+      const cl = document.createElement("div"); cl.className = "costline";
+      const bar = document.createElement("span"); bar.className = "costbar"; bar.setAttribute("aria-hidden", "true");
+      const fill = document.createElement("i"); fill.style.width = Math.max(3, (x.cet_annual / maxCet) * 100) + "%"; bar.append(fill);
+      const v = document.createElement("span"); v.textContent = "custa " + pct.format(x.cet_annual) + "% ao ano";
+      cl.append(bar, v);
+      li.append(r1, r2, cl); ul.append(li);
+    });
+    syncBudget();
+  }
+
+  // ---------- orçamento ----------
+  const budgetValue = () => Number($("budget").value.replace(/\D/g, "")) || 0;
+  function syncBudget() {
+    const v = budgetValue();
+    const line = $("minline"); line.textContent = "";
+    if (!S.minimum) return;
+    const low = v < S.minimum;
+    line.classList.toggle("warn", low);
+    const b = document.createElement("b"); b.textContent = brl.format(S.minimum);
+    if (low) line.append(document.createTextNode("Abaixo de "), b, document.createTextNode(" você não cobre os mínimos."));
+    else line.append(document.createTextNode("Cobre os mínimos de "), b, document.createTextNode(" e sobra " + brl.format(v - S.minimum) + " para acelerar."));
+  }
+  $("budget").addEventListener("input", () => {
+    const v = budgetValue();
+    $("budget").value = v ? intf.format(v) : "";
+    $("budget-range").value = String(Math.min(10000, Math.max(1000, v)));
+    $("budget").removeAttribute("aria-invalid");
+    syncBudget();
+  });
+  $("budget-range").addEventListener("input", () => {
+    $("budget").value = intf.format(Number($("budget-range").value));
+    $("budget").removeAttribute("aria-invalid");
+    syncBudget();
+  });
+
+  $("f-budget").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const box = $("n-budget"); clear(box);
+    const v = budgetValue();
+    if (!(v > 0) || v > 1000000) { $("budget").setAttribute("aria-invalid", "true"); notice(box, { code: "ORCAMENTO_INVALIDO" }, { title: "Informe um valor entre R$ 1 e R$ 1.000.000." }); return; }
+    const my = gen; const btn = $("b-budget"); busy(btn, true);
+    try {
+      const { data } = await api("POST", "/simulation", { snapshot_id: S.snapshotId, monthly_budget: v });
+      if (my !== gen) return;
+      S.simulationId = data.simulation_id; S.scenarios = data.scenarios;
+      show("plan");
+      loadRecommendation();
+    } catch (err) {
+      if (my !== gen) return;
+      if (/^CONSENT_|INSUFFICIENT_SCOPE/.test(err.code || "")) {
+        notice(box, err, {
+          title: S.revoked ? "Você revogou o acesso; conecte suas contas novamente." : human(err),
+          text: S.revoked ? "Sem a sua autorização, o DesendividAÍ não monta planos com os seus dados." : "",
+          actions: [["Conectar contas", () => reconnect()]],
+        });
+      } else notice(box, err);
+    } finally { if (my === gen) busy(btn, false); }
+  });
+
+  // ---------- plano ----------
+  function facts(s) {
+    const g = document.createElement("div"); g.className = "facts";
+    const cell = (label, value, sub) => {
+      const d = document.createElement("div");
+      const l = document.createElement("span"); l.textContent = label;
+      const v = document.createElement("strong"); v.textContent = value;
+      d.append(l, v);
+      if (sub) { const x = document.createElement("small"); x.textContent = sub; d.append(x); }
+      g.append(d);
+    };
+    cell("Prazo", s.total_months + " meses", s.total_months >= 12 ? months(s.total_months) : "");
+    cell("Juros no total", brl.format(s.total_interest_paid));
+    const sv = s.total_savings_vs_minimum;
+    const d = document.createElement("div"); d.className = "wide";
+    const l = document.createElement("span"); l.textContent = "Comparado a pagar só o mínimo";
+    const v = document.createElement("strong"); v.className = sv >= 0 ? "gain" : "loss";
+    v.textContent = (sv >= 0 ? "Você economiza " : "Custa a mais ") + brl.format(Math.abs(sv));
+    d.append(l, v); g.append(d);
+    return g;
+  }
+  function renderPlan(pickedId) {
+    const pick = $("p-pick"); pick.textContent = "";
+    const chosen = S.scenarios.find((s) => s.scenario_id === pickedId);
+    const rest = S.scenarios.filter((s) => s !== chosen);
+    if (chosen) {
+      const box = document.createElement("div"); box.className = "pick";
+      const t = document.createElement("span"); t.className = "tag signal"; t.textContent = "Recomendado para você";
+      const h = document.createElement("h2"); h.textContent = SCENARIO[chosen.scenario_id] || chosen.label;
+      const p = document.createElement("p"); p.className = "desc"; p.textContent = CLIENT_DESC[chosen.scenario_id] || "";
+      // texto técnico do motor: só no painel técnico (modo apresentação)
+      const tech = document.createElement("span"); tech.className = "devcode"; tech.textContent = "description do motor: " + (chosen.description || "");
+      box.append(t, h, p, tech, facts(chosen)); pick.append(box);
+    }
+    const ul = $("o-others"); ul.textContent = "";
+    for (const s of rest) {
+      const li = document.createElement("li");
+      const r1 = document.createElement("div"); r1.className = "row";
+      const n = document.createElement("span"); n.className = "name"; n.textContent = SCENARIO[s.scenario_id] || s.label;
+      const m = document.createElement("span"); m.className = "meta"; m.textContent = months(s.total_months);
+      r1.append(n, m);
+      const r2 = document.createElement("div"); r2.className = "row meta";
+      const a = document.createElement("span"); a.textContent = "Juros " + brl.format(s.total_interest_paid);
+      const sv = s.total_savings_vs_minimum;
+      const b = document.createElement("span"); b.className = sv >= 0 ? "gain" : "loss";
+      b.textContent = (sv >= 0 ? "economiza " : "custa a mais ") + brl.format(Math.abs(sv));
+      r2.append(a, b);
+      li.append(r1, r2); ul.append(li);
+    }
+    $("p-others-h").textContent = chosen ? "Outras opções para comparar" : "As três opções";
+    $("p-others").hidden = !rest.length;
+  }
+
+  async function loadRecommendation() {
+    const my = gen;
+    $("p-loading").hidden = false; $("p-why").hidden = true; $("p-others").hidden = true;
+    $("p-pick").textContent = ""; clear($("n-plan"));
+    try {
+      const { data } = await api("POST", "/recommendation", { simulation_id: S.simulationId });
+      if (my !== gen) return;
+      if (Array.isArray(data.scenarios) && data.scenarios.length) S.scenarios = data.scenarios;
+      renderPlan(data.recommended_scenario);
+      renderExplanation($("o-explain"), data.explanation);
+      $("p-why").hidden = false;
+    } catch (err) {
+      if (my !== gen) return;
+      renderPlan(null);
+      notice($("n-plan"), err, { title: "Não conseguimos preparar a recomendação agora.", text: "As opções calculadas estão abaixo.", actions: [["Tentar de novo", () => loadRecommendation()]] });
+    } finally { if (my === gen) $("p-loading").hidden = true; }
+  }
+
+  // Markdown simples do Granite (parágrafos, "- " listas, **negrito**) montado com nós DOM.
+  // Texto da API nunca passa por innerHTML.
+  function inline(parent, text) {
+    text.split(/\*\*(.+?)\*\*/g).forEach((part, i) => {
+      if (!part) return;
+      if (i % 2) { const b = document.createElement("strong"); b.textContent = part; parent.append(b); }
+      else parent.append(document.createTextNode(part));
+    });
+  }
+  function renderExplanation(box, text) {
+    box.textContent = "";
+    const blocks = String(text || "").replace(/\r\n?/g, "\n").split(/\n\s*\n/);
+    for (const block of blocks) {
+      let ul = null, p = null;
+      for (const raw of block.split("\n")) {
+        const line = raw.trim();
+        if (!line) continue;
+        const item = line.match(/^[-*•]\s+(.*)$/);
+        const head = line.match(/^#{1,6}\s+(.*)$/);
+        if (item) {
+          p = null;
+          if (!ul) { ul = document.createElement("ul"); box.append(ul); }
+          const li = document.createElement("li"); inline(li, item[1]); ul.append(li);
+        } else if (head) {
+          ul = null; p = null;
+          const h = document.createElement("p"); const b = document.createElement("strong");
+          b.textContent = head[1].replace(/\*\*/g, ""); h.append(b); box.append(h);
+        } else {
+          ul = null;
+          if (p) p.append(document.createElement("br"));
+          else { p = document.createElement("p"); box.append(p); }
+          inline(p, line);
+        }
+      }
+    }
+  }
+
+  // ---------- minhas autorizações ----------
+  function renderPrivacy() {
+    clear($("n-privacy"));
+    $("o-priv-inst").textContent = listPt(S.institutions.map(instName)) || "Nenhuma";
+    $("o-priv-at").textContent = S.authorisedAt ? fmtDate(S.authorisedAt) : "Não autorizada";
+    $("o-priv-until-l").textContent = S.revoked ? "Revogada em" : "Válida até";
+    $("o-priv-until").textContent = fmtDate(S.revoked ? S.revokedAt : S.expiresAt) || "Sem prazo";
+    $("o-priv-status").textContent = S.revoked ? "Revogada" : S.authorisedAt ? "Ativa" : "Pendente";
+    $("o-priv-status").className = "status-pill " + (S.revoked ? "off" : "on");
+    $("n-revoked").hidden = !S.revoked;
+    $("b-revoke").hidden = S.revoked || !S.consentId;
+  }
+  $("b-revoke").addEventListener("click", async () => {
+    const box = $("n-privacy"); clear(box);
+    const my = gen; const btn = $("b-revoke"); busy(btn, true);
+    try {
+      await api("DELETE", "/consent/" + encodeURIComponent(S.consentId));
+      if (my !== gen) return;
+      S.revoked = true; S.revokedAt = new Date().toISOString();
+      renderPrivacy();
+    } catch (err) {
+      if (my !== gen) return;
+      notice(box, err);
+    } finally { if (my === gen) busy(btn, false); }
+  });
+
+  // ---------- recomeçar / reconectar ----------
+  function resetUi() {
+    gen++; S = fresh(); closeMenu();
+    $("f-connect").reset(); $("cpf").value = "529.982.247-25"; $("accept").checked = false;
+    $("budget").value = "4.000"; $("budget-range").value = "4000"; $("minline").textContent = "";
+    document.querySelectorAll(".notice").forEach((n) => { if (n.id !== "n-revoked") clear(n); });
+    document.querySelectorAll(".btn").forEach((b) => b.setAttribute("aria-busy", "false"));
+    $("o-debts").textContent = ""; $("p-pick").textContent = ""; $("o-explain").textContent = "";
+    syncConnect();
+  }
+  function restart() { resetUi(); stack = []; show("welcome"); }
+  function reconnect() { resetUi(); stack = ["welcome"]; show("connect"); }
+
+  // relógio da barra de status
+  const clk = () => { const d = new Date(); $("clock").textContent = d.getHours() + ":" + String(d.getMinutes()).padStart(2, "0"); }; // relógio, não numeração. taste-skill-ignore
+  clk(); setInterval(clk, 30000);
+
+  // ---------- modo ?mock=1 (desligado por padrão) ----------
+  function mockFetch(method, path, body) {
+    const json = (status, obj) => new Response(status === 204 ? null : JSON.stringify(obj), { status, headers: { "Content-Type": "application/json" } });
+    const M = mockFetch.s || (mockFetch.s = { polls: 0, revoked: false });
+    const later = (ms, v) => new Promise((r) => setTimeout(() => r(v), ms));
+    const now = new Date().toISOString();
+    const in90 = new Date(Date.now() + 90 * 864e5).toISOString();
+    const cid = "5c2f8e14-7a3b-4d61-9b0e-2f6a1c9d4e73";
+    const revoked = () => later(300, json(403, { code: "CONSENT_NOT_AUTHORISED", message: "Consentimento com status REVOKED." }));
+    if (method === "POST" && path === "/consent") {
+      M.polls = 0; M.revoked = false;
+      return later(400, json(201, { consent_id: cid, status: "AWAITING_AUTHORISATION", redirect_url: "http://localhost:8000/consent/callback?state=mock-state-8f31&code=sandbox", expires_at: in90, created_at: now }));
+    }
+    if (path.startsWith("/consent/callback")) {
+      if (path.includes("error=")) return later(400, json(403, { code: "CONSENT_REJECTED", message: "Autorização negada pelo titular." }));
+      return later(400, json(200, { consent_id: cid, status: "AUTHORISED", institutions: ["bb", "itau", "nubank"], scopes: ["debts:read", "simulation:read", "recommendation:read"], created_at: now, expires_at: in90, authorised_at: now }));
+    }
+    if (path.startsWith("/debts")) {
+      if (M.revoked) return revoked();
+      if (M.polls++ < 2) return later(700, json(202, { code: "PROCESSING", message: "Retrato financeiro em processamento — consulte novamente em alguns segundos." }));
+      return later(500, json(200, { pseudonym_id: "psd_mock", snapshot_id: "9d1e2c3b-4a5f-4e6d-8c7b-1a2b3c4d5e6f", total_outstanding: 50210.55, generated_at: now, debts: [
+        { debt_id: "a1", institution: "nubank", product_type: "CREDIT_CARD", outstanding_balance: 6820.4, cet_annual: 431.7, monthly_payment: 1023.06, remaining_installments: 0, priority_rank: 1 },
+        { debt_id: "a6", institution: "lojas-exemplo", product_type: "PERSONAL_LOAN", outstanding_balance: 1480.0, cet_annual: 160.0, monthly_payment: 0, remaining_installments: 0, priority_rank: 2 },
+        { debt_id: "a2", institution: "itau", product_type: "OVERDRAFT", outstanding_balance: 2310.15, cet_annual: 152.3, monthly_payment: 462.03, remaining_installments: 0, priority_rank: 3 },
+        { debt_id: "a3", institution: "itau", product_type: "PERSONAL_LOAN", outstanding_balance: 11400.0, cet_annual: 89.4, monthly_payment: 812.5, remaining_installments: 24, priority_rank: 4 },
+        { debt_id: "a4", institution: "bb", product_type: "VEHICLE_LOAN", outstanding_balance: 21900.0, cet_annual: 28.6, monthly_payment: 600.0, remaining_installments: 36, priority_rank: 5 },
+        { debt_id: "a5", institution: "bb", product_type: "PAYROLL_LOAN", outstanding_balance: 6300.0, cet_annual: 23.1, monthly_payment: 341.51, remaining_installments: 30, priority_rank: 6 },
+      ] }));
+    }
+    if (method === "POST" && path === "/simulation") {
+      if (M.revoked) return revoked();
+      return later(500, json(200, { simulation_id: "7b8c9d0e-1f2a-4b3c-9d4e-5f6a7b8c9d0e", snapshot_id: body.snapshot_id, generated_at: now, scenarios: MOCK_SCEN }));
+    }
+    if (method === "POST" && path === "/recommendation") {
+      if (M.revoked) return revoked();
+      return later(1600, json(200, { recommendation_id: "r1", recommended_scenario: "consolidation", scenarios: MOCK_SCEN, generated_at: now, trace_id: "wxg-2026-11-09-41c7",
+        explanation: "Recomendo o cenário **Consolidação**.\n\nO cartão do Nubank e o cheque especial do Itaú custam mais de 150% ao ano. Juntar essas dívidas num crédito do Banco do Brasil com taxa menor corta a maior parte dos juros.\n\n- Prazo: **2 anos e 2 meses**\n- Juros no total: **R$ 9.120,40**\n\nO Agressivo termina 3 meses antes, mas deixa o seu mês sem folga. A consolidação é o equilíbrio." }));
+    }
+    if (method === "DELETE" && path.startsWith("/consent/")) { M.revoked = true; return later(300, json(204)); }
+    return later(200, json(404, { code: "NOT_FOUND", message: "Rota não simulada no modo mock." }));
+  }
+  const MOCK_SCEN = [
+    { scenario_id: "aggressive", label: "Agressivo", description: "Avalanche: orçamento excedente alocado à dívida de maior CET (priority_rank 1) até quitação.", total_months: 23, total_interest_paid: 8410.12, total_savings_vs_minimum: 33460.03, monthly_plan: [] },
+    { scenario_id: "consolidation", label: "Consolidação", description: "Porta 4 dívida(s) com CET acima de 30% a.a. para uma linha BB a 30% a.a. em 36 parcelas (parcela inicial R$ 594.43). Premissa: 2 dívida(s) sem parcela informada.", total_months: 26, total_interest_paid: 9120.4, total_savings_vs_minimum: 32749.75, monthly_plan: [] },
+    { scenario_id: "minimum_viable", label: "Mínimo viável", description: "Paga só as parcelas contratadas e usa a sobra no cartão, sem renegociar.", total_months: 41, total_interest_paid: 43980.6, total_savings_vs_minimum: -2110.45, monthly_plan: [] },
+  ];
+
+  // ---------- início ----------
+  S = fresh(); restart();
+  if (params.get("present") === "1") togglePresent(true);
+
+  // Só no modo mock: ?mock=1&shot=<tela> percorre o fluxo até a tela pedida (para screenshots).
+  const shot = MOCK && params.get("shot");
+  if (shot) {
+    (async () => {
+      const until = (fn) => new Promise((r) => { const t = setInterval(() => { if (fn()) { clearInterval(t); r(); } }, 50); });
+      const on = (n) => !document.querySelector('.screen[data-screen="' + n + '"]').hidden;
+      const seq = ["welcome", "connect", "portal", "analyzing", "debts", "budget", "plan", "privacy", "revoked"];
+      const k = shot === "cancelled" ? 2 : seq.indexOf(shot);
+      if (k >= 1) show("connect");
+      if (k >= 2) { $("accept").checked = true; syncConnect(); $("f-connect").requestSubmit(); await until(() => on("portal")); }
+      if (shot === "cancelled") { $("b-cancel").click(); await until(() => !$("n-connect").hidden); }
+      else if (shot === "analyzing") { $("b-authorise").click(); await until(() => on("analyzing")); await wait(1000); }
+      else if (k >= 3) {
+        $("b-authorise").click(); await until(() => on("debts"));
+        if (k >= 5) show("budget");
+        if (k >= 6) { $("f-budget").requestSubmit(); await until(() => on("plan") && !$("p-why").hidden); }
+        if (k >= 7) show("privacy");
+        if (k >= 8) {
+          $("b-revoke").click(); await until(() => !$("n-revoked").hidden);
+          goBack(); show("budget"); $("f-budget").requestSubmit(); await until(() => !$("n-budget").hidden);
+        }
+      }
+      document.body.dataset.ready = "1";
+    })();
+  } else document.body.dataset.ready = "1";
+})();
+</script>
+</body>
+</html>
