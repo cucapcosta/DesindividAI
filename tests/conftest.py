@@ -36,6 +36,9 @@ os.environ["VAULT_KEK_V1"] = "cd" * 32
 os.environ["VAULT_KEK_ACTIVE_VERSION"] = "v1"
 os.environ["PSEUDONYM_KEY_ACTIVE_VERSION"] = "v1"
 os.environ["INTERNAL_API_TOKEN"] = "test-internal-token-do-not-use-in-production"
+# Agendador da retenção desligado nos testes, mesmo que o .env o ligue
+# (load_dotenv em src.main não sobrescreve variáveis já definidas).
+os.environ["RETENTION_SCHEDULE_ENABLED"] = "false"
 
 import pytest  # noqa: E402  (o ambiente acima precisa existir antes dos imports da aplicação)
 from fastapi.testclient import TestClient  # noqa: E402

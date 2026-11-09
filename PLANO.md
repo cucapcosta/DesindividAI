@@ -248,7 +248,7 @@ Projetar a camada de dados garantindo que informações pessoais financeiras sej
   - Coleção `financial_snapshots` — apenas dados pseudonimizados
   - Coleção `consent_registry` — registro de consentimentos (sem dados financeiros)
   - Coleção `identity_vault` — CPF cifrado com DEK por titular + envelope KEK
-  - Coleção `audit_trail` — eventos e traces (nunca expurgada)
+  - Coleção `audit_trail` — eventos e traces (sem expurgo por padrão; prazo configurável em `AUDIT_RETENTION_DAYS`)
 - [x] Especificar fluxo de acesso à chave: `EnvKeyProvider` (hackathon); produção deve implementar um KeyProvider sobre o Secrets Manager com role IAM `SecretsReader`
 - [x] Definir política de retenção: job de expurgo idempotente (`src/privacy/retention.py`) sobre `expires_at` / `awaiting_expires_at`
 - [x] Registrar cada operação sobre dados do titular na trilha de auditoria (`src/privacy/audit.py`); produção deve implementar um GovernanceSink para o watsonx.governance (plano)
@@ -260,6 +260,12 @@ Projetar a camada de dados garantindo que informações pessoais financeiras sej
 - [x] `src/privacy/audit_bridge.py` (ponte async→sync, tolerante) — Parte B
 - [x] Retry com backoff exponencial para 429 do Cloudant Lite (`_with_429_retry`) — Parte B
 - [x] `vault.reveal` ligado em produção (corrigido `_default_audit` tolerante) — Parte B
+- [x] Job de retenção agendado na própria API (`src/privacy/retention_scheduler.py`, `RETENTION_SCHEDULE_ENABLED`) — revisão M4
+- [x] Apagamento e exportação do titular por CPF em todas as versões da chave (`POST /internal/erase`, `POST /internal/subject/export`; LGPD Art. 18 I, II, V, VI e VII) — revisão M4
+- [x] Cofre: `purpose` amarrado ao serviço e consentimento ativo exigido para `SERASA_QUERY` (falha fechada) — revisão M4
+- [x] Prazo configurável da trilha de auditoria (`AUDIT_RETENTION_DAYS`, regra f); **prazo a definir pelo controlador** — revisão M4
+- [x] 401 no `/internal/*` registrado como `internal.auth_failed` (log JSON) — revisão M4
+- [x] ROPA corrigido (Art. 18 por inciso e Art. 20) e RIPD em rascunho (`docs/m4-ripd.md`) — revisão M4
 
 #### Entregáveis
 - [`src/privacy/key_provider.py`](src/privacy/key_provider.py) — `KeyProvider`, `EnvKeyProvider`
@@ -270,11 +276,14 @@ Projetar a camada de dados garantindo que informações pessoais financeiras sej
 - [`src/privacy/audit_bridge.py`](src/privacy/audit_bridge.py) — ponte async→sync para o M3 (Parte B)
 - [`src/privacy/retention.py`](src/privacy/retention.py) — `run_retention()`, `ensure_indexes()`, `ensure_databases()`; CLI `python -m src.privacy.retention [--dry-run] [--ensure]`; regra a2 para `decision_traces` (Parte B)
 - [`src/privacy/retention_store.py`](src/privacy/retention_store.py) — repositórios de retenção; retry 429 (`_with_429_retry`); `iter_decisions`, `delete_decision` (Parte B)
-- [`src/privacy/erasure.py`](src/privacy/erasure.py) — lógica de apagamento LGPD Art. 18; `decisions_deleted` (Parte B)
-- [`src/api/routers/internal.py`](src/api/routers/internal.py) — `POST /internal/erase/{pseudonym_id}`, `POST /internal/retention/run`
+- [`src/privacy/erasure.py`](src/privacy/erasure.py) — lógica de apagamento LGPD Art. 18; `decisions_deleted` (Parte B); `erase_subject_by_cpf` (todas as versões da chave)
+- [`src/privacy/subject_access.py`](src/privacy/subject_access.py) — exportação dos dados do titular (acesso e portabilidade)
+- [`src/privacy/retention_scheduler.py`](src/privacy/retention_scheduler.py) — agendador do job de retenção no lifespan da API
+- [`src/api/routers/internal.py`](src/api/routers/internal.py) — `POST /internal/erase` (CPF), `POST /internal/erase/{pseudonym_id}`, `POST /internal/subject/export`, `POST /internal/retention/run`
 - [`tests/m4/`](tests/m4/) — testes unitários e de integração da camada de privacidade
 - [`docs/m4-mapeamento-dados.md`](docs/m4-mapeamento-dados.md) — mapeamento de todos os campos pessoais/financeiros (inclui `decision_traces`)
 - [`docs/m4-ropa.md`](docs/m4-ropa.md) — ROPA LGPD
+- [`docs/m4-ripd.md`](docs/m4-ripd.md) — RIPD (Art. 38), rascunho técnico para revisão do DPO
 - [`docs/m4-retencao-e-delecao.md`](docs/m4-retencao-e-delecao.md) — política de retenção e deleção
 - [`docs/m4-chaves-e-iam.md`](docs/m4-chaves-e-iam.md) — gestão de chaves e IAM
 - [`docs/m4-auditoria-governanca.md`](docs/m4-auditoria-governanca.md) — auditoria e governança
@@ -304,6 +313,11 @@ Projetar a camada de dados garantindo que informações pessoais financeiras sej
 | Gateway (produção) | IBM API Connect | Padrão IBM, suporte a FAPI (Financial-grade API), políticas OAuth2 nativas |
 | Gateway (hackathon) | **Não provisionado** — contrato em `openapi/openapi.yaml`, políticas em `docs/m1-api-connect-policies.md` | API Connect fora da conta do hackathon. O backend valida o token IAM do canal nas rotas `/consent` (`src/core/channel_auth.py`) e exige consentimento em `/debts`, `/simulation` e `/recommendation` (`REQUIRE_CONSENT=true` por padrão). O token do titular nos endpoints de dados depende de um Authorization Server, indisponível na conta |
 | Governança | watsonx.governance | Rastreabilidade de decisões de IA exigida por regulação financeira |
+| Governança (hackathon) | **watsonx.governance ainda não integrado** | O `GovernanceSink` padrão é `NoopGovernanceSink` e nada é enviado. A instância `watsonx-Hackathon GOV` está provisionada: é pendência de implementação (trace montado pelo M3), não limitação da conta |
+| Retenção periódica (hackathon) | **Agendador asyncio no lifespan da API** | Cloudant sem TTL e conta sem Code Engine; o job é idempotente, então várias réplicas podem rodá-lo. Em produção, job agendado único |
+| Pedidos do titular | **Por CPF, em todas as versões da chave de pseudonimização** | Após uma rotação o mesmo CPF tem um pseudônimo por versão; pedir por um só deixaria dados para trás. As chaves antigas não podem ser descartadas |
+| Prazo da trilha de auditoria | **Configurável (`AUDIT_RETENTION_DAYS`), sem expurgo por padrão** | A trilha é dado pseudonimizado mesmo após o apagamento; o prazo é decisão jurídica do controlador |
+| Observabilidade (hackathon) | **Logs JSON no stdout + trilha em Cloudant/COS** | IBM Cloud Logs e Activity Tracker indisponíveis na conta; eventos de auditoria saem como JSON no stdout (`desendividai.audit`); alertas de acesso anômalo especificados, mas não ativos nesta conta |
 | Motor de simulação | AI Service Python no watsonx.ai | Lógica financeira pura, sem dependência de LLM, reutilizável como endpoint REST |
 | Canal de engajamento | Fora do escopo | API genérica OpenAPI — qualquer canal pode integrar |
 | Acompanhamento mensal | Fora do escopo | Reduz complexidade da v1 |

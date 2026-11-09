@@ -22,6 +22,10 @@ from fastapi.responses import JSONResponse
 
 load_dotenv()  # lê .env (na raiz do repo ou no cwd) antes de qualquer módulo consultar o ambiente
 
+from src.core.log_filters import install_access_log_filter
+
+install_access_log_filter()  # o access log do uvicorn grava a URL; CPF na URL não pode ir para o log
+
 from src.api.models import ErrorResponse
 from src.core.errors import ServiceError
 from src.api.routers import consent, debts, simulation, recommendation

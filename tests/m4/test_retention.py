@@ -1474,10 +1474,10 @@ def test_ensure_indexes_429_intermittent_succeeds(monkeypatch):
 
     # Usa MagicMock real mas com side_effect controlado
     client = MagicMock()
-    # Sequência: 429 → ok → 429 → ok → ok → ok → ok (7 índices; primeiras 3 chamadas
+    # Sequência: 429 → ok → 429 → ok → ok → ok → ok → ok (8 índices; primeiras 3 chamadas
     # disparam 429 uma vez, depois ok)
     responses = []
-    for i in range(7):
+    for i in range(8):
         if i < 3:
             ok_result = MagicMock()
             ok_result.get_result.return_value = {}
@@ -1501,7 +1501,7 @@ def test_ensure_indexes_429_intermittent_succeeds(monkeypatch):
     ensure_indexes(client)
 
     # Deve ter chamado post_index pelo menos 7 vezes (7 índices, com retries extras)
-    assert client.post_index.call_count >= 7
+    assert client.post_index.call_count >= 8
 
 
 # ---------------------------------------------------------------------------

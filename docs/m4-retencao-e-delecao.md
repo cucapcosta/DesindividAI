@@ -22,6 +22,23 @@ POST /internal/retention/run?dry_run=true
 POST /internal/retention/run?dry_run=false
 ```
 
+### 1.1 Execução periódica (Implementado)
+
+Sem execução periódica, o job não serve de nada: o Cloudant não apaga nada sozinho. Como a conta do hackathon não tem Code Engine nem outro agendador gerenciado, a própria API roda o job num laço asyncio iniciado no lifespan do router interno ([`src/privacy/retention_scheduler.py`](../src/privacy/retention_scheduler.py)).
+
+| Variável | Padrão | Efeito |
+|---|---|---|
+| `RETENTION_SCHEDULE_ENABLED` | desligado | `true` liga o agendador |
+| `RETENTION_INTERVAL_MINUTES` | `1440` (24 h) | Intervalo entre execuções; mínimo 5 |
+| `RETENTION_INITIAL_DELAY_SECONDS` | `60` | Espera antes da primeira execução |
+| `RETENTION_SCHEDULE_DRY_RUN` | desligado | `true` só calcula, não apaga |
+
+- Cada execução grava `retention.run` na trilha, como uma execução manual.
+- Execuções do mesmo processo não se sobrepõem. Com várias réplicas, cada uma roda o job; isso é seguro porque o job é idempotente.
+- Falhas (Cloudant fora, por exemplo) são logadas sem PII e o laço continua.
+- **Em produção:** preferir um job agendado único (ex.: Code Engine cron rodando `python -m src.privacy.retention`) e deixar `RETENTION_SCHEDULE_ENABLED` desligado.
+- **Para a apresentação do hackathon:** ligar `RETENTION_SCHEDULE_ENABLED=true` no ambiente onde a API roda. Com ele desligado, a retenção depende de alguém chamar o job.
+
 ---
 
 ## 2. Regras de retenção (aplicadas na ordem)
@@ -34,7 +51,7 @@ POST /internal/retention/run?dry_run=false
 | c | Consentimento `AUTHORISED` | `expires_at < agora` | Marcar como `REVOKED`, `revocation_reason=EXPIRED`, `revoked_at=agora`; emitir evento `consent.expired` |
 | d | Consentimento `REVOKED` | `revoked_at + 90 dias < agora` | Apagar o documento |
 | e | Cofre (`identity_vault`) | Doc ativo (`shredded_at null`) com `created_at` há mais de 24 h, sem consentimento nem snapshot com o mesmo `pseudonym_id` | `IdentityVault.shred()` (crypto-shredding) |
-| f | Trilha de auditoria (`audit_trail`) | — | **Nunca expurgada** |
+| f | Trilha de auditoria (`audit_trail`) | Só com `AUDIT_RETENTION_DAYS` > 0: `recorded_at` mais antigo que o prazo | Apagar o evento do Cloudant. **Sem a variável (padrão), nunca expurgada** |
 
 > **Carência de 24 h (regra e):** o cofre só é destruído automaticamente após 24 horas da criação, para evitar race conditions no provisionamento inicial do titular.
 
@@ -49,6 +66,8 @@ POST /internal/retention/run?dry_run=false
 > **`RetentionReport`:** inclui o campo `decisions_deleted: int` (contagem de documentos apagados pela regra a2) além dos campos das regras a–e.
 
 ---
+
+> **Prazo da auditoria (regra f):** a trilha guarda o `pseudonym_id`, e enquanto a chave HMAC existir quem tem o CPF recalcula o pseudônimo. Por isso a trilha continua sendo dado pessoal pseudonimizado mesmo depois do apagamento do titular, e não pode ficar guardada sem prazo. O prazo é decisão do controlador (ver [`m4-ropa.md`](m4-ropa.md) §2.4); o código já aplica qualquer valor configurado. As cópias no COS não são apagadas pela aplicação: configurar no bucket uma regra de ciclo de vida (expiração) com o mesmo prazo, compatível com o Object Lock, se houver.
 
 ## 3. Crypto-shredding
 
@@ -85,14 +104,30 @@ Antes do shred:                    Após o shred:
 
 ## 4. Fluxo de apagamento a pedido do titular (LGPD Art. 18)
 
-O apagamento é acionado pela equipe de privacidade via:
+O apagamento é acionado pela equipe de privacidade. O caminho normal é pelo **CPF**, que é o que o titular informa no pedido:
+
+```
+POST /internal/erase
+X-Internal-Token: ***
+Content-Type: application/json
+
+{"cpf": "529.982.247-25"}
+```
+
+- O CPF vai **só no corpo**, nunca na URL. É aceito com ou sem máscara e precisa ter dígitos verificadores válidos; caso contrário, `422 INVALID_CPF`, sem ecoar o valor recebido.
+- O servidor calcula o `pseudonym_id` do CPF em **todas as versões** da chave de pseudonimização (`pseudonymize_cpf_all_versions`) e roda o fluxo abaixo para cada um. Sem isso, depois de uma rotação de chave o apagamento cobriria só a versão ativa e deixaria para trás os dados emitidos com as anteriores.
+- Se alguma versão de chave não puder ser lida → `503 PSEUDONYM_KEY_UNAVAILABLE` e **nada** é apagado.
+- Resposta: `{"subjects": [{"key_version", "pseudonym_id", "consents_revoked", "snapshots_deleted", "decisions_deleted", "vault_shredded", "trace_id", "completion_audited"}], "totals": {...}}`. Nunca contém o CPF.
+- Se a auditoria inicial de um dos pseudônimos falhar → `503 AUDIT_UNAVAILABLE`. Os pseudônimos anteriores já foram apagados; como o fluxo é idempotente, repetir o pedido completa o apagamento.
+
+Também existe a rota por um único pseudônimo, para quando a equipe já tem o `pseudonym_id`:
 
 ```
 POST /internal/erase/{pseudonym_id}
 X-Internal-Token: ***
 ```
 
-O `pseudonym_id` deve ter exatamente 64 caracteres hexadecimais. CPFs enviados na URL são rejeitados com HTTP 422. `INTERNAL_API_TOKEN` não configurado no servidor → 503; header `X-Internal-Token` ausente ou inválido → 401.
+O `pseudonym_id` deve ter exatamente 64 caracteres hexadecimais. CPFs enviados na URL são rejeitados com HTTP 422. `INTERNAL_API_TOKEN` não configurado no servidor → 503; header `X-Internal-Token` ausente ou inválido → 401 (e a linha `internal.auth_failed` no stdout, ver [`m4-auditoria-governanca.md`](m4-auditoria-governanca.md) §5.4).
 
 ```mermaid
 sequenceDiagram
@@ -142,7 +177,21 @@ Segunda chamada ao mesmo `pseudonym_id`:
 
 O evento `erasure.completed` ainda é registrado com contagens zero, para rastreabilidade.
 
-### 4.2 O que NÃO é feito neste endpoint
+### 4.2 Acesso e portabilidade (LGPD Art. 18 II, V e VII)
+
+```
+POST /internal/subject/export
+X-Internal-Token: ***
+
+{"cpf": "..."}            ← todas as versões da chave
+{"pseudonym_id": "<hex>"} ← um pseudônimo
+```
+
+Devolve, por pseudônimo: consentimentos, snapshots, decisões (simulações e recomendações, com o texto gerado pelo modelo, que serve de explicação da decisão automatizada), metadados do cofre (existe, `created_at`, `key_version`, `shredded_at`; **nunca** o CPF cifrado nem a DEK), histórico de auditoria e um resumo de compartilhamentos (instituições Open Finance autorizadas, número de consultas ao Serasa, operadores). O resultado é JSON, legível por máquina (portabilidade).
+
+Cada exportação grava `subject.access_exported` (só contagens) **antes** de devolver os dados; sem trilha, `503 AUDIT_UNAVAILABLE` e nada é devolvido. Código: [`src/privacy/subject_access.py`](../src/privacy/subject_access.py).
+
+### 4.3 O que NÃO é feito neste endpoint
 
 - **Revogação do token OAuth**: responsabilidade do M1 (`DELETE /consent/{id}` → IBM API Connect). O endpoint `/internal/erase` revoga o *consentimento* no banco, mas não invalida tokens OAuth diretamente.
 
@@ -164,7 +213,7 @@ O prazo está previsto no Art. 19, II da LGPD e referenciado em [`docs/m1-consen
 | `financial_snapshots` | `by-pseudonym` (M2, campos: `[pseudonym_id, generated_at]`), `by-expiry` (M2, campo: `[expires_at]`) |
 | `decision_traces` | `by-pseudonym` (`[pseudonym_id]`) e `by-type-expires` (`[type, expires_at]`) — criados na Parte B |
 | `identity_vault` | Sem índice dedicado — busca por `{shredded_at: null}` (varredura) |
-| `audit_trail` | `by-pseudonym-recorded` (`[pseudonym_id, recorded_at]`), `by-event-recorded` (`[event_type, recorded_at]`) |
+| `audit_trail` | `by-pseudonym-recorded` (`[pseudonym_id, recorded_at]`), `by-event-recorded` (`[event_type, recorded_at]`), `by-recorded` (`[recorded_at]`, regra f) |
 
 Os índices são criados/verificados por `ensure_indexes()` em [`src/privacy/retention_store.py`](../src/privacy/retention_store.py), idempotente. O banco `decision_traces` é criado automaticamente por `ensure_databases()` se não existir.
 
@@ -178,7 +227,9 @@ Os índices são criados/verificados por `ensure_indexes()` em [`src/privacy/ret
 |---|---|
 | Job de retenção | [`src/privacy/retention.py`](../src/privacy/retention.py) |
 | Store de retenção (repositórios) | [`src/privacy/retention_store.py`](../src/privacy/retention_store.py) |
-| Apagamento | [`src/privacy/erasure.py`](../src/privacy/erasure.py) |
+| Apagamento (por pseudônimo e por CPF) | [`src/privacy/erasure.py`](../src/privacy/erasure.py) |
+| Exportação do titular | [`src/privacy/subject_access.py`](../src/privacy/subject_access.py) |
+| Agendador do job | [`src/privacy/retention_scheduler.py`](../src/privacy/retention_scheduler.py) |
 | Cofre (crypto-shredding) | [`src/privacy/identity_vault.py`](../src/privacy/identity_vault.py) |
 | Endpoints internos | [`src/api/routers/internal.py`](../src/api/routers/internal.py) |
 | Ciclo de vida do consentimento | [`docs/m1-consent-lifecycle.md`](m1-consent-lifecycle.md) |

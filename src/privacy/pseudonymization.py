@@ -126,6 +126,42 @@ def pseudonymize_cpf_with_version(cpf: str) -> tuple[str, str]:
     return _hmac_hex(key, f"cpf:{normalize_cpf(cpf)}"), version
 
 
+def pseudonym_key_versions() -> list[str]:
+    """
+    Todas as versões da chave de pseudonimização conhecidas pelo provider
+    (ativa incluída). Providers sem list_versions → só a ativa.
+    """
+    provider = _get_provider()
+    lister = getattr(provider, "list_versions", None)
+    versions = list(lister("pseudonym")) if callable(lister) else []
+    active = _active_version()
+    if active not in versions:
+        versions.append(active)
+    return versions
+
+
+def pseudonymize_cpf_all_versions(cpf: str) -> list[tuple[str, str]]:
+    """
+    Retorna [(pseudonym_id, key_version), ...] do CPF em todas as versões
+    de chave disponíveis, sem duplicatas.
+
+    Uso: atender pedido do titular (apagamento/exportação). Depois de uma
+    rotação, o mesmo CPF tem um pseudonym_id por versão; apagar só o da versão
+    ativa deixaria para trás os dados emitidos com as anteriores.
+    Versões cuja chave não pode ser lida levantam PseudonymizationKeyError
+    (fail closed: melhor abortar do que apagar parcialmente sem aviso).
+    """
+    normalized = normalize_cpf(cpf)
+    result: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for version in pseudonym_key_versions():
+        pid = _hmac_hex(_master_key_cached(version), f"cpf:{normalized}")
+        if pid not in seen:
+            seen.add(pid)
+            result.append((pid, version))
+    return result
+
+
 def pseudonymize_contract(institution: str, contract_id: str) -> str:
     """
     Referência opaca e estável de um contrato. Permite correlacionar o mesmo

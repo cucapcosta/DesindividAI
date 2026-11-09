@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import secrets
 from typing import Literal, Protocol
 
@@ -49,6 +50,10 @@ class KeyProvider(Protocol):
         Lança `KeyProviderError` se a chave não puder ser obtida.
         """
         ...  # pragma: no cover
+
+    # Opcional: list_versions(purpose) -> list[str]. Usado pelo apagamento por
+    # CPF para cobrir pseudônimos emitidos por versões antigas da chave.
+    # Providers sem o método são tratados como tendo só a versão ativa.
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +99,29 @@ class EnvKeyProvider:
             return "PSEUDONYM_HMAC_KEY" if version == "v1" else f"PSEUDONYM_HMAC_KEY_{version.upper()}"
         # vault_kek
         return f"VAULT_KEK_{version.upper()}"
+
+    def list_versions(self, purpose: Purpose) -> list[str]:
+        """
+        Versões com chave configurada no ambiente, mais a ativa, em ordem
+        numérica (v1, v2, ...). Não lê nem valida o conteúdo das chaves.
+        """
+        if purpose == "pseudonym":
+            pattern = re.compile(r"^PSEUDONYM_HMAC_KEY_V(\d+)$")
+            versions = {"v1"} if os.getenv("PSEUDONYM_HMAC_KEY") else set()
+        else:
+            pattern = re.compile(r"^VAULT_KEK_V(\d+)$")
+            versions = set()
+        for name, value in os.environ.items():
+            match = pattern.match(name)
+            if match and value:
+                versions.add(f"v{int(match.group(1))}")
+        versions.add(self._active_version(purpose))
+
+        def _order(v: str) -> tuple[int, str]:
+            digits = v[1:] if v.lower().startswith("v") else ""
+            return (int(digits), v) if digits.isdigit() else (10**9, v)
+
+        return sorted(versions, key=_order)
 
     def get(self, purpose: Purpose, version: str | None = None) -> tuple[str, bytes]:
         resolved = version or self._active_version(purpose)

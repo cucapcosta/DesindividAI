@@ -12,6 +12,12 @@ erase_subject() implementa o passo 3c do M1 (docs/m1-consent-lifecycle.md):
 Idempotente: segunda chamada retorna contagens zero.
 Nunca loga CPF.
 
+Pedido por CPF (erase_subject_by_cpf):
+  O titular informa o CPF, não o pseudonym_id. Depois de uma rotação da chave
+  de pseudonimização o mesmo CPF tem um pseudonym_id por versão; o apagamento
+  roda erase_subject() para cada um. O CPF só é usado em memória para calcular
+  os pseudônimos; nunca é logado, auditado ou devolvido.
+
 Falha de auditoria:
   - Se o evento (a) falhar (AuditWriteError) → propagar; nada é apagado.
   - Se o evento (e) falhar → apagamento já realizado; ErasureReport.completion_audited=False.
@@ -121,3 +127,67 @@ def erase_subject(
         trace_id=trace_id,
         completion_audited=completion_audited,
     )
+
+
+@dataclass
+class SubjectErasure:
+    key_version: str
+    pseudonym_id: str
+    report: ErasureReport
+
+
+@dataclass
+class CpfErasureReport:
+    subjects: list[SubjectErasure] = field(default_factory=list)
+
+    @property
+    def totals(self) -> dict:
+        return {
+            "consents_revoked": sum(s.report.consents_revoked for s in self.subjects),
+            "snapshots_deleted": sum(s.report.snapshots_deleted for s in self.subjects),
+            "decisions_deleted": sum(s.report.decisions_deleted for s in self.subjects),
+            "vault_shredded": sum(1 for s in self.subjects if s.report.vault_shredded),
+            "completion_audited": all(s.report.completion_audited for s in self.subjects),
+        }
+
+    def to_dict(self) -> dict:
+        from dataclasses import asdict
+
+        return {
+            "subjects": [
+                {"key_version": s.key_version, "pseudonym_id": s.pseudonym_id, **asdict(s.report)}
+                for s in self.subjects
+            ],
+            "totals": self.totals,
+        }
+
+
+def erase_subject_by_cpf(
+    cpf: str,
+    *,
+    store,
+    vault,
+    audit,
+    now: Optional[datetime] = None,
+) -> CpfErasureReport:
+    """
+    Apaga os dados do titular em TODAS as versões da chave de pseudonimização.
+
+    Levanta ValueError se o CPF não tiver 11 dígitos, PseudonymizationKeyError
+    se alguma versão de chave não puder ser lida (antes de apagar qualquer
+    coisa) e AuditWriteError se a auditoria inicial de algum pseudônimo falhar.
+    Nesse último caso os pseudônimos anteriores já foram apagados; como
+    erase_subject é idempotente, repetir o pedido completa o apagamento.
+    """
+    from src.privacy.pseudonymization import pseudonymize_cpf_all_versions
+
+    # Calcula todos os pseudônimos ANTES de apagar: falha de chave aborta tudo.
+    pseudonyms = pseudonymize_cpf_all_versions(cpf)
+
+    result = CpfErasureReport()
+    for pseudonym_id, key_version in pseudonyms:
+        report = erase_subject(pseudonym_id, store=store, vault=vault, audit=audit, now=now)
+        result.subjects.append(
+            SubjectErasure(key_version=key_version, pseudonym_id=pseudonym_id, report=report)
+        )
+    return result

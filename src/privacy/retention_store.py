@@ -74,6 +74,8 @@ class RetentionStore(Protocol):
     def iter_vault(self, selector: dict) -> Iterator[dict]: ...
     def iter_decisions(self, selector: dict) -> Iterator[dict]: ...
     def delete_decision(self, doc: dict) -> None: ...
+    def iter_audit(self, selector: dict) -> Iterator[dict]: ...
+    def delete_audit(self, doc: dict) -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +90,7 @@ class InMemoryRetentionStore:
     snapshots: lista de dicts com pelo menos snapshot_id e _id.
     vault:     lista de dicts com _id = pseudonym_id.
     decisions: lista de dicts com _id, type, pseudonym_id, expires_at.
+    audit:     lista de dicts do audit_trail (_id = trace_id, recorded_at).
     """
 
     def __init__(
@@ -96,12 +99,14 @@ class InMemoryRetentionStore:
         snapshots: list[dict] | None = None,
         vault: list[dict] | None = None,
         decisions: list[dict] | None = None,
+        audit: list[dict] | None = None,
     ) -> None:
         # keyed by _id
         self._consents: dict[str, dict] = {}
         self._snapshots: dict[str, dict] = {}
         self._vault: dict[str, dict] = {}
         self._decisions: dict[str, dict] = {}
+        self._audit: dict[str, dict] = {}
 
         for c in consents or []:
             key = c.get("_id") or c.get("consent_id", "")
@@ -118,6 +123,9 @@ class InMemoryRetentionStore:
         for d in decisions or []:
             key = d["_id"]
             self._decisions[key] = dict(d)
+
+        for a in audit or []:
+            self._audit[a["_id"]] = dict(a)
 
     # -- consents --
 
@@ -163,16 +171,29 @@ class InMemoryRetentionStore:
         key = doc.get("_id", "")
         self._decisions.pop(key, None)
 
+    # -- audit_trail (só expurgo por prazo; ver regra f em retention.py) --
+
+    def iter_audit(self, selector: dict) -> Iterator[dict]:
+        for doc in list(self._audit.values()):
+            if _matches(doc, selector):
+                yield dict(doc)
+
+    def delete_audit(self, doc: dict) -> None:
+        self._audit.pop(doc.get("_id", ""), None)
+
 
 def _matches(doc: dict, selector: dict) -> bool:
-    """Filtragem simples equivalente ao Mango $eq e $in."""
+    """Filtragem simples equivalente ao Mango $eq, $in e $lt."""
     for key, value in selector.items():
         if isinstance(value, dict):
             # Operadores Mango simples
             if "$in" in value:
                 if doc.get(key) not in value["$in"]:
                     return False
-            # Outros operadores podem ser adicionados aqui
+            if "$lt" in value:
+                current = doc.get(key)
+                if current is None or not current < value["$lt"]:
+                    return False
         elif value is None:
             if doc.get(key) is not None:
                 return False
@@ -199,6 +220,7 @@ class CloudantRetentionStore:
       CLOUDANT_DB_SNAPSHOTS  (padrão "financial_snapshots")
       CLOUDANT_DB_IDENTITY_VAULT (padrão "identity_vault")
       CLOUDANT_DB_DECISIONS  (padrão "decision_traces")
+      CLOUDANT_DB_AUDIT      (padrão "audit_trail") — só expurgo por prazo
     """
 
     def __init__(
@@ -208,8 +230,10 @@ class CloudantRetentionStore:
         snapshots_db: str = "financial_snapshots",
         vault_db: str = "identity_vault",
         decisions_db: str = "decision_traces",
+        audit_db: str = "audit_trail",
     ) -> None:
         self._client = client
+        self._audit_db = audit_db
         self._consents_db = consents_db
         self._snapshots_db = snapshots_db
         self._vault_db = vault_db
@@ -297,6 +321,14 @@ class CloudantRetentionStore:
     def delete_decision(self, doc: dict) -> None:
         self._delete_doc(self._decisions_db, doc)
 
+    # -- audit_trail --
+
+    def iter_audit(self, selector: dict) -> Iterator[dict]:
+        return self._iter_db(self._audit_db, selector)
+
+    def delete_audit(self, doc: dict) -> None:
+        self._delete_doc(self._audit_db, doc)
+
 
 # ---------------------------------------------------------------------------
 # ensure_databases / ensure_indexes
@@ -339,6 +371,7 @@ def ensure_indexes(client) -> None:
         (_consents, ["pseudonym_id", "status"], "by-pseudonym-status"),
         (_audit, ["pseudonym_id", "recorded_at"], "by-pseudonym-recorded"),
         (_audit, ["event_type", "recorded_at"], "by-event-recorded"),
+        (_audit, ["recorded_at"], "by-recorded"),
         (decisions_db, ["pseudonym_id"], "by-pseudonym"),
         (decisions_db, ["type", "expires_at"], "by-type-expires"),
     ]
@@ -366,7 +399,7 @@ def get_retention_store() -> RetentionStore:
     Requer CLOUDANT_URL e CLOUDANT_APIKEY.
     """
     from src.core.cloudant import build_cloudant_client
-    from src.core.config import ConfigurationError, consents_db, snapshots_db, vault_db
+    from src.core.config import ConfigurationError, audit_db, consents_db, snapshots_db, vault_db
 
     try:
         client = build_cloudant_client()
@@ -380,4 +413,5 @@ def get_retention_store() -> RetentionStore:
         snapshots_db=snapshots_db(),
         vault_db=vault_db(),
         decisions_db=_decisions_db(),
+        audit_db=audit_db(),
     )

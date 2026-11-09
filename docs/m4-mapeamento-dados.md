@@ -144,7 +144,7 @@ Campos registrados por `record_trace` em [`src/services/governance.py`](../src/s
 | `actor` | Sistema ou papel que originou o evento | Ex.: `"agent1"`, `"retention"`, `"internal_api"` |
 | Campos adicionais | Contexto do evento (ex.: `consent_id`, `snapshot_id`) | Passam pela guarda de PII antes de gravar |
 
-> O `audit_trail` **nunca é expurgado** pelo job de retenção.
+> O `audit_trail` **não é expurgado por padrão**. Com `AUDIT_RETENTION_DAYS` definido, a regra f do job de retenção apaga eventos mais antigos que o prazo. Enquanto existir, a trilha é dado pessoal pseudonimizado (o `pseudonym_id` é recalculável a partir do CPF com a chave HMAC), inclusive depois do apagamento do titular.
 
 ---
 
@@ -154,6 +154,11 @@ Definidos em [`src/privacy/audit.py`](../src/privacy/audit.py) na constante `_AL
 
 | Evento | Quando ocorre | Parte |
 |---|---|---|
+| `consent.created` | Consentimento criado em `POST /consent` | M1 |
+| `consent.authorised` | Callback de autorização aprovado pelo titular | M1 |
+| `consent.rejected` | Autorização negada, prazo expirado ou cancelamento antes de autorizar | M1 |
+| `consent.revoked` | Revogação pelo titular de um consentimento `AUTHORISED` | M1 |
+| `subject.access_exported` | Exportação dos dados do titular (`POST /internal/subject/export`) | Revisão M4 |
 | `consent.expired` | Consentimento `AUTHORISED` com `expires_at` < agora (job de retenção) | A |
 | `consent.erasure_requested` | Início de `POST /internal/erase/{pseudonym_id}` | A |
 | `erasure.completed` | Conclusão bem-sucedida do apagamento | A |

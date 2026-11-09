@@ -15,6 +15,11 @@ gravado em seu lugar — o registro original nunca chega a nenhum destino.
 Falhas de gravação (Cloudant, COS, governance) são registradas como
 logger.error estruturado (event_type, trace_id, destino, tipo da exceção).
 
+Todo evento (já sanitizado) também sai como uma linha JSON no stdout pelo
+logger `desendividai.audit` (ver _emit_log_line). É o sinal para alertas de
+acesso anômalo sobre `event_type` em um pipeline de logs (IBM Cloud Logs em
+produção). Esse log NÃO conta como destino persistido.
+
 Se pelo menos um destino persistir com sucesso, record_event retorna o trace_id.
 Se NENHUM destino persistir (Cloudant e COS ambos falharam), _dispatch levanta
 AuditWriteError. O fluxo chamador é responsável por tratar esse erro conforme
@@ -62,6 +67,68 @@ class AuditWriteError(RuntimeError):
 
 logger = logging.getLogger(__name__)
 
+# Logger dos eventos de auditoria em JSON (uma linha por evento, sem PII).
+AUDIT_EVENT_LOGGER_NAME = "desendividai.audit"
+_LOG_LINE_EXCLUDED_FIELDS: frozenset[str] = frozenset({"_id", "_rev", "type"})
+
+
+def _get_event_logger() -> logging.Logger:
+    """Logger `desendividai.audit` com um StreamHandler(stdout) próprio.
+
+    propagate=False para a linha não sair duplicada pelo root logger. O
+    handler é adicionado uma vez só, mesmo com reimportação do módulo.
+    """
+    import sys
+
+    event_logger = logging.getLogger(AUDIT_EVENT_LOGGER_NAME)
+    if not any(getattr(h, "_desendividai_audit", False) for h in event_logger.handlers):
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        handler._desendividai_audit = True  # type: ignore[attr-defined]
+        event_logger.addHandler(handler)
+    event_logger.setLevel(logging.INFO)
+    event_logger.propagate = False
+    return event_logger
+
+
+_event_logger = _get_event_logger()
+
+
+def emit_security_event(event_type: str, **fields) -> None:
+    """
+    Emite um evento de segurança SÓ como linha JSON no stdout (não persiste).
+
+    Para sinais de alto volume e sem titular, como falhas de autenticação no
+    /internal, que não devem encher o audit_trail. Os campos passam pela guarda
+    de PII; se violarem, a linha sai só com event_type e pii_blocked=true.
+    """
+    from src.core.clock import utcnow_iso
+
+    line = {"event_type": event_type, "recorded_at": utcnow_iso(), "persisted": False, **fields}
+    try:
+        assert_no_pii(line)
+    except PIIViolation:
+        line = {"event_type": event_type, "recorded_at": line["recorded_at"], "pii_blocked": True}
+    try:
+        _event_logger.info(json.dumps(line, ensure_ascii=False, default=str, sort_keys=True))
+    except Exception as exc:  # pragma: no cover - defensivo
+        logger.error(f"audit: falha ao emitir evento de segurança exc={type(exc).__name__}")
+
+
+def _emit_log_line(record: dict, persisted: int) -> None:
+    """Emite o evento como JSON no stdout. Falhas nunca propagam."""
+    try:
+        line = {k: v for k, v in record.items() if k not in _LOG_LINE_EXCLUDED_FIELDS}
+        line["audit_persisted"] = persisted
+        _event_logger.info(
+            json.dumps(line, ensure_ascii=False, default=str, sort_keys=True)
+        )
+    except Exception as exc:  # pragma: no cover - defensivo
+        logger.error(
+            f"audit: falha ao emitir log do evento exc={type(exc).__name__}",
+            extra={"exc_type": type(exc).__name__},
+        )
+
 # ---------------------------------------------------------------------------
 # Tipos de evento permitidos
 # ---------------------------------------------------------------------------
@@ -74,6 +141,7 @@ _ALLOWED_EVENT_TYPES: frozenset[str] = frozenset({
     "consent.expired",
     "consent.erasure_requested",
     "erasure.completed",
+    "subject.access_exported",
     "vault.reveal",
     "retention.run",
     "agent1.snapshot_persisted",
@@ -144,13 +212,25 @@ class CloudantAuditRepository:
             document=Document.from_dict(doc),
         )
 
+    _PAGE_SIZE = 200
+
     def find(self, selector: dict, limit: int = 25) -> list[dict]:
-        result = self._client.post_find(
-            db=self._db,
-            selector=selector,
-            limit=limit,
-        ).get_result()
-        return result.get("docs", [])
+        """post_find paginado por bookmark até `limit` documentos."""
+        docs: list[dict] = []
+        bookmark: Optional[str] = None
+        while len(docs) < limit:
+            page_size = min(self._PAGE_SIZE, limit - len(docs))
+            kwargs: dict = {"db": self._db, "selector": selector, "limit": page_size}
+            if bookmark:
+                kwargs["bookmark"] = bookmark
+            result = self._client.post_find(**kwargs).get_result()
+            page = result.get("docs", [])
+            docs.extend(page)
+            next_bookmark = result.get("bookmark")
+            if len(page) < page_size or not next_bookmark or next_bookmark == bookmark:
+                break
+            bookmark = next_bookmark
+        return docs[:limit]
 
 
 @lru_cache(maxsize=1)
@@ -405,6 +485,10 @@ class AuditLogger:
         self._dispatch(record)
         return trace_id
 
+    def find_events(self, selector: dict, limit: int = 1000) -> list[dict]:
+        """Consulta a trilha (Cloudant) — usado na exportação dos dados do titular."""
+        return self._repo.find(selector, limit=limit)
+
     def _dispatch(self, record: dict) -> None:
         """
         Envia o registro para todos os destinos; erros são logados.
@@ -468,6 +552,9 @@ class AuditLogger:
                     "exc_type": exc_type,
                 },
             )
+
+        # 4. Log JSON no stdout (não conta como destino persistido)
+        _emit_log_line(record, persisted)
 
         if persisted == 0:
             raise AuditWriteError(

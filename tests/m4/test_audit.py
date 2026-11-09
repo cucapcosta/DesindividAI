@@ -462,6 +462,10 @@ def test_vault_reveal_audit_on_failure(monkeypatch):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("event_type", [
+    "consent.created",
+    "consent.authorised",
+    "consent.rejected",
+    "consent.revoked",
     "consent.expired",
     "consent.erasure_requested",
     "erasure.completed",
@@ -627,3 +631,88 @@ def test_log_message_contains_context_fields(caplog):
     assert "exc=RuntimeError" in msg
     # trace_id deve estar presente (valor dinâmico, só verificar a chave)
     assert "trace_id=" in msg
+
+
+# ---------------------------------------------------------------------------
+# Review: evento sai como JSON no stdout (logger desendividai.audit)
+# ---------------------------------------------------------------------------
+
+def test_event_emitted_as_json_log_line(audit_log_lines):
+    al = _make_logger()
+    trace_id = al.record_event(
+        "vault.reveal", pseudonym_id="a" * 64, actor="agent1",
+        purpose="SERASA_QUERY", ok=False,
+    )
+    assert len(audit_log_lines) == 1
+    line = json.loads(audit_log_lines[0])
+    assert line["event_type"] == "vault.reveal"
+    assert line["trace_id"] == trace_id
+    assert line["ok"] is False and line["purpose"] == "SERASA_QUERY"
+    assert line["audit_persisted"] == 1
+    assert "_id" not in line and "type" not in line
+
+
+def test_json_log_line_never_contains_cpf(audit_log_lines):
+    al = _make_logger()
+    al.record_event("vault.reveal", pseudonym_id="cpf:x", actor="agent1",
+                    note="cpf 123.456.789-09")
+    assert len(audit_log_lines) == 1
+    line = json.loads(audit_log_lines[0])
+    assert line["event_type"] == "audit.pii_blocked"
+    assert "123.456.789-09" not in audit_log_lines[0]
+    assert "12345678909" not in audit_log_lines[0]
+
+
+def test_json_log_line_does_not_count_as_persisted(audit_log_lines):
+    from src.privacy.audit import AuditWriteError
+
+    class FailingRepo:
+        def put(self, doc):
+            raise RuntimeError("Cloudant offline")
+
+        def find(self, selector, limit=25):
+            return []
+
+    al = _make_logger(repo=FailingRepo())
+    with pytest.raises(AuditWriteError):
+        al.record_event("vault.reveal", pseudonym_id="cpf:x", actor="agent1", ok=True)
+    assert json.loads(audit_log_lines[0])["audit_persisted"] == 0
+
+
+def test_event_logger_writes_to_stdout_without_propagating():
+    import logging
+    import sys
+    from src.privacy.audit import AUDIT_EVENT_LOGGER_NAME, _get_event_logger
+
+    _get_event_logger()  # idempotente
+    event_logger = logging.getLogger(AUDIT_EVENT_LOGGER_NAME)
+    ours = [h for h in event_logger.handlers if getattr(h, "_desendividai_audit", False)]
+    assert len(ours) == 1
+    assert ours[0].stream is sys.stdout or ours[0].stream.name == "<stdout>"
+    assert event_logger.propagate is False
+
+
+def test_cloudant_audit_find_paginates_with_bookmark():
+    from src.privacy.audit import CloudantAuditRepository
+
+    pages = [
+        {"docs": [{"_id": f"a{i}"} for i in range(200)], "bookmark": "b1"},
+        {"docs": [{"_id": f"b{i}"} for i in range(50)], "bookmark": "b2"},
+    ]
+    client = MagicMock()
+    client.post_find.return_value.get_result.side_effect = pages
+    docs = CloudantAuditRepository(client).find({"pseudonym_id": "p"}, limit=1000)
+    assert len(docs) == 250
+    calls = client.post_find.call_args_list
+    assert [c.kwargs["limit"] for c in calls] == [200, 200]
+    assert "bookmark" not in calls[0].kwargs and calls[1].kwargs["bookmark"] == "b1"
+
+
+def test_cloudant_audit_find_respects_small_limit():
+    from src.privacy.audit import CloudantAuditRepository
+
+    client = MagicMock()
+    client.post_find.return_value.get_result.return_value = {"docs": [{"_id": "x"}], "bookmark": "z"}
+    assert CloudantAuditRepository(client).find({}, limit=1) == [{"_id": "x"}]
+    assert client.post_find.call_count == 1
+    assert client.post_find.call_args.kwargs["limit"] == 1
