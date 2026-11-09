@@ -13,7 +13,8 @@ import re
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
-from src.api.models import LanguageLevel
+from src.api.models import LanguageLevel, ProductType, ScenarioId
+from src.simulation.engine import format_brl
 
 # ---------------------------------------------------------------------------
 # parse_brl_amounts
@@ -260,6 +261,43 @@ def _round_to_milhar(val: float) -> int:
     return int(round(val / 1000.0)) * 1000
 
 
+# Códigos internos que nunca devem aparecer para o cliente: tipos de produto
+# (PAYROLL_LOAN...) e ids de cenário com underscore (minimum_viable).
+_INTERNAL_CODES = sorted(
+    {p.value for p in ProductType} | {s.value for s in ScenarioId if "_" in s.value}
+)
+_INTERNAL_CODE_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(c) for c in _INTERNAL_CODES) + r")\b", re.IGNORECASE
+)
+
+
+def has_internal_code(text: str) -> bool:
+    """True se o texto expõe um código interno (ex.: PAYROLL_LOAN, minimum_viable)."""
+    return bool(_INTERNAL_CODE_RE.search(text))
+
+
+def normalize_brl(text: str) -> str:
+    """
+    Reescreve valores em R$ para o padrão brasileiro (R$ 3.000,00).
+
+    Corrige "R$ 3000,00" e "R$ 3000.00" que o LLM copia de fontes sem separador de milhar.
+    Valores com sufixo ("R$ 50 mil", "R$ 2 milhões") e os que não convertem ficam como estão.
+    """
+    def _replace(m: "re.Match[str]") -> str:
+        if m.group(4):
+            return m.group(0)
+        try:
+            value = _parse_number(m.group(3))
+        except ValueError:
+            return m.group(0)
+        matched = m.group(0)
+        leading_ws = matched[: len(matched) - len(matched.lstrip())]
+        negative = bool(m.group(1) or m.group(2))
+        return leading_ws + format_brl(-value if negative else value)
+
+    return _BRL_RE.sub(_replace, text)
+
+
 def explanation_issues(
     text: str,
     facts_json: str,
@@ -273,6 +311,7 @@ def explanation_issues(
     Códigos possíveis:
       "UNGROUNDED_AMOUNT"            — valor R$ no texto não está nos FATOS (±tolerance).
       "SAVINGS_CLAIM_BELOW_MINIMUMS" — afirmação positiva de economia quando budget_below=True.
+      "INTERNAL_CODE_LEAK"           — código interno (PAYROLL_LOAN, minimum_viable...) no texto.
     """
     issues: list[str] = []
     grounded = grounded_amounts(facts_json)
@@ -295,6 +334,9 @@ def explanation_issues(
     if budget_below and _is_savings_claim(text):
         issues.append("SAVINGS_CLAIM_BELOW_MINIMUMS")
 
+    if has_internal_code(text):
+        issues.append("INTERNAL_CODE_LEAK")
+
     return issues
 
 
@@ -311,20 +353,8 @@ _CONSOLIDATION_IDS = {"consolidation"}
 
 
 def _fmt_brl(value: float) -> str:
-    """Formata float para R$ 1.234,56 (ou -R$ 1.234,56 para negativos).
-
-    Usa Decimal com ROUND_HALF_UP para arredondamento correto (ex: 0,005 → 0,01).
-    """
-    quantized = Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    negative = quantized < 0
-    abs_val = abs(quantized)
-    # Separar parte inteira e centavos
-    int_part = int(abs_val)
-    cents = int(abs_val * 100) % 100
-    # Formatar parte inteira com separador de milhar (ponto)
-    int_str = f"{int_part:,}".replace(",", ".")
-    brl = f"R$ {int_str},{cents:02d}"
-    return f"-{brl}" if negative else brl
+    """Formata float para R$ 1.234,56 (ou -R$ 1.234,56 para negativos). Ver `format_brl` no motor."""
+    return format_brl(value)
 
 
 def _fmt_prazo(prazo: int) -> str:

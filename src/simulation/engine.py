@@ -30,6 +30,7 @@ from __future__ import annotations
 import math
 import uuid
 from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Callable, Optional
 
 MAX_MONTHS = 600
@@ -40,6 +41,14 @@ ASSUMED_MIN_PRINCIPAL_PCT = 0.01
 DEFAULT_TERM_MONTHS = 36
 DIVERGENCE_FACTOR = 10.0
 CONSOLIDATED_DEBT_ID = str(uuid.uuid5(uuid.NAMESPACE_URL, "desendividai:bb-consolidation"))
+
+
+def format_brl(value: float) -> str:
+    """Formata em reais no padrão brasileiro: R$ 1.234,56 (negativo: -R$ 1.234,56)."""
+    cents = int((abs(Decimal(str(value))) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    negative = value < 0 and cents > 0
+    brl = f"R$ {cents // 100:,}".replace(",", ".") + f",{cents % 100:02d}"
+    return f"-{brl}" if negative else brl
 
 
 def monthly_rate(cet_annual: float) -> float:
@@ -218,8 +227,8 @@ def simulate(debts: list[dict], monthly_budget: float, bb_cet_annual: Optional[f
         agg_m1 = agg_alloc(agg_loans)
         n_short = sum(1 for l in agg_loans if agg_m1.get(l.id, 0.0) < l.min_payment - EPS)
         budget_warning = (
-            f" Atenção: o orçamento (R$ {monthly_budget:.2f}) é menor que a soma dos pagamentos mínimos"
-            f" (R$ {min_total:.2f}); {n_short} dívida(s) ficariam sem o pagamento mínimo no mês 1,"
+            f" Atenção: o orçamento ({format_brl(monthly_budget)}) é menor que a soma dos pagamentos mínimos"
+            f" ({format_brl(min_total)}); {n_short} dívida(s) ficariam sem o pagamento mínimo no mês 1,"
             f" o que significa atraso e encargos. Considere renegociar."
         )
 
@@ -233,7 +242,7 @@ def simulate(debts: list[dict], monthly_budget: float, bb_cet_annual: Optional[f
         c_desc = (
             f"Porta {len(ported)} dívida(s) com CET acima de {bb_cet:g}% a.a. para uma linha BB "
             f"a {bb_cet:g}% a.a. em {merged.installments} parcelas (parcela inicial "
-            f"R$ {merged.min_payment:.2f}); o excedente do orçamento antecipa a dívida de maior CET. "
+            f"{format_brl(merged.min_payment)}); o excedente do orçamento antecipa a dívida de maior CET. "
             "Taxa da linha BB é premissa, sujeita à aprovação de crédito."
         )
     else:

@@ -166,8 +166,8 @@ def test_budget_below_minimums_warns_in_all_three_scenarios():
     for sid in ("aggressive", "consolidation", "minimum_viable"):
         desc = scenarios[sid]["description"]
         assert "Atenção: o orçamento" in desc, f"Aviso ausente no cenário {sid}"
-        assert "R$ 1000.00" in desc
-        assert "R$ 1500.00" in desc
+        assert "R$ 1.000,00" in desc
+        assert "R$ 1.500,00" in desc
         assert "renegociar" in desc
 
 

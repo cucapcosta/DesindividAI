@@ -32,6 +32,25 @@ class ProductType(str, Enum):
     MORTGAGE = "MORTGAGE"
 
 
+# Nome em português de cada produto, para texto voltado ao cliente (nunca expor o código do enum).
+PRODUCT_LABELS_PT: dict[ProductType, str] = {
+    ProductType.CREDIT_CARD: "cartão de crédito",
+    ProductType.PERSONAL_LOAN: "empréstimo pessoal",
+    ProductType.PAYROLL_LOAN: "crédito consignado",
+    ProductType.OVERDRAFT: "cheque especial",
+    ProductType.VEHICLE_LOAN: "financiamento de veículo",
+    ProductType.MORTGAGE: "financiamento imobiliário",
+}
+
+
+def product_label_pt(value: object) -> str:
+    """Nome em português do produto; valor desconhecido vira 'dívida'."""
+    try:
+        return PRODUCT_LABELS_PT[ProductType(value)]
+    except ValueError:
+        return "dívida"
+
+
 class ScenarioId(str, Enum):
     AGGRESSIVE = "aggressive"
     CONSOLIDATION = "consolidation"

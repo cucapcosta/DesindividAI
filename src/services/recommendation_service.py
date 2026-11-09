@@ -9,13 +9,19 @@ from uuid import UUID, uuid4
 
 from langchain_core.runnables import Runnable
 
-from src.agents.explanation_guard import explanation_issues, fallback_explanation
+from src.agents.explanation_guard import explanation_issues, fallback_explanation, normalize_brl
 from src.agents.recommendation_agent import _CORRECTIVE_INSTRUCTIONS, build_chain
-from src.api.models import LanguageLevel, RecommendationResponse, ScenarioId, SimulationScenario
+from src.api.models import (
+    LanguageLevel,
+    RecommendationResponse,
+    ScenarioId,
+    SimulationScenario,
+    product_label_pt,
+)
 from src.core.errors import ServiceError
 from src.services.governance import record_trace
 from src.services.simulation_service import decisions_db, ensure_consent, load_snapshot, now_iso
-from src.simulation.engine import CONSOLIDATED_DEBT_ID, minimum_payments_total
+from src.simulation.engine import CONSOLIDATED_DEBT_ID, format_brl, minimum_payments_total
 from src.storage.store import DocumentStore
 
 logger = logging.getLogger(__name__)
@@ -30,7 +36,7 @@ def _safe_text(valor, limite: int = 40) -> str:
 
 def _first_steps(scenarios: list[SimulationScenario], debts: list[dict]):
     names = {
-        str(d["debt_id"]): f'{_safe_text(d["institution"])} ({_safe_text(d["product_type"])})'
+        str(d["debt_id"]): f'{_safe_text(d["institution"])} ({product_label_pt(d["product_type"])})'
         for d in debts
     }
     names[CONSOLIDATED_DEBT_ID] = "nova linha de consolidação BB"
@@ -40,7 +46,7 @@ def _first_steps(scenarios: list[SimulationScenario], debts: list[dict]):
         if not scenario.monthly_plan:
             return []
         return [
-            f"Mês 1: pagar R$ {p.amount:.2f} em {names.get(str(p.debt_id), 'dívida')}"
+            f"Mês 1: pagar {format_brl(p.amount)} em {names.get(str(p.debt_id), 'dívida')}"
             for p in scenario.monthly_plan[0].payments
         ]
 
@@ -89,6 +95,7 @@ async def create_recommendation(
         result = await build_chain(llm).ainvoke(chain_inputs)
     except Exception as exc:  # falha do provedor LLM
         raise ServiceError(503, "SERVICE_UNAVAILABLE", "Modelo de linguagem indisponível.") from exc
+    result["explanation"] = normalize_brl(result["explanation"])
 
     issues_1st = explanation_issues(
         result["explanation"],
@@ -118,6 +125,7 @@ async def create_recommendation(
         # Retry once with corrective instruction appended to prompt
         try:
             result2 = await build_chain(llm).ainvoke(retry_inputs)
+            result2["explanation"] = normalize_brl(result2["explanation"])
             issues_2nd = explanation_issues(
                 result2["explanation"],
                 result2["facts_json"],

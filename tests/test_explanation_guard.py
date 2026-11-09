@@ -67,8 +67,8 @@ def _make_facts(
         ]
     if primeiros_passos is None:
         # Formato real de _first_steps (src/services/recommendation_service.py):
-        # f"Mês 1: pagar R$ {p.amount:.2f} em <institution> (<product_type>)"
-        primeiros_passos = ["Mês 1: pagar R$ 1500.00 em itau (CREDIT_CARD)"]
+        # f"Mês 1: pagar R$ {p.amount:.2f} em <institution> (<produto em português>)"
+        primeiros_passos = ["Mês 1: pagar R$ 1500.00 em itau (cartão de crédito)"]
 
     return json.dumps(
         {
@@ -102,7 +102,7 @@ def _make_facts_with_savings() -> str:
                     "economia_vs_pagar_so_o_minimo": 49336.69,
                 },
             ],
-            "primeiros_passos": ["Mês 1: pagar R$ 1200.00 em bb (PERSONAL_LOAN)"],
+            "primeiros_passos": ["Mês 1: pagar R$ 1200.00 em bb (empréstimo pessoal)"],
         },
         ensure_ascii=False,
     )
@@ -645,7 +645,7 @@ class TestFallbackPrazoR22e:
                 "juros_totais": 5000.0,
                 "economia_vs_pagar_so_o_minimo": 1000.0,
             }],
-            "primeiros_passos": ["Mês 1: pagar R$ 594.43 em bb (PERSONAL_LOAN)"],
+            "primeiros_passos": ["Mês 1: pagar R$ 594.43 em bb (empréstimo pessoal)"],
         })
 
     def test_fallback_30_meses(self):
@@ -688,7 +688,7 @@ from src.agents.explanation_guard import _fmt_step  # noqa: E402
 class TestFmtStep:
     def test_no_missing_space_before_rs(self):
         """Garante que _fmt_step não consome o espaço antes de R$."""
-        step = "Mês 1: pagar R$ 594.43 em bb (PERSONAL_LOAN)"
+        step = "Mês 1: pagar R$ 594.43 em bb (empréstimo pessoal)"
         result = _fmt_step(step)
         assert "pagarR$" not in result, f"Espaço antes de R$ sumiu: {result!r}"
         assert "pagar R$ 594,43" in result, f"Valor esperado ausente: {result!r}"
@@ -701,3 +701,88 @@ class TestFmtStep:
         assert "R$ 4.275,85" in result, f"Valor formatado incorretamente: {result!r}"
 
 
+
+
+# ---------------------------------------------------------------------------
+# Issue #6 (itens 7, 8, 10): nomes em português, códigos internos e formato de valor
+# ---------------------------------------------------------------------------
+
+class TestProductLabels:
+    def test_every_product_type_has_portuguese_label(self):
+        from src.api.models import PRODUCT_LABELS_PT, ProductType
+
+        assert set(PRODUCT_LABELS_PT) == set(ProductType)
+        for label in PRODUCT_LABELS_PT.values():
+            assert label == label.lower() and "_" not in label
+
+    def test_payroll_loan_is_consignado(self):
+        from src.api.models import product_label_pt
+
+        assert product_label_pt("PAYROLL_LOAN") == "crédito consignado"
+        assert product_label_pt("NAO_EXISTE") == "dívida"
+
+    def test_first_steps_use_label_not_enum_code(self):
+        from src.api.models import ScenarioId, SimulationScenario
+        from src.services.recommendation_service import _first_steps
+
+        debts = [{"debt_id": "aaaaaaaa-0000-0000-0000-000000000009", "institution": "bb", "product_type": "PAYROLL_LOAN"}]
+        scenario = SimulationScenario(
+            scenario_id=ScenarioId.AGGRESSIVE, label="Agressivo", description="d",
+            total_months=1, total_interest_paid=0.0, total_savings_vs_minimum=0.0,
+            monthly_plan=[{"month": 1, "payments": [{"debt_id": "aaaaaaaa-0000-0000-0000-000000000009", "amount": 1350.6}]}],
+        )
+        steps = _first_steps([scenario], debts)(ScenarioId.AGGRESSIVE)
+        assert steps == ["Mês 1: pagar R$ 1.350,60 em bb (crédito consignado)"]
+
+
+class TestInternalCodeLeak:
+    @pytest.mark.parametrize("text", [
+        "Pagar no financiamento de carro (PAYROLL_LOAN).",
+        "Quite o VEHICLE_LOAN primeiro.",
+        "O plano minimum_viable é o mais barato.",
+        "cartão credit_card em atraso",
+    ])
+    def test_detects_codes(self, text):
+        assert "INTERNAL_CODE_LEAK" in explanation_issues(text, "{}", budget_below=False)
+
+    @pytest.mark.parametrize("text", [
+        "Pagar no crédito consignado. O plano de consolidação é o recomendado.",
+        "O cenário mínimo viável quita em 12 meses.",
+    ])
+    def test_plain_text_is_clean(self, text):
+        assert "INTERNAL_CODE_LEAK" not in explanation_issues(text, "{}", budget_below=False)
+
+    def test_retry_has_corrective_instruction(self):
+        from src.agents.recommendation_agent import _CORRECTIVE_INSTRUCTIONS
+
+        assert "INTERNAL_CODE_LEAK" in _CORRECTIVE_INSTRUCTIONS
+
+
+class TestBrlFormatting:
+    @pytest.mark.parametrize("value,expected", [
+        (3000, "R$ 3.000,00"), (1350.6, "R$ 1.350,60"), (0.005, "R$ 0,01"),
+        (594.43, "R$ 594,43"), (1234567.891, "R$ 1.234.567,89"), (-2569.21, "-R$ 2.569,21"),
+    ])
+    def test_format_brl(self, value, expected):
+        from src.simulation.engine import format_brl
+
+        assert format_brl(value) == expected
+
+    @pytest.mark.parametrize("text,expected", [
+        ("orçamento de R$ 3000,00", "orçamento de R$ 3.000,00"),
+        ("pagar R$ 1350.60 hoje", "pagar R$ 1.350,60 hoje"),
+        ("já correto: R$ 1.234,56.", "já correto: R$ 1.234,56."),
+        ("são R$ 50 mil no total", "são R$ 50 mil no total"),
+        ("custa R$ 2 milhões", "custa R$ 2 milhões"),
+        ("sem valores aqui", "sem valores aqui"),
+    ])
+    def test_normalize_brl(self, text, expected):
+        from src.agents.explanation_guard import normalize_brl
+
+        assert normalize_brl(text) == expected
+
+    def test_normalized_text_keeps_amounts_grounded(self):
+        from src.agents.explanation_guard import normalize_brl
+
+        facts = json.dumps({"soma_dos_minimos": 3000.0, "cenarios": []})
+        assert explanation_issues(normalize_brl("mínimos de R$ 3000,00"), facts, budget_below=False) == []

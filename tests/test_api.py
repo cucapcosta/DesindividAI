@@ -526,3 +526,51 @@ def test_retry_provider_failure_fallback_and_retry_error_in_trace(store_with_sna
     finally:
         app.dependency_overrides.clear()
 
+
+
+def test_recommendation_normalizes_money_format_and_traces_it(store_with_snapshot):
+    """Issue #6 item 10: o LLM escreve 'R$ 1200,00'; o cliente recebe 'R$ 1.200,00'."""
+    from fastapi.testclient import TestClient
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+    from src.agents.recommendation_agent import get_llm
+    from src.main import app
+    from src.storage.store import get_store
+
+    store = store_with_snapshot
+    app.dependency_overrides[get_store] = lambda: store
+    app.dependency_overrides[get_llm] = lambda: FakeListChatModel(
+        responses=["Seus pagamentos mínimos somam R$ 1200,00 por mês."]
+    )
+    try:
+        client = TestClient(app)
+        sim = _simulate_high_budget(client).json()
+        # o valor precisa estar nos FATOS para não ser recusado pela guarda
+        body = client.post("/recommendation", json={"simulation_id": sim["simulation_id"]}).json()
+        assert "R$ 3000,00" not in body["explanation"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_recommendation_retries_on_internal_code_leak(store_with_snapshot):
+    """Issue #6 itens 7/8: código interno no texto → retry; depois entrega o texto limpo."""
+    from fastapi.testclient import TestClient
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+    from src.agents.recommendation_agent import get_llm
+    from src.main import app
+    from src.storage.store import get_store
+
+    store = store_with_snapshot
+    app.dependency_overrides[get_store] = lambda: store
+    app.dependency_overrides[get_llm] = lambda: FakeListChatModel(
+        responses=["Pague o financiamento de carro (VEHICLE_LOAN).", "Pague o financiamento de veículo."]
+    )
+    try:
+        client = TestClient(app)
+        sim = _simulate_high_budget(client).json()
+        body = client.post("/recommendation", json={"simulation_id": sim["simulation_id"]}).json()
+        assert body["explanation"] == "Pague o financiamento de veículo."
+        trace = asyncio.run(store.get(decisions_db(), body["trace_id"]))
+        assert trace["explanation_source"] == "llm_retry"
+        assert "INTERNAL_CODE_LEAK" in trace["guard_issues"]
+    finally:
+        app.dependency_overrides.clear()
