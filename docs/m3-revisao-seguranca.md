@@ -27,7 +27,7 @@ escopo fechado e validadas com `pytest` (20 passam) e com o smoke test na cloud 
 - **Sem autenticação e sem checagem de dono (IDOR) nos endpoints.** Por desenho do PLANO, OAuth2/FAPI é responsabilidade do IBM API Connect
   (ver `docs/m1-api-connect-policies.md`). O M3 não valida o token; o gateway precisa ser a única entrada. Ao ligar o gateway, vincular
   `snapshot_id`/`simulation_id` ao titular do token.
-- **`REQUIRE_CONSENT=false` por padrão**, porque o `/consent` do M1 ainda não persiste consentimentos. Ligar quando o M1 estiver pronto.
+- **`REQUIRE_CONSENT=true` por padrão** (desde o M1): `/simulation` e `/recommendation` exigem o consentimento do snapshot; `false` só para demonstração com snapshots sem consentimento.
 - **O trace ainda guarda o prompt completo**, necessário para auditoria. A proteção é a separação de banco; criptografia em repouso e política
   de retenção ficam com a Sub-Tarefa 4 (M4).
   **Resolvido pelo M4 (Parte B):** o trace **continua guardando** o texto completo de `prompt` e `output` — necessário para auditoria e explicabilidade. Os campos `prompt_sha256`/`output_sha256` são **adicionais** e servem para verificação de integridade e para correlacionar o evento de auditoria (que carrega apenas os hashes) com o trace. Nada é descartado. A proteção do texto se dá por: banco separado (`decision_traces`), guarda de PII antes do `put` (o prompt contém apenas fatos financeiros pseudonimizados), retenção a2 e apagamento via `/internal/erase` (campo `decisions_deleted`).

@@ -14,7 +14,7 @@ Configuração do provedor OAuth nativo no API Connect (Cloud Manager → Resour
 | Parâmetro | Valor | Justificativa |
 |---|---|---|
 | Type | Native | API Connect gerencia tokens internamente (DataPower) |
-| Grant types | `authorization_code` | FAPI proíbe implicit; client_credentials apenas para microserviços internos do cliente |
+| Grant types | `authorization_code` (titular) e `client_credentials` (canal) | FAPI proíbe implicit. O canal usa client credentials para criar, consultar e revogar consentimentos (`consent:*`), porque o titular só tem token depois de autorizar. O titular usa authorization code + PKCE para os dados (`debts:read`, `simulation:read`, `recommendation:read`) |
 | PKCE | Obrigatório (`S256`) | Requisito FAPI 1.0 Advanced |
 | Access token TTL | 900s (15 min) | Curta duração — dados financeiros sensíveis |
 | Refresh token TTL | 7.776.000s (90 dias) | Alinhado ao TTL padrão de consentimento Open Finance |
@@ -22,7 +22,7 @@ Configuração do provedor OAuth nativo no API Connect (Cloud Manager → Resour
 | Token format | JWT (opaque não recomendado — requer introspection em cada chamada) | JWT permite validação local no gateway sem round-trip |
 | Token revocation | Native (DataPower) | Revogação síncrona via endpoint `/oauth/revoke` |
 | Introspection path | `/oauth/introspect` | RFC 7662 — expõe metadata do token para microserviços internos |
-| Scopes | `openid consent:write debts:read simulation:read recommendation:read` | Princípio do menor privilégio por endpoint |
+| Scopes | Canal: `consent:read consent:write`. Titular: `openid debts:read simulation:read recommendation:read` | Princípio do menor privilégio por endpoint e por tipo de cliente |
 
 ### Configuração de Tokens (`oauth_native_tokens_apim`)
 
@@ -32,8 +32,9 @@ token-management:
   access-token-ttl: 900
   refresh-token-ttl: 7776000
   maximum-consent-ttl: 31536000
-  token-secret:
-    type: hs256          # HMAC-SHA256 para assinatura do JWT interno
+  jwt-signing:
+    alg: PS256           # assinatura assimétrica exigida pelo FAPI 1.0 Advanced (PS256/ES256)
+    key: <crypto object JWK do API Connect>   # chave privada só no gateway; consumidores validam pelo JWKS
   refresh-token-rotation: true   # Emite novo refresh token a cada uso
 ```
 
@@ -44,11 +45,38 @@ token-management:
 Todas as APIs do DesendividAÍ usam o bloco `security` abaixo no YAML de cada API:
 
 ```yaml
+# Endpoints de dados (token do titular)
 security:
   - openfinance_oauth2:
       - openid
       - debts:read      # (substitua pelo scope do endpoint)
+
+# Endpoints de consentimento (token do canal)
+security:
+  - channel_oauth2:
+      - consent:write   # consent:read no GET /consent/{consentId}
 ```
+
+`GET /consent/callback` não exige token: é o retorno do Authorization Server, validado
+pelo `state` de uso único no backend.
+
+### Hackathon: validação do token do canal no backend
+
+Sem API Connect na conta, o backend valida o token do canal nas rotas de consentimento
+(`src/core/channel_auth.py`):
+
+| Item | Valor |
+|---|---|
+| Token | IAM do IBM Cloud, obtido pelo canal com a API key do Service ID dele (`POST https://iam.cloud.ibm.com/identity/token`) |
+| Assinatura | RS256, conferida pelas chaves públicas do IAM (`https://iam.cloud.ibm.com/identity/keys`, cache de 1 h; releitura por `kid` novo no máximo 1×/min) |
+| Claims | `iss = https://iam.cloud.ibm.com/identity`, `exp`, `iat`; `iam_id` ∈ `CHANNEL_IAM_IDS` |
+| Quando é exigido | Por padrão com `APP_ENV=production`; fora dela, com `REQUIRE_CHANNEL_AUTH=true` |
+| Falhas | `401 UNAUTHORIZED`; exigido sem `CHANNEL_IAM_IDS` → `503 NOT_CONFIGURED`; JWKS indisponível → `503 SERVICE_UNAVAILABLE` |
+
+Tokens IAM não carregam `consent:read`/`consent:write`: no hackathon, estar em
+`CHANNEL_IAM_IDS` equivale a ter os dois escopos. O token do titular (`openfinance_oauth2`)
+continua dependendo de um Authorization Server, indisponível na conta. Quando o API Connect
+existir, ele valida na borda e esta checagem vira defesa em profundidade.
 
 O API Connect valida o JWT Bearer token e os scopes **antes** de rotear para o backend.
 Requisições sem token ou com scope errado retornam `401 Unauthorized` ou `403 Forbidden`
@@ -86,7 +114,7 @@ plans:
 
 | Endpoint | Rate limit | Justificativa |
 |---|---|---|
-| `POST /consent` | 5/min por CPF | Previne criação abusiva de consentimentos |
+| `POST /consent` | 5/min por `client_id` do canal e 20/min por IP de origem | Previne criação abusiva sem o gateway ler o CPF do corpo (LGPD: o CPF só é tratado no backend) |
 | `GET /debts` | 10/min por consent_id | Chamada pesada — coleta OF + Serasa + Agente 1 |
 | `POST /simulation` | 20/min por snapshot_id | Motor de simulação Python — custo computacional médio |
 | `POST /recommendation` | 10/min por simulation_id | Granite LLM — custo por token |

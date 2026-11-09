@@ -12,9 +12,12 @@ Documentação interativa (gerada automaticamente pelo FastAPI):
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, status
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import http_exception_handler as _default_http_exception_handler
 from fastapi.exceptions import HTTPException as FastAPIHTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 
 load_dotenv()  # lê .env (na raiz do repo ou no cwd) antes de qualquer módulo consultar o ambiente
@@ -58,16 +61,36 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 # Routers
 # ---------------------------------------------------------------------------
-app.include_router(consent.router)       # M1 — POST /consent, DELETE /consent/{id}
+app.include_router(consent.router)       # M1 — POST /consent, GET/DELETE /consent/{id}
 app.include_router(debts.router)         # M2 — GET /debts
 app.include_router(simulation.router)    # M3 — POST /simulation
 app.include_router(recommendation.router)  # M3 — POST /recommendation
 app.include_router(internal.router)      # M4 — POST /internal/erase, POST /internal/retention/run
 
 # ---------------------------------------------------------------------------
-# Handler global para NotImplementedError
-# Retorna 501 enquanto os times não implementam os endpoints
+# Handlers de exceção
 # ---------------------------------------------------------------------------
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    """
+    Para rotas /consent*: devolve 400 INVALID_REQUEST listando só os nomes dos campos
+    inválidos (sem ecoar o valor — LGPD). Para outras rotas mantém o comportamento padrão
+    do FastAPI (422 com detalhe completo), preservando o contrato de M2/M3.
+    """
+    if request.url.path == "/consent" or request.url.path.startswith("/consent/"):
+        if any(err.get("type") == "json_invalid" for err in exc.errors()):
+            message = "JSON inválido."
+        else:
+            fields = [".".join(str(loc) for loc in err.get("loc", [])) for err in exc.errors()]
+            message = f"Campos inválidos: {', '.join(fields)}"
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content=ErrorResponse(code="INVALID_REQUEST", message=message).model_dump(mode="json"),
+        )
+    return await request_validation_exception_handler(request, exc)
+
+
 @app.exception_handler(ServiceError)
 async def service_error_handler(request: Request, exc: ServiceError):
     return JSONResponse(
@@ -85,6 +108,24 @@ async def not_implemented_handler(request: Request, exc: NotImplementedError):
             message=f"Endpoint {request.method} {request.url.path} ainda não implementado.",
         ).model_dump(),
     )
+
+
+# ---------------------------------------------------------------------------
+# OpenAPI: /consent* nunca responde 422 (o handler acima converte em 400)
+# ---------------------------------------------------------------------------
+def _openapi() -> dict:
+    if app.openapi_schema is None:
+        schema = get_openapi(title=app.title, version=app.version,
+                             description=app.description, routes=app.routes)
+        for path, path_item in schema["paths"].items():
+            if path == "/consent" or path.startswith("/consent/"):
+                for operation in path_item.values():
+                    operation["responses"].pop("422", None)
+        app.openapi_schema = schema
+    return app.openapi_schema
+
+
+app.openapi = _openapi  # type: ignore[method-assign]
 
 
 # ---------------------------------------------------------------------------

@@ -68,7 +68,7 @@ Se o orçamento não cobre os mínimos, estes são pagos em ordem decrescente de
 
 ## Consentimento
 
-Com `REQUIRE_CONSENT=true`, `/simulation` e `/recommendation` aplicam a mesma regra do `GET /debts` sobre o
+Por padrão (`REQUIRE_CONSENT=true`; `false` só para demonstração), `/simulation` e `/recommendation` aplicam a mesma regra do `GET /debts` sobre o
 consentimento **do próprio snapshot** (`consent_id`, gravado pelo Agente 1): `AUTHORISED`, escopo do endpoint,
 `expires_at` no futuro e mesmo `pseudonym_id` do snapshot. Assim, se o titular revoga depois da coleta, a
 simulação e a recomendação deixam de ser servidas. Snapshot sem `consent_id` cai na busca por titular.
@@ -84,7 +84,8 @@ com `type: "simulation"`, `pseudonym_id`, `monthly_budget` e a resposta completa
 | Status | code | Quando |
 |---|---|---|
 | 400 | `INVALID_INPUT` | orçamento ≤ 0, sem dívida em aberto ou dívida malformada no snapshot |
-| 403 | `CONSENT_REQUIRED` | `REQUIRE_CONSENT=true` e o consentimento do snapshot (`consent_id`) não existe, não está `AUTHORISED` ou é de outro titular |
+| 403 | `CONSENT_REQUIRED` | O consentimento do snapshot (`consent_id`) não existe ou é de outro titular |
+| 403 | `CONSENT_NOT_AUTHORISED` | O consentimento não está `AUTHORISED` ou não tem validade legível (mesmo código do `GET /debts`) |
 | 403 | `INSUFFICIENT_SCOPE` | consentimento sem `simulation:read` (`recommendation:read` no `/recommendation`) |
 | 403 | `CONSENT_EXPIRED` | `expires_at` do consentimento já passou (sem fuso é lido como UTC) |
 | 404 | `SNAPSHOT_NOT_FOUND` | snapshot inexistente **ou com `expires_at` vencido** (consentimento + 90 dias) |

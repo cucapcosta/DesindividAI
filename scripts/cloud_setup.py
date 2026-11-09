@@ -1,11 +1,15 @@
 """
-Prepara o Cloudant da conta atual: cria os databases e um snapshot de exemplo.
+Prepara o Cloudant da conta atual: cria os databases, índices e um snapshot de exemplo.
 Idempotente — pode rodar várias vezes.
 
     python -m scripts.cloud_setup
 
 Requer CLOUDANT_URL e CLOUDANT_APIKEY no .env. O snapshot de exemplo imita o que o
 Agente 1 (M2) deve gravar (ver docs/m3-simulation-engine.md) e usa um pseudonym_id fictício.
+
+Índices criados em consent_registry (M1):
+  - by-state-hash: busca por state_hash (GET /consent/callback)
+  - by-consent-id: busca por consent_id (M2 get_consent, M3 ensure_consent)
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ import asyncio
 import sys
 from datetime import datetime, timedelta, timezone
 
-from src.core.config import consents_db, decisions_db, env, snapshots_db
+from src.core.config import audit_db, consents_db, decisions_db, env, snapshots_db, vault_db
 from src.storage.store import CloudantStore
 
 SAMPLE_SNAPSHOT_ID = "00000000-0000-4000-8000-000000000001"
@@ -40,7 +44,8 @@ def cloudant_store() -> CloudantStore:
 
 
 async def setup(store: CloudantStore) -> None:
-    dbs = {snapshots_db(), decisions_db(), consents_db()}
+    # identity_vault e audit_trail: o POST /consent grava o CPF no cofre e audita (M4)
+    dbs = {snapshots_db(), decisions_db(), consents_db(), vault_db(), audit_db()}
     for db in sorted(dbs):
         created = await store.ensure_db(db)
         print(f"[OK] database {db}: {'criado' if created else 'já existia'}")
@@ -60,6 +65,34 @@ async def setup(store: CloudantStore) -> None:
         },
     )
     print(f"[OK] snapshot de exemplo {SAMPLE_SNAPSHOT_ID} gravado em {snapshots_db()}")
+    await _ensure_consent_indexes(store)
+
+
+async def _ensure_consent_indexes(store: CloudantStore) -> None:
+    """Cria índices JSON em consent_registry para buscas por state_hash e consent_id.
+    O Cloudant responde 'exists' se o índice já existir — idempotente.
+    """
+    db = consents_db()
+    indexes = [
+        {
+            "name": "by-state-hash",
+            "fields": ["state_hash"],
+            "ddoc": "idx-state-hash",
+        },
+        {
+            "name": "by-consent-id",
+            "fields": ["consent_id"],
+            "ddoc": "idx-consent-id",
+        },
+    ]
+    for idx in indexes:
+        resp = await store._request(
+            "POST", f"{db}/_index",
+            json={"index": {"fields": idx["fields"]}, "name": idx["name"], "ddoc": idx["ddoc"]},
+        )
+        store._check(resp)  # erro do Cloudant vira ServiceError em vez de "[OK]"
+        result = resp.json()["result"]
+        print(f"[OK] índice {idx['name']} em {db}: {result}")
 
 
 if __name__ == "__main__":

@@ -406,7 +406,7 @@ uvicorn src.main:app --reload       # na raiz do repo
 ter a instância `watsonx-Hackathon WML` associada, e os bancos `consent_registry` e
 `financial_snapshots` precisam existir no Cloudant (já criados, com os índices da seção 7).
 
-**Consentimento de teste:** enquanto `POST /consent` (M1) não existe, grave um com
+**Consentimento de teste:** o caminho normal é `POST /consent` + callback (sandbox: `code=sandbox`, ver `docs/m1-consent-flow.md`). Como atalho, grave um com
 
 ```bash
 python scripts/seed_test_consent.py create          # imprime o consent_id
@@ -449,10 +449,10 @@ roteirizado, o repositório é em memória, e o `conftest.py` zera as credenciai
 | Merge com `feat/m3-simulacao-recomendacao`: conflitos em `main.py`, `tests/conftest.py`, `requirements.txt`, `.env.example`, `PLANO.md` | **Integração M2 × M3** (quem mergear por último) |
 | Duas camadas de Cloudant/config (`src/core`+`src/storage` do M3 × `agent1/config`+`repository`), e o client duplicado em `scripts/seed_test_consent.py` | **Integração M2 × M3** — unificar em uma |
 | Dívidas rotativas têm `remaining_installments: 0`; o motor trata como 1 parcela | **Sub-Tarefa 3 (M3)** — tratar rotativo no motor |
-| `POST /consent` não implementado (hoje: `scripts/seed_test_consent.py`) | **Sub-Tarefa 1 (M1)** |
-| Escopo validado no documento de consentimento, não no token OAuth | **Sub-Tarefa 1 (M1)** — política do API Connect |
-| `202`/`500`/`502`/`503` fora do `openapi.yaml` | **Sub-Tarefa 1 (M1)** |
-| `expires_at` do consentimento sempre ISO 8601 **com fuso** | **Sub-Tarefa 1 (M1)** — M2 já assume UTC quando falta |
+| `POST /consent` não implementado (hoje: `scripts/seed_test_consent.py`) | ~~**Sub-Tarefa 1 (M1)**~~ ✅ resolvido em `feat/m1-consentimento` — `POST /consent`, `GET /callback`, `GET /{id}`, `DELETE` implementados |
+| Escopo validado no documento de consentimento, não no token OAuth | **Sub-Tarefa 1 (M1)** — política do API Connect (pendência de configuração) |
+| `202`/`500`/`502`/`503` fora do `openapi.yaml` | ~~**Sub-Tarefa 1 (M1)**~~ ✅ resolvido em `3a2a5ac` |
+| `expires_at` do consentimento sempre ISO 8601 **com fuso** | ~~**Sub-Tarefa 1 (M1)**~~ ✅ resolvido em `feat/m1-consentimento` — datas sempre com timezone |
 | ~~Confirmar retenção de 90 dias após o consentimento e dono da chave de pseudonimização~~ | ✅ **Resolvido na Parte A do M4** — ver [`docs/m4-retencao-e-delecao.md`](m4-retencao-e-delecao.md) e [`docs/m4-chaves-e-iam.md`](m4-chaves-e-iam.md) |
 | Afinidade por `consent_id` no gateway (jobs do `202` em memória) | **Sub-Tarefa 1 (M1)** — ou store compartilhado de jobs |
 | ~~`PSEUDONYM_HMAC_KEY` vem do `.env` (deveria vir do COS/HSM)~~ | ✅ **Resolvido na Parte A do M4** — chave via `EnvKeyProvider` (hackathon); produção deve implementar um KeyProvider sobre o Secrets Manager — ver [`docs/m4-chaves-e-iam.md`](m4-chaves-e-iam.md) |

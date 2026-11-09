@@ -9,12 +9,19 @@ _REAL_SERVICE_VARS = (
     "CLOUDANT_URL", "CLOUDANT_APIKEY",
     "OPEN_FINANCE_BASE_URL", "OPEN_FINANCE_API_KEY",
     "SERASA_BASE_URL", "SERASA_API_KEY",
+    # M1 — evitar vazamento de .env local nos testes
+    "OPEN_FINANCE_AUTH_SANDBOX", "PUBLIC_BASE_URL", "OPEN_FINANCE_AUTHORIZE_URL",
+    "OPEN_FINANCE_CLIENT_ID", "OPEN_FINANCE_REDIRECT_URI",
+    "OAUTH_REVOKE_URL", "REQUIRE_CONSENT", "REQUIRE_CHANNEL_AUTH", "CHANNEL_IAM_IDS",
     # M4 — credenciais de COS zeradas (testes não usam COS real)
     "COS_ACCESS_KEY_ID", "COS_SECRET_ACCESS_KEY",
 )
 if os.getenv("RUN_CLOUD_TESTS") != "1":
     for var in _REAL_SERVICE_VARS:
         os.environ[var] = ""
+# REQUIRE_CONSENT vem ligado por padrão; os testes de M3 que não tratam de consentimento usam
+# snapshots sem consentimento. Os testes de consentimento ligam a exigência explicitamente.
+os.environ["REQUIRE_CONSENT"] = "false"
 
 # Fontes externas simuladas; Cloudant e Granite são substituídos por fakes injetados.
 os.environ["OPEN_FINANCE_SANDBOX"] = "true"

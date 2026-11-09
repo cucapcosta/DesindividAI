@@ -53,7 +53,7 @@ def test_revoked_consent_blocks_simulation_even_if_another_authorised_exists(enf
                                                     "status": "AUTHORISED", "scopes": ["simulation:read"],
                                                     "expires_at": future()}))
     resp = simulate(client)
-    assert resp.status_code == 403 and resp.json()["code"] == "CONSENT_REQUIRED"
+    assert resp.status_code == 403 and resp.json()["code"] == "CONSENT_NOT_AUTHORISED"
 
 
 def test_expired_consent_blocks(enforced):
@@ -81,7 +81,7 @@ def test_naive_expiry_is_read_as_utc(enforced):
 
 def test_invalid_expiry_blocks(enforced):
     resp = simulate(enforced(expires_at="amanhã"))
-    assert resp.status_code == 403
+    assert resp.status_code == 403 and resp.json()["code"] == "CONSENT_NOT_AUTHORISED"
 
 
 def test_snapshot_pointing_to_unknown_consent_blocks(enforced):
@@ -101,3 +101,10 @@ def test_snapshot_with_future_expiry_is_served(client, store):
     snapshot = asyncio.run(store.get(snapshots_db(), SNAPSHOT_ID))
     asyncio.run(store.put(snapshots_db(), SNAPSHOT_ID, {**snapshot, "expires_at": future(90)}))
     assert simulate(client).status_code == 200
+
+
+def test_consent_is_required_by_default(client, monkeypatch):
+    """Sem REQUIRE_CONSENT definido, /simulation exige consentimento."""
+    monkeypatch.delenv("REQUIRE_CONSENT", raising=False)
+    resp = simulate(client)
+    assert resp.status_code == 403 and resp.json()["code"] == "CONSENT_REQUIRED"
