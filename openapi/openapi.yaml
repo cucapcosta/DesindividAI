@@ -279,8 +279,19 @@ components:
         total_savings_vs_minimum:
           type: number
           format: double
-          description: 'Juros pagando só o mínimo contratado menos juros do cenário, no mesmo horizonte; pode ser negativo.'
+          description: 'Juros pagando só o mínimo contratado (limitado ao orçamento) menos juros do cenário, no mesmo horizonte; pode ser negativo.'
           example: 5200.00
+        paid_off:
+          type: boolean
+          description: 'O cenário quita todas as dívidas. Falso se a simulação foi interrompida (teto de prazo ou divergência do saldo).'
+        minimum_payments_total:
+          type: number
+          format: double
+          description: 'Soma dos pagamentos mínimos do mês 1 neste cenário (na consolidação, com a parcela única da linha BB no lugar das dívidas portadas).'
+          example: 1203.82
+        budget_below_minimums:
+          type: boolean
+          description: 'O orçamento mensal é menor que minimum_payments_total deste cenário.'
         monthly_plan:
           type: array
           items:

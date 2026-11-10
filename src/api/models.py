@@ -142,6 +142,10 @@ class SimulationScenario(BaseModel):
     total_interest_paid: float
     total_savings_vs_minimum: float
     monthly_plan: List[MonthPlan]
+    # Campos do motor atual; ausentes em simulações antigas e em AI Services desatualizados.
+    paid_off: Optional[bool] = None
+    minimum_payments_total: Optional[float] = None
+    budget_below_minimums: Optional[bool] = None
 
 
 class SimulationResponse(BaseModel):

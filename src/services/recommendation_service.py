@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 from langchain_core.runnables import Runnable
 
 from src.agents.explanation_guard import explanation_issues, fallback_explanation, normalize_brl
-from src.agents.recommendation_agent import _CORRECTIVE_INSTRUCTIONS, build_chain
+from src.agents.recommendation_agent import _CORRECTIVE_INSTRUCTIONS, build_chain, scenario_budget_below
 from src.api.models import (
     LanguageLevel,
     RecommendationResponse,
@@ -97,10 +97,15 @@ async def create_recommendation(
         raise ServiceError(503, "SERVICE_UNAVAILABLE", "Modelo de linguagem indisponível.") from exc
     result["explanation"] = normalize_brl(result["explanation"])
 
+    # A guarda de "economia" vale para o cenário recomendado, que é o que o texto defende;
+    # os outros cenários têm o próprio aviso nos FATOS.
+    rec_scenario = next(s for s in scenarios if s.scenario_id == result["recommended"])
+    guard_budget_below = scenario_budget_below(rec_scenario, budget_below)
+
     issues_1st = explanation_issues(
         result["explanation"],
         result["facts_json"],
-        budget_below=budget_below,
+        budget_below=guard_budget_below,
     )
 
     explanation_prompt = result["prompt_text"]
@@ -129,7 +134,7 @@ async def create_recommendation(
             issues_2nd = explanation_issues(
                 result2["explanation"],
                 result2["facts_json"],
-                budget_below=budget_below,
+                budget_below=guard_budget_below,
             )
             if not issues_2nd:
                 final_explanation = result2["explanation"]

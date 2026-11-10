@@ -35,6 +35,21 @@ injection); máx. 180 palavras. `language_level`:
 - `simple`: frases curtas, sem jargão, CET explicado como "custo total do dinheiro emprestado".
 - `technical`: CET, amortização, juros compostos, comparação por prazo/juros/economia.
 
+Os primeiros passos citam o produto pelo nome em português (`crédito consignado`, `cartão de crédito`…; mapa
+`PRODUCT_LABELS_PT`), nunca pelo código do enum. Os FATOS trazem `orcamento_abaixo_dos_minimos` e `soma_dos_minimos`
+por cenário; os do topo são os do cenário recomendado.
+
+## Guarda da explicação
+
+`explanation_issues` devolve códigos; com qualquer um há um retry com instrução corretiva e, persistindo, o fallback
+determinístico. Antes da guarda, `normalize_brl` reescreve valores para `R$ 1.234,56` (preserva "R$ 50 mil").
+
+| Código | Quando |
+|---|---|
+| `UNGROUNDED_AMOUNT` | valor em R$ que não está nos FATOS |
+| `SAVINGS_CLAIM_BELOW_MINIMUMS` | afirma economia quando o orçamento do cenário recomendado está abaixo dos mínimos |
+| `INTERNAL_CODE_LEAK` | expõe código interno (`PAYROLL_LOAN`, `VEHICLE_LOAN`, `minimum_viable`…) |
+
 O LLM só recebe dados pseudonimizados (instituição, produto, valores) — nunca CPF.
 
 ## Resposta (`RecommendationResponse`)

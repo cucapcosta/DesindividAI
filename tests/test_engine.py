@@ -160,15 +160,31 @@ def test_minimum_payments_total_correct():
     assert total == pytest.approx(1500.0, abs=0.01)
 
 
-def test_budget_below_minimums_warns_in_all_three_scenarios():
-    # AMORTIZING tem mínimos de 1500; orçamento 1000 está abaixo
+def test_budget_below_minimums_warns_per_scenario():
+    # AMORTIZING: mínimos 600 + 400 + 500 = 1500; na consolidação as duas dívidas de CET > 30%
+    # viram uma parcela única (≈ 703,82) e a soma dos mínimos cai para ≈ 1203,82.
     scenarios = by_id(simulate(AMORTIZING, 1000))
     for sid in ("aggressive", "consolidation", "minimum_viable"):
-        desc = scenarios[sid]["description"]
-        assert "Atenção: o orçamento" in desc, f"Aviso ausente no cenário {sid}"
-        assert "R$ 1.000,00" in desc
-        assert "R$ 1.500,00" in desc
-        assert "renegociar" in desc
+        s = scenarios[sid]
+        assert "Atenção: o orçamento" in s["description"], f"Aviso ausente no cenário {sid}"
+        assert "R$ 1.000,00" in s["description"]
+        assert "renegociar" in s["description"]
+        assert s["budget_below_minimums"] is True
+    assert "R$ 1.500,00" in scenarios["aggressive"]["description"]
+    assert "R$ 1.500,00" in scenarios["minimum_viable"]["description"]
+    assert "R$ 1.203,82" in scenarios["consolidation"]["description"]
+    assert scenarios["aggressive"]["minimum_payments_total"] == pytest.approx(1500.0, abs=0.01)
+    assert scenarios["consolidation"]["minimum_payments_total"] == pytest.approx(1203.82, abs=0.01)
+
+
+def test_budget_between_consolidated_and_original_minimums_warns_only_where_it_applies():
+    # Issue #6, item 9: orçamento cobre os mínimos da consolidação, mas não os das dívidas originais.
+    scenarios = by_id(simulate(AMORTIZING, 1300))
+    assert scenarios["consolidation"]["budget_below_minimums"] is False
+    assert "Atenção: o orçamento" not in scenarios["consolidation"]["description"]
+    for sid in ("aggressive", "minimum_viable"):
+        assert scenarios[sid]["budget_below_minimums"] is True
+        assert "Atenção: o orçamento" in scenarios[sid]["description"]
 
 
 def test_budget_sufficient_no_warning():
@@ -188,3 +204,45 @@ def test_budget_slightly_below_warns_with_n_short():
     # Nenhum nome de instituição deve aparecer (segurança contra injeção)
     for name in ("itau", "bb", "caixa"):
         assert name not in desc.lower()
+
+
+# --- Issue #6, item 11: baseline respeita o orçamento -------------------------------------
+
+@pytest.mark.parametrize("budget", [1000, 1300])
+def test_savings_never_negative_for_minimum_only_scenarios(budget):
+    """Com orçamento abaixo dos mínimos o baseline não pode pagar mais que o orçamento."""
+    out = by_id(simulate(AMORTIZING, budget))
+    for sid in ("aggressive", "minimum_viable"):
+        assert out[sid]["total_savings_vs_minimum"] >= -0.01
+
+
+def test_baseline_unchanged_when_budget_covers_minimums():
+    out = by_id(simulate(AMORTIZING, 1500))
+    assert out["aggressive"]["total_savings_vs_minimum"] > 0
+    assert out["minimum_viable"]["total_savings_vs_minimum"] >= 0
+
+
+# --- Issue #6, item 4: paid_off ------------------------------------------------------------
+
+def test_paid_off_true_when_budget_is_enough():
+    for s in simulate(AMORTIZING, 1500):
+        assert s["paid_off"] is True
+        assert s["budget_below_minimums"] is False
+        assert s["minimum_payments_total"] > 0
+
+
+def test_paid_off_false_when_simulation_diverges():
+    out = by_id(simulate(_agent1_snapshot_debts(), 200))
+    for sid in ("aggressive", "minimum_viable"):
+        assert out[sid]["paid_off"] is False
+        assert out[sid]["total_months"] < MAX_MONTHS  # interrompido pela divergência, não pelo teto
+    assert out["consolidation"]["paid_off"] is True
+
+
+def test_format_brl_in_engine_descriptions():
+    import re
+
+    for s in simulate(AMORTIZING, 1000):
+        # nenhum valor em R$ sem separador de milhar nem com ponto decimal
+        assert not re.search(r"R[$] ?[0-9]{4,}", s["description"])
+        assert not re.search(r"R[$] ?[0-9.]+[.][0-9]{2}([^0-9,]|$)", s["description"])
