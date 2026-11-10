@@ -32,6 +32,25 @@ class ProductType(str, Enum):
     MORTGAGE = "MORTGAGE"
 
 
+# Nome em português de cada produto, para texto voltado ao cliente (nunca expor o código do enum).
+PRODUCT_LABELS_PT: dict[ProductType, str] = {
+    ProductType.CREDIT_CARD: "cartão de crédito",
+    ProductType.PERSONAL_LOAN: "empréstimo pessoal",
+    ProductType.PAYROLL_LOAN: "crédito consignado",
+    ProductType.OVERDRAFT: "cheque especial",
+    ProductType.VEHICLE_LOAN: "financiamento de veículo",
+    ProductType.MORTGAGE: "financiamento imobiliário",
+}
+
+
+def product_label_pt(value: object) -> str:
+    """Nome em português do produto; valor desconhecido vira 'dívida'."""
+    try:
+        return PRODUCT_LABELS_PT[ProductType(value)]
+    except ValueError:
+        return "dívida"
+
+
 class ScenarioId(str, Enum):
     AGGRESSIVE = "aggressive"
     CONSOLIDATION = "consolidation"
@@ -123,6 +142,10 @@ class SimulationScenario(BaseModel):
     total_interest_paid: float
     total_savings_vs_minimum: float
     monthly_plan: List[MonthPlan]
+    # Campos do motor atual; ausentes em simulações antigas e em AI Services desatualizados.
+    paid_off: Optional[bool] = None
+    minimum_payments_total: Optional[float] = None
+    budget_below_minimums: Optional[bool] = None
 
 
 class SimulationResponse(BaseModel):

@@ -30,6 +30,7 @@ from __future__ import annotations
 import math
 import uuid
 from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Callable, Optional
 
 MAX_MONTHS = 600
@@ -40,6 +41,14 @@ ASSUMED_MIN_PRINCIPAL_PCT = 0.01
 DEFAULT_TERM_MONTHS = 36
 DIVERGENCE_FACTOR = 10.0
 CONSOLIDATED_DEBT_ID = str(uuid.uuid5(uuid.NAMESPACE_URL, "desendividai:bb-consolidation"))
+
+
+def format_brl(value: float) -> str:
+    """Formata em reais no padrão brasileiro: R$ 1.234,56 (negativo: -R$ 1.234,56)."""
+    cents = int((abs(Decimal(str(value))) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    negative = value < 0 and cents > 0
+    brl = f"R$ {cents // 100:,}".replace(",", ".") + f",{cents % 100:02d}"
+    return f"-{brl}" if negative else brl
 
 
 def monthly_rate(cet_annual: float) -> float:
@@ -140,8 +149,25 @@ def _allocator(budget: float, extra_target_ids: Callable[[list[_Loan]], list[str
     return allocate
 
 
-def _minimum_only(active: list[_Loan]) -> dict[str, float]:
-    return {l.id: min(l.min_payment, l.balance) for l in active}
+def _minimum_only(budget: float) -> Allocator:
+    """Só os mínimos, dentro do orçamento (maior CET primeiro se ele não cobrir tudo)."""
+    return _allocator(budget, lambda ordered: [])
+
+
+def _budget_check(loans: list[_Loan], budget: float) -> tuple[float, int]:
+    """(soma dos mínimos do mês 1, nº de dívidas que ficam sem o mínimo) para os empréstimos do cenário."""
+    month1 = _minimum_only(budget)(loans)
+    min_total = sum(l.min_payment for l in loans)
+    n_short = sum(1 for l in loans if month1.get(l.id, 0.0) < min(l.min_payment, l.balance) - EPS)
+    return min_total, n_short
+
+
+def _budget_warning(budget: float, min_total: float, n_short: int) -> str:
+    return (
+        f" Atenção: o orçamento ({format_brl(budget)}) é menor que a soma dos pagamentos mínimos"
+        f" ({format_brl(min_total)}); {n_short} dívida(s) ficariam sem o pagamento mínimo no mês 1,"
+        f" o que significa atraso e encargos. Considere renegociar."
+    )
 
 
 def _consolidate(loans: list[_Loan], bb_cet: float) -> tuple[list[_Loan], list[_Loan]]:
@@ -159,9 +185,21 @@ def _consolidate(loans: list[_Loan], bb_cet: float) -> tuple[list[_Loan], list[_
 
 
 def _scenario(
-    scenario_id: str, label: str, description: str, run, baseline_interest: float, assumption_note: str = ""
+    scenario_id: str,
+    label: str,
+    description: str,
+    run,
+    baseline_interest: float,
+    assumption_note: str = "",
+    *,
+    budget: float,
+    min_total: float,
+    n_short: int,
 ) -> dict:
     plan, interest, paid_off = run
+    below = budget < min_total - EPS
+    if below:
+        description += _budget_warning(budget, min_total, n_short)
     if not paid_off:
         if len(plan) >= MAX_MONTHS:
             description += f" Atenção: não quita em {MAX_MONTHS // 12} anos com esse orçamento."
@@ -179,6 +217,9 @@ def _scenario(
         "total_months": len(plan),
         "total_interest_paid": round(interest, 2),
         "total_savings_vs_minimum": round(baseline_interest - interest, 2),
+        "paid_off": paid_off,
+        "minimum_payments_total": round(min_total, 2),
+        "budget_below_minimums": below,
         "monthly_plan": [
             {
                 "month": i,
@@ -208,32 +249,25 @@ def simulate(debts: list[dict], monthly_budget: float, bb_cet_annual: Optional[f
         if assumed else ""
     )
 
-    # Aviso de orçamento abaixo dos mínimos
-    min_total = minimum_payments_total(debts)
-    budget_warning = ""
-    if monthly_budget < min_total - EPS:
-        # Conta quantas dívidas ficam sem o mínimo no mês 1 do cenário agressivo (pior caso)
-        agg_loans = _loans(debts)
-        agg_alloc = _allocator(monthly_budget, lambda ordered: [l.id for l in ordered])
-        agg_m1 = agg_alloc(agg_loans)
-        n_short = sum(1 for l in agg_loans if agg_m1.get(l.id, 0.0) < l.min_payment - EPS)
-        budget_warning = (
-            f" Atenção: o orçamento (R$ {monthly_budget:.2f}) é menor que a soma dos pagamentos mínimos"
-            f" (R$ {min_total:.2f}); {n_short} dívida(s) ficariam sem o pagamento mínimo no mês 1,"
-            f" o que significa atraso e encargos. Considere renegociar."
-        )
+    # Mínimos do mês 1 por cenário (a consolidação troca as dívidas portadas por uma parcela única,
+    # então a soma dos mínimos dela difere da soma das dívidas originais).
+    checks = {
+        "aggressive": _budget_check(_loans(debts), monthly_budget),
+        "minimum_viable": _budget_check(_loans(debts), monthly_budget),
+    }
 
     # 1) Agressivo
     aggressive = _run(_loans(debts), _allocator(monthly_budget, lambda ordered: [l.id for l in ordered]))
 
     # 2) Consolidação
     loans, ported = _consolidate(_loans(debts), bb_cet)
+    checks["consolidation"] = _budget_check(loans, monthly_budget)
     if ported:
         merged = loans[0]
         c_desc = (
             f"Porta {len(ported)} dívida(s) com CET acima de {bb_cet:g}% a.a. para uma linha BB "
             f"a {bb_cet:g}% a.a. em {merged.installments} parcelas (parcela inicial "
-            f"R$ {merged.min_payment:.2f}); o excedente do orçamento antecipa a dívida de maior CET. "
+            f"{format_brl(merged.min_payment)}); o excedente do orçamento antecipa a dívida de maior CET. "
             "Taxa da linha BB é premissa, sujeita à aprovação de crédito."
         )
     else:
@@ -249,24 +283,32 @@ def simulate(debts: list[dict], monthly_budget: float, bb_cet_annual: Optional[f
     minimum = _run(min_loans, _allocator(monthly_budget, lambda ordered: [costliest]))
 
     runs = [aggressive, consolidation, minimum]
-    # Baseline: só os mínimos contratados, no mesmo horizonte para todos os cenários
-    # (o maior entre o prazo contratado e o do cenário mais longo). Dívidas cujo mínimo não cobre
-    # os juros (ex.: cartão rotativo) nunca quitam; o horizonte limita o baseline.
+    # Baseline: só os mínimos contratados, limitados ao orçamento (o cliente não paga mais do que tem),
+    # no mesmo horizonte para todos os cenários (o maior entre o prazo contratado e o do cenário
+    # mais longo). Dívidas cujo mínimo não cobre os juros (ex.: cartão rotativo) nunca quitam; o
+    # horizonte limita o baseline. Com orçamento abaixo dos mínimos, o baseline é o mesmo plano
+    # sem excedente, e a economia deixa de sair negativa por comparar com um pagamento impossível.
     horizon = max([len(r[0]) for r in runs] + [l.installments for l in _loans(debts)] + [12])
     horizon = min(horizon, MAX_MONTHS)
-    _, baseline_interest, _ = _run(_loans(debts), _minimum_only, horizon)
+    _, baseline_interest, _ = _run(_loans(debts), _minimum_only(monthly_budget), horizon)
+
+    def scenario(scenario_id: str, label: str, description: str, run) -> dict:
+        min_total, n_short = checks[scenario_id]
+        return _scenario(
+            scenario_id, label, description, run, baseline_interest, note,
+            budget=monthly_budget, min_total=min_total, n_short=n_short,
+        )
 
     return [
-        _scenario(
+        scenario(
             "aggressive", "Agressivo",
-            "Paga os mínimos de todas as dívidas e direciona todo o orçamento restante à dívida de maior CET."
-            + budget_warning,
-            aggressive, baseline_interest, note,
+            "Paga os mínimos de todas as dívidas e direciona todo o orçamento restante à dívida de maior CET.",
+            aggressive,
         ),
-        _scenario("consolidation", "Consolidação", c_desc + budget_warning, consolidation, baseline_interest, note),
-        _scenario(
+        scenario("consolidation", "Consolidação", c_desc, consolidation),
+        scenario(
             "minimum_viable", "Mínimo viável",
-            "Paga apenas os mínimos e usa o excedente só para quitar a dívida mais cara." + budget_warning,
-            minimum, baseline_interest, note,
+            "Paga apenas os mínimos e usa o excedente só para quitar a dívida mais cara.",
+            minimum,
         ),
     ]

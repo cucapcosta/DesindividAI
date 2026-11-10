@@ -526,3 +526,126 @@ def test_retry_provider_failure_fallback_and_retry_error_in_trace(store_with_sna
     finally:
         app.dependency_overrides.clear()
 
+
+
+def test_recommendation_normalizes_money_format_and_traces_it(store_with_snapshot):
+    """Issue #6 item 10: o LLM escreve 'R$ 1200,00'; o cliente recebe 'R$ 1.200,00'."""
+    from fastapi.testclient import TestClient
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+    from src.agents.recommendation_agent import get_llm
+    from src.main import app
+    from src.storage.store import get_store
+
+    store = store_with_snapshot
+    app.dependency_overrides[get_store] = lambda: store
+    app.dependency_overrides[get_llm] = lambda: FakeListChatModel(
+        responses=["Seus pagamentos mínimos somam R$ 1200,00 por mês."]
+    )
+    try:
+        client = TestClient(app)
+        sim = _simulate_high_budget(client).json()
+        # o valor precisa estar nos FATOS para não ser recusado pela guarda
+        body = client.post("/recommendation", json={"simulation_id": sim["simulation_id"]}).json()
+        assert "R$ 3000,00" not in body["explanation"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_recommendation_retries_on_internal_code_leak(store_with_snapshot):
+    """Issue #6 itens 7/8: código interno no texto → retry; depois entrega o texto limpo."""
+    from fastapi.testclient import TestClient
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+    from src.agents.recommendation_agent import get_llm
+    from src.main import app
+    from src.storage.store import get_store
+
+    store = store_with_snapshot
+    app.dependency_overrides[get_store] = lambda: store
+    app.dependency_overrides[get_llm] = lambda: FakeListChatModel(
+        responses=["Pague o financiamento de carro (VEHICLE_LOAN).", "Pague o financiamento de veículo."]
+    )
+    try:
+        client = TestClient(app)
+        sim = _simulate_high_budget(client).json()
+        body = client.post("/recommendation", json={"simulation_id": sim["simulation_id"]}).json()
+        assert body["explanation"] == "Pague o financiamento de veículo."
+        trace = asyncio.run(store.get(decisions_db(), body["trace_id"]))
+        assert trace["explanation_source"] == "llm_retry"
+        assert "INTERNAL_CODE_LEAK" in trace["guard_issues"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+# --- Issue #6, itens 4 e 9: viabilidade por paid_off e aviso de orçamento por cenário -------
+
+def _scn(scenario_id, *, interest=1000.0, months=12, savings=100.0, **extra):
+    from src.api.models import ScenarioId, SimulationScenario
+    return SimulationScenario(
+        scenario_id=ScenarioId(scenario_id), label=scenario_id, description="desc",
+        total_months=months, total_interest_paid=interest, total_savings_vs_minimum=savings,
+        monthly_plan=[], **extra,
+    )
+
+
+def test_select_recommended_ignores_scenario_stopped_by_divergence():
+    """Item 4: prazo curto por divergência não torna o cenário viável."""
+    from src.agents.recommendation_agent import select_recommended
+    from src.api.models import ScenarioId
+
+    scenarios = [
+        _scn("aggressive", interest=100.0, months=10, paid_off=False),   # interrompido, não quitou
+        _scn("consolidation", interest=900.0, months=30, paid_off=True),
+        _scn("minimum_viable", interest=2000.0, months=60, paid_off=True),
+    ]
+    assert select_recommended(scenarios) == ScenarioId.CONSOLIDATION
+
+
+def test_select_recommended_falls_back_to_month_cap_without_paid_off():
+    """Simulações antigas (sem paid_off) seguem a regra do teto de prazo."""
+    from src.agents.recommendation_agent import select_recommended
+    from src.api.models import ScenarioId
+    from src.simulation.engine import MAX_MONTHS
+
+    scenarios = [
+        _scn("aggressive", interest=100.0, months=MAX_MONTHS),
+        _scn("consolidation", interest=900.0, months=30),
+        _scn("minimum_viable", interest=2000.0, months=60),
+    ]
+    assert select_recommended(scenarios) == ScenarioId.CONSOLIDATION
+
+
+def test_facts_budget_warning_is_per_scenario():
+    """Item 9: o aviso e a soma dos mínimos são de cada cenário; o topo segue o recomendado."""
+    from src.api.models import ScenarioId
+
+    scenarios = [
+        _scn("aggressive", savings=0.0, budget_below_minimums=True, minimum_payments_total=3239.10),
+        _scn("consolidation", savings=500.0, budget_below_minimums=False, minimum_payments_total=2318.58),
+        _scn("minimum_viable", savings=0.0, budget_below_minimums=True, minimum_payments_total=3239.10),
+    ]
+    inputs = _base_inputs(scenarios, abaixo=True)  # global (dívidas originais) = True
+    inputs["recommended"] = ScenarioId.CONSOLIDATION
+    data = _parse_facts(inputs)
+    by_id = {s["id"]: s for s in data["cenarios"]}
+
+    assert data["orcamento_abaixo_dos_minimos"] is False
+    assert data["soma_dos_minimos"] == 2318.58
+    assert by_id["aggressive"]["orcamento_abaixo_dos_minimos"] is True
+    assert "economia_vs_pagar_so_o_minimo" not in by_id["aggressive"]
+    assert by_id["consolidation"]["orcamento_abaixo_dos_minimos"] is False
+    assert by_id["consolidation"]["economia_vs_pagar_so_o_minimo"] == 500.0
+
+
+def test_facts_without_engine_fields_use_global_flag():
+    """Simulação antiga (sem budget_below_minimums): vale o cálculo global de antes."""
+    scenarios = [_scn("aggressive"), _scn("consolidation"), _scn("minimum_viable")]
+    data = _parse_facts(_base_inputs(scenarios, abaixo=True))
+    assert data["orcamento_abaixo_dos_minimos"] is True
+    assert all(s["orcamento_abaixo_dos_minimos"] is True for s in data["cenarios"])
+
+
+def test_simulation_response_exposes_new_scenario_fields(client):
+    for s in simulate(client).json()["scenarios"]:
+        assert isinstance(s["paid_off"], bool)
+        assert s["minimum_payments_total"] > 0
+        assert isinstance(s["budget_below_minimums"], bool)

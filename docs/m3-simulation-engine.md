@@ -54,6 +54,13 @@ Se o orçamento não cobre os mínimos, estes são pagos em ordem decrescente de
 - Juros mensais = (1 + CET a.a.)^(1/12) − 1, aplicados antes do pagamento do mês.
 - Linha BB de consolidação: `BB_CONSOLIDATION_CET_ANNUAL` (padrão 30% a.a.). **É premissa, não oferta real.** Sem tarifas de portabilidade.
 - `total_savings_vs_minimum` = juros pagando só o mínimo contratado − juros do cenário, ambos no mesmo horizonte (maior entre o prazo contratado e o do cenário mais longo), pois dívidas cujo mínimo não cobre os juros (ex.: rotativo) nunca quitam.
+  O baseline respeita o orçamento: se ele é menor que os mínimos, o baseline paga os mínimos em ordem decrescente de CET até acabar (o cliente não paga mais do que tem). Antes ele pagava os mínimos inteiros, e cenários limitados pelo orçamento saíam com economia negativa.
+- **Mínimos por cenário:** cada cenário informa `minimum_payments_total` (soma dos mínimos do mês 1 *daquele* cenário) e
+  `budget_below_minimums`. Na consolidação as dívidas portadas viram uma parcela única, então a soma difere da das dívidas
+  originais; o aviso "Atenção: o orçamento…" só entra na descrição dos cenários em que o orçamento realmente não cobre os mínimos.
+- `paid_off` indica se o cenário quita as dívidas. A simulação também para por divergência do saldo (`total_months` pequeno
+  sem quitar), então `total_months < 600` não basta para considerar o cenário viável.
+- Valores em R$ nas descrições seguem o padrão brasileiro (`R$ 1.234,56`).
 - Teto de 600 meses; se não quita, a descrição avisa ("não quita em 50 anos").
 - **Dívidas que não amortizam no mínimo** (pagamento ausente ou abaixo dos juros do mês: dívida só do Serasa
   com `monthly_payment = 0`, rotativo com `remaining_installments = 0`, cheque especial cujo mínimo é o juro
