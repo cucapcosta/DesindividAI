@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -23,13 +22,15 @@ class _FakeResult:
 
 
 class FakeCloudantClient:
-    """Substituto mínimo do IBM Cloudant SDK."""
+    """Substituto mínimo do IBM Cloudant SDK que grava as chamadas recebidas."""
 
     def __init__(self):
-        # post_find retorna docs vazios por padrão; pode ser sobrescrito por teste.
         self._post_find_result: dict = {"docs": []}
         self._put_document_calls: list[dict] = []
         self._get_document_result: Any = None  # dict ou exceção
+        # Chamadas gravadas para asserção
+        self.post_find_calls: list[dict] = []
+        self.get_document_calls: list[dict] = []
 
     # -- helpers de configuração ----------------------------------------------
 
@@ -43,6 +44,7 @@ class FakeCloudantClient:
     # -- SDK stubs ------------------------------------------------------------
 
     def post_find(self, db: str, selector: dict, limit: int = 1) -> _FakeResult:
+        self.post_find_calls.append({"db": db, "selector": selector, "limit": limit})
         return _FakeResult(self._post_find_result)
 
     def put_document(self, db: str, doc_id: str, document: Any) -> _FakeResult:
@@ -50,6 +52,7 @@ class FakeCloudantClient:
         return _FakeResult({"id": doc_id, "rev": "1-abc"})
 
     def get_document(self, db: str, doc_id: str) -> _FakeResult:
+        self.get_document_calls.append({"db": db, "doc_id": doc_id})
         if isinstance(self._get_document_result, Exception):
             raise self._get_document_result
         return _FakeResult(self._get_document_result or {})
@@ -118,6 +121,17 @@ class TestCloudantGetConsent:
         result = repo.get_consent("ghost-id")
         assert result is None
 
+    def test_post_find_called_with_correct_db_and_selector(self, repo, fake_client):
+        """post_find recebe db = consents_db e selector {"consent_id": <id>} com limit=1."""
+        fake_client.configure_post_find([])
+        repo.get_consent("my-consent-id")
+
+        assert len(fake_client.post_find_calls) == 1
+        call = fake_client.post_find_calls[0]
+        assert call["db"] == CONSENTS_DB
+        assert call["selector"] == {"consent_id": "my-consent-id"}
+        assert call["limit"] == 1
+
 
 # ---------------------------------------------------------------------------
 # CloudantRepository.save_snapshot
@@ -140,9 +154,7 @@ class TestCloudantSaveSnapshot:
         repo.save_snapshot(snap)
 
         call = fake_client._put_document_calls[0]
-        # Document.from_dict preserva _id; verificamos a struct bruta do doc
         doc = call["document"]
-        # from_dict pode devolver objeto ou dict — verificamos _id nos dois casos
         raw = doc.to_dict() if hasattr(doc, "to_dict") else doc
         assert raw.get("_id") == "snap-xyz"
 
@@ -156,6 +168,16 @@ class TestCloudantGetSnapshot:
         expected = {"snapshot_id": "s1", "debts": []}
         fake_client.configure_get_document(expected)
         assert repo.get_snapshot("s1") == expected
+
+    def test_get_document_called_with_snapshots_db(self, repo, fake_client):
+        """get_document recebe db = snapshots_db."""
+        fake_client.configure_get_document({"snapshot_id": "s42"})
+        repo.get_snapshot("s42")
+
+        assert len(fake_client.get_document_calls) == 1
+        call = fake_client.get_document_calls[0]
+        assert call["db"] == SNAPSHOTS_DB
+        assert call["doc_id"] == "s42"
 
     def test_404_returns_none(self, repo, fake_client):
         from ibm_cloud_sdk_core import ApiException

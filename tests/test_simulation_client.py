@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-import pytest
+
 import httpx
+import pytest
 
 from src.core.errors import ServiceError
 
@@ -13,13 +15,17 @@ from src.core.errors import ServiceError
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _json_transport(status: int, body: dict) -> httpx.MockTransport:
-    """MockTransport que devolve sempre o mesmo JSON."""
+class _RecordingTransport(httpx.AsyncBaseTransport):
+    """AsyncTransport que grava as requisições recebidas."""
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(status, json=body)
+    def __init__(self, status: int, body: dict):
+        self.requests: list[httpx.Request] = []
+        self._status = status
+        self._body = body
 
-    return httpx.MockTransport(handler)
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        return httpx.Response(self._status, json=self._body)
 
 
 def _error_transport(exc: Exception) -> httpx.MockTransport:
@@ -44,11 +50,37 @@ class TestLocalPath:
 
         monkeypatch.setenv("WATSONX_SIMULATION_URL", "")
         fake_result = [{"scenario": "aggressive"}]
-        monkeypatch.setattr(module, "simulate", lambda debts, budget, cet: fake_result)
+        captured: list[tuple] = []
 
-        import asyncio
+        def fake_simulate(debts, budget, cet):
+            captured.append((debts, budget, cet))
+            return fake_result
+
+        monkeypatch.setattr(module, "simulate", fake_simulate)
+
         result = asyncio.run(module.run_engine([{"debt_id": "x"}], 1000.0))
         assert result == fake_result
+        # Verifica que bb_cet (BB_CONSOLIDATION_CET_ANNUAL) foi repassado ao simulate
+        assert len(captured) == 1
+        _debts, _budget, cet_arg = captured[0]
+        assert isinstance(cet_arg, float)
+
+    def test_local_path_bb_cet_env_repassed(self, monkeypatch):
+        """BB_CONSOLIDATION_CET_ANNUAL é lido do ambiente e repassado ao simulate."""
+        import src.simulation.client as module
+
+        monkeypatch.setenv("WATSONX_SIMULATION_URL", "")
+        monkeypatch.setenv("BB_CONSOLIDATION_CET_ANNUAL", "45.5")
+        captured_cet: list[float] = []
+
+        def fake_simulate(debts, budget, cet):
+            captured_cet.append(cet)
+            return []
+
+        monkeypatch.setattr(module, "simulate", fake_simulate)
+        asyncio.run(module.run_engine([], 500.0))
+
+        assert captured_cet == [45.5]
 
     def test_local_path_value_error_raises_service_error_400(self, monkeypatch):
         """ValueError do engine vira ServiceError 400."""
@@ -61,7 +93,6 @@ class TestLocalPath:
 
         monkeypatch.setattr(module, "simulate", boom)
 
-        import asyncio
         with pytest.raises(ServiceError) as exc_info:
             asyncio.run(module.run_engine([], 0.0))
 
@@ -75,14 +106,15 @@ class TestLocalPath:
 # Caminho remoto (com WATSONX_SIMULATION_URL)
 # ---------------------------------------------------------------------------
 
+REMOTE_URL = "https://fake.watsonx.ai"
+
+
 class TestRemotePath:
     """Testes do caminho remoto (HTTP para watsonx AI Service)."""
 
-    def _patch_client(self, monkeypatch, transport: httpx.MockTransport):
-        """Patch httpx.AsyncClient para usar o transport falso."""
+    def _patch_client(self, monkeypatch, transport) -> _RecordingTransport:
+        """Patch httpx.AsyncClient para usar o transport fornecido."""
         import src.simulation.client as module
-
-        original_init = httpx.AsyncClient.__init__
 
         class FakeAsyncClient(httpx.AsyncClient):
             def __init__(self, **kwargs):
@@ -90,38 +122,66 @@ class TestRemotePath:
                 super().__init__(transport=transport, **kwargs)
 
         monkeypatch.setattr(module.httpx, "AsyncClient", FakeAsyncClient)
+        return transport
 
-    def test_remote_200_with_scenarios(self, monkeypatch):
-        """Resposta 200 com 'scenarios' retorna a lista."""
-        import src.simulation.client as module
-
-        monkeypatch.setenv("WATSONX_SIMULATION_URL", "https://fake.watsonx.ai")
+    def _common_env(self, monkeypatch):
+        monkeypatch.setenv("WATSONX_SIMULATION_URL", REMOTE_URL)
         monkeypatch.setenv("IBM_CLOUD_API_KEY", "fake-key")
-        # Stub get_iam_token para não chamar IAM real
+        import src.simulation.client as module
         async def fake_token(key): return "fake-bearer"
         monkeypatch.setattr(module, "get_iam_token", fake_token)
 
+    def test_remote_200_request_shape(self, monkeypatch):
+        """POST /predict recebe Authorization Bearer e corpo com debts, monthly_budget, bb_cet_annual."""
+        self._common_env(monkeypatch)
+        monkeypatch.setenv("BB_CONSOLIDATION_CET_ANNUAL", "28.0")
         scenarios = [{"scenario": "aggressive"}, {"scenario": "consolidation"}]
-        self._patch_client(monkeypatch, _json_transport(200, {"scenarios": scenarios}))
+        transport = _RecordingTransport(200, {"scenarios": scenarios})
+        self._patch_client(monkeypatch, transport)
 
-        import asyncio
-        result = asyncio.run(module.run_engine([{"debt_id": "x"}], 1000.0))
+        result = asyncio.run(
+            __import__("src.simulation.client", fromlist=["run_engine"]).run_engine(
+                [{"debt_id": "x"}], 1000.0
+            )
+        )
+        assert result == scenarios
+        assert len(transport.requests) == 1
+        req = transport.requests[0]
+        assert req.method == "POST"
+        assert str(req.url) == f"{REMOTE_URL}/predict"
+        assert req.headers["Authorization"] == "Bearer fake-bearer"
+        body = json.loads(req.content)
+        assert "debts" in body
+        assert "monthly_budget" in body
+        assert "bb_cet_annual" in body
+        assert body["bb_cet_annual"] == 28.0
+
+    def test_remote_200_with_scenarios(self, monkeypatch):
+        """Resposta 200 com 'scenarios' retorna a lista."""
+        self._common_env(monkeypatch)
+        scenarios = [{"scenario": "aggressive"}, {"scenario": "consolidation"}]
+        transport = _RecordingTransport(200, {"scenarios": scenarios})
+        self._patch_client(monkeypatch, transport)
+
+        result = asyncio.run(
+            __import__("src.simulation.client", fromlist=["run_engine"]).run_engine(
+                [{"debt_id": "x"}], 1000.0
+            )
+        )
         assert result == scenarios
 
     def test_remote_missing_scenarios_key_raises_400(self, monkeypatch):
         """Resposta 200 sem chave 'scenarios' -> ServiceError 400."""
-        import src.simulation.client as module
+        self._common_env(monkeypatch)
+        transport = _RecordingTransport(200, {"message": "campo ausente"})
+        self._patch_client(monkeypatch, transport)
 
-        monkeypatch.setenv("WATSONX_SIMULATION_URL", "https://fake.watsonx.ai")
-        monkeypatch.setenv("IBM_CLOUD_API_KEY", "fake-key")
-        async def fake_token(key): return "fake-bearer"
-        monkeypatch.setattr(module, "get_iam_token", fake_token)
-
-        self._patch_client(monkeypatch, _json_transport(200, {"message": "campo ausente"}))
-
-        import asyncio
         with pytest.raises(ServiceError) as exc_info:
-            asyncio.run(module.run_engine([{"debt_id": "x"}], 1000.0))
+            asyncio.run(
+                __import__("src.simulation.client", fromlist=["run_engine"]).run_engine(
+                    [{"debt_id": "x"}], 1000.0
+                )
+            )
 
         err = exc_info.value
         assert err.status_code == 400
@@ -129,21 +189,18 @@ class TestRemotePath:
 
     def test_remote_http_error_raises_503(self, monkeypatch):
         """Erro HTTP do servidor -> ServiceError 503."""
-        import src.simulation.client as module
-
-        monkeypatch.setenv("WATSONX_SIMULATION_URL", "https://fake.watsonx.ai")
-        monkeypatch.setenv("IBM_CLOUD_API_KEY", "fake-key")
-        async def fake_token(key): return "fake-bearer"
-        monkeypatch.setattr(module, "get_iam_token", fake_token)
-
+        self._common_env(monkeypatch)
         self._patch_client(
             monkeypatch,
             _error_transport(httpx.ConnectError("timeout")),
         )
 
-        import asyncio
         with pytest.raises(ServiceError) as exc_info:
-            asyncio.run(module.run_engine([{"debt_id": "x"}], 1000.0))
+            asyncio.run(
+                __import__("src.simulation.client", fromlist=["run_engine"]).run_engine(
+                    [{"debt_id": "x"}], 1000.0
+                )
+            )
 
         err = exc_info.value
         assert err.status_code == 503

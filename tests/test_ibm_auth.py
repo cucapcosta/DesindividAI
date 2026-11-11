@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from urllib.parse import parse_qsl
 
 import httpx
 import pytest
@@ -15,13 +16,17 @@ from src.core.errors import ServiceError
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _iam_transport(status: int, body: dict) -> httpx.MockTransport:
-    """MockTransport que responde sempre com o JSON fornecido."""
+class _RecordingTransport(httpx.AsyncBaseTransport):
+    """AsyncTransport que grava as requisições recebidas."""
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(status, json=body)
+    def __init__(self, status: int, body: dict):
+        self.requests: list[httpx.Request] = []
+        self._status = status
+        self._body = body
 
-    return httpx.MockTransport(handler)
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        return httpx.Response(self._status, json=self._body)
 
 
 def _error_transport(exc: Exception) -> httpx.MockTransport:
@@ -33,7 +38,7 @@ def _error_transport(exc: Exception) -> httpx.MockTransport:
     return httpx.MockTransport(handler)
 
 
-def _patch_client(monkeypatch, transport: httpx.MockTransport) -> None:
+def _patch_client(monkeypatch, transport) -> None:
     """Substitui httpx.AsyncClient dentro de ibm_auth pelo client com transport falso."""
     import src.core.ibm_auth as module
 
@@ -79,54 +84,63 @@ class TestGetIamToken:
         import src.core.ibm_auth as module
 
         future_expiry = int(time.time()) + 3600
-        _patch_client(
-            monkeypatch,
-            _iam_transport(200, {"access_token": "tok-abc", "expiration": future_expiry}),
+        transport = _RecordingTransport(
+            200, {"access_token": "tok-abc", "expiration": future_expiry}
         )
+        _patch_client(monkeypatch, transport)
 
         token = asyncio.run(module.get_iam_token("my-api-key"))
         assert token == "tok-abc"
+
+    def test_iam_request_carries_apikey_and_grant_type(self, monkeypatch):
+        """A requisição ao IAM leva a api key e o grant_type corretos no corpo."""
+        import src.core.ibm_auth as module
+
+        future_expiry = int(time.time()) + 3600
+        transport = _RecordingTransport(
+            200, {"access_token": "tok-check", "expiration": future_expiry}
+        )
+        _patch_client(monkeypatch, transport)
+
+        asyncio.run(module.get_iam_token("test-api-key-123"))
+
+        assert len(transport.requests) == 1
+        req = transport.requests[0]
+        assert req.method == "POST"
+        assert str(req.url) == module.IAM_URL
+        # O corpo é application/x-www-form-urlencoded
+        body = dict(parse_qsl(req.content.decode()))
+        assert body["apikey"] == "test-api-key-123"
+        assert body["grant_type"] == "urn:ibm:params:oauth:grant-type:apikey"
 
     def test_token_is_cached_after_first_call(self, monkeypatch):
         """Segunda chamada com a mesma key NÃO deve bater no IAM novamente."""
         import src.core.ibm_auth as module
 
-        call_count = 0
         future_expiry = int(time.time()) + 3600
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            nonlocal call_count
-            call_count += 1
-            return httpx.Response(
-                200, json={"access_token": "tok-cached", "expiration": future_expiry}
-            )
-
-        class FakeAsyncClient(httpx.AsyncClient):
-            def __init__(self, **kwargs):
-                kwargs.pop("transport", None)
-                super().__init__(transport=httpx.MockTransport(handler), **kwargs)
-
-        monkeypatch.setattr(module.httpx, "AsyncClient", FakeAsyncClient)
+        transport = _RecordingTransport(
+            200, {"access_token": "tok-cached", "expiration": future_expiry}
+        )
+        _patch_client(monkeypatch, transport)
 
         t1 = asyncio.run(module.get_iam_token("cached-key"))
         t2 = asyncio.run(module.get_iam_token("cached-key"))
 
         assert t1 == t2 == "tok-cached"
-        assert call_count == 1, "IAM foi chamado mais de uma vez apesar do cache"
+        assert len(transport.requests) == 1, "IAM foi chamado mais de uma vez apesar do cache"
 
     def test_expired_cache_refreshes_token(self, monkeypatch):
         """Se a entrada no cache está prestes a expirar (< 60s), deve renovar."""
         import src.core.ibm_auth as module
 
-        # Popula cache com token quase expirado (expira em 30s)
         near_expiry = time.time() + 30
         module._cache["stale-key"] = ("old-token", near_expiry)
 
         future_expiry = int(time.time()) + 3600
-        _patch_client(
-            monkeypatch,
-            _iam_transport(200, {"access_token": "new-token", "expiration": future_expiry}),
+        transport = _RecordingTransport(
+            200, {"access_token": "new-token", "expiration": future_expiry}
         )
+        _patch_client(monkeypatch, transport)
 
         token = asyncio.run(module.get_iam_token("stale-key"))
         assert token == "new-token"
@@ -153,7 +167,7 @@ class TestGetIamToken:
 
         _patch_client(
             monkeypatch,
-            _iam_transport(401, {"errorCode": "BXNIM0415E", "errorMessage": "bad key"}),
+            _RecordingTransport(401, {"errorCode": "BXNIM0415E", "errorMessage": "bad key"}),
         )
 
         with pytest.raises(ServiceError) as exc_info:
