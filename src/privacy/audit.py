@@ -169,8 +169,7 @@ class InMemoryAuditRepository:
     """Repositório em memória — apenas para testes (sem rede)."""
 
     def __init__(self) -> None:
-        self._store: list[dict] = {}  # type: ignore[assignment]
-        self._store = []
+        self._store: list[dict] = []
 
     def put(self, doc: dict) -> None:
         # Simulação de inserção simples: substitui documento com o mesmo _id em memória.
@@ -467,7 +466,8 @@ class AuditLogger:
             }
             # Iteratively sanitize pseudonym_id / actor until blocked_record
             # passes the PII guard.
-            while True:
+            _max_sanitize_iterations = 20
+            for _ in range(_max_sanitize_iterations):
                 try:
                     assert_no_pii(blocked_record)
                     break
@@ -479,6 +479,23 @@ class AuditLogger:
                     else:
                         # Unexpected path in blocked_record — remove the field
                         blocked_record.pop(inner_exc.path, None)
+            else:
+                # O sanitizador não convergiu: grava só os campos fixos. O bloqueio
+                # continua registrado na trilha, sem nenhum valor vindo do chamador.
+                logger.error(
+                    "audit.pii_blocked: sanitizador não convergiu; gravando registro mínimo",
+                    extra={"event_type": event_type},
+                )
+                blocked_record = {
+                    "_id": blocked_trace_id,
+                    "type": "audit_event",
+                    "trace_id": blocked_trace_id,
+                    "recorded_at": blocked_record["recorded_at"],
+                    "event_type": "audit.pii_blocked",
+                    "pseudonym_id": None,
+                    "actor": "redacted",
+                    "blocked_event_type": event_type,
+                }
             self._dispatch(blocked_record)
             return blocked_trace_id
 

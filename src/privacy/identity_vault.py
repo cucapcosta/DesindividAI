@@ -363,7 +363,7 @@ class IdentityVault:
                 ok=False,
             )
             raise VaultError(
-                f"Titular {pseudonym_id!r} não encontrado ou já destruído (shredded)."
+                "Titular não encontrado ou já destruído (shredded)."
             )
 
         try:
@@ -394,7 +394,7 @@ class IdentityVault:
                 ok=False,
             )
             raise VaultError(
-                f"Falha ao decifrar CPF do titular {pseudonym_id!r}: {exc}"
+                "Falha ao decifrar CPF: chave ou ciphertext corrompido."
             ) from exc
 
         self._fire_audit(
