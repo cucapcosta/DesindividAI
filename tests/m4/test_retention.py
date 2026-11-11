@@ -1400,7 +1400,7 @@ def test_retry_429_always_raises_after_attempts():
         _with_429_retry(fn, attempts=5, base_delay=0.1, sleep=lambda _: None)
 
     assert len(calls) == 5
-    assert exc_info.value.code == 429
+    assert exc_info.value.status_code == 429
 
 
 def test_retry_500_propagates_immediately():
@@ -1418,7 +1418,7 @@ def test_retry_500_propagates_immediately():
         _with_429_retry(fn, attempts=5, base_delay=0.1, sleep=lambda _: None)
 
     assert len(calls) == 1
-    assert exc_info.value.code == 500
+    assert exc_info.value.status_code == 500
 
 
 def test_retry_delay_capped_at_8s():

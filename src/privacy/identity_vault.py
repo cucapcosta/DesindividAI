@@ -137,7 +137,7 @@ class CloudantVaultRepository:
                 db=self._db, doc_id=pseudonym_id
             ).get_result()
         except ApiException as exc:
-            if exc.code == 404:
+            if exc.status_code == 404:
                 return None
             raise
 
@@ -270,7 +270,7 @@ class IdentityVault:
         except Exception as exc:
             # Tratar criação concorrente (409): se o documento agora está ativo,
             # retornar o pseudonym_id existente; caso contrário, relançar.
-            code = getattr(exc, "code", None)
+            code = getattr(exc, "status_code", None)
             if code == 409:
                 fresh = self._repo.get(pseudonym_id)
                 if fresh is not None and fresh.get("shredded_at") is None:

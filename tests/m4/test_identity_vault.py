@@ -445,10 +445,10 @@ def test_audit_called_before_raise_on_empty_purpose():
 # -------------------------------------------------------------------------------
 
 class _FakeApiException(Exception):
-    """Simula ibm_cloud_sdk_core.ApiException com atributo .code."""
+    """Simula ibm_cloud_sdk_core.ApiException com atributo .status_code."""
 
     def __init__(self, code: int) -> None:
-        self.code = code
+        self.status_code = code
         super().__init__(f"ApiException code={code}")
 
 
@@ -529,7 +529,7 @@ def test_store_non_409_exception_is_reraised():
 
     with pytest.raises(_FakeApiException) as exc_info:
         vault.store(_CPF)
-    assert exc_info.value.code == 500
+    assert exc_info.value.status_code == 500
 
 
 # B3: get_vault_repository() usa ConfigurationError
