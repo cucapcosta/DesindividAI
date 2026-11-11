@@ -90,7 +90,7 @@ Fora da lista fechada, há um evento **só de log** (não vai para o `audit_trai
 | `retention.run` | `snapshots_deleted`, `decisions_deleted`, `consents_awaiting_deleted`, `consents_rejected_deleted`, `consents_expired`, `consents_revoked_deleted`, `vault_shredded`, `audit_events_deleted`, `skipped_invalid`, `errors`, `dry_run`, `aborted` |
 | `subject.access_exported` | `key_version`, `consents`, `snapshots`, `decisions`, `audit_events` (contagens) |
 | `agent1.snapshot_persisted` | `snapshot_id`, `consent_id`, `model_id`, `tool_calls` (lista de nomes) |
-| `audit.pii_blocked` | `blocked_event_type`, `violation_path` |
+| `audit.pii_blocked` | `blocked_event_type`, `violation_path` (pode estar ausente se o sanitizador não convergir e o próprio path contiver PII) |
 | `agent2.simulation_created` | `simulation_id`, `snapshot_id`, `consent_id` — nunca prompt ou output |
 | `agent2.recommendation_generated` | `decision_trace_id`, `simulation_id`, `recommended_scenario`, `model_id`, `prompt_sha256`, `output_sha256` — **nunca** o texto do prompt ou da saída |
 
@@ -222,7 +222,8 @@ Alertas que dependem de logs de plataforma (só produção, via Activity Tracker
 A guarda de PII ([`src/privacy/pii_guard.py`](../src/privacy/pii_guard.py)) é aplicada antes de gravar qualquer evento. Se detectar PII:
 
 1. O evento original é descartado.
-2. Um evento substituto `audit.pii_blocked` é gravado com `blocked_event_type` e `violation_path`.
+2. Um evento substituto `audit.pii_blocked` é gravado com `blocked_event_type` e, quando disponível, `violation_path`.
+   - Se o sanitizador não convergir em `_MAX_SANITIZE_ITERATIONS` tentativas, um registro mínimo é gravado (fail-closed); nesse caso `violation_path` pode estar ausente se o próprio valor do path contiver PII.
 3. O `trace_id` do evento substituto é retornado.
 
 Isso garante que nenhum CPF, número de contrato ou outro dado pessoal chegue ao Cloudant, ao COS ou ao GovernanceSink.

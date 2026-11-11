@@ -54,6 +54,11 @@ _FORBIDDEN_KEYS: frozenset[str] = frozenset({
     "birth_date",
     "date_of_birth",
     "dob",
+    "birthdate",
+    "dateofbirth",
+    "cns",
+    "passport",
+    "passaporte",
 })
 
 # ---------------------------------------------------------------------------

@@ -19,7 +19,11 @@ from tests.conftest import SNAPSHOT_ID
 class _FakeSimulationResponse:
     """Imita SimulationResponse com model_dump(mode='json')."""
 
+    def __init__(self):
+        self.last_mode: str | None = None
+
     def model_dump(self, *, mode: str = "python") -> dict:
+        self.last_mode = mode
         return {
             "simulation_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
             "snapshot_id": SNAPSHOT_ID,
@@ -35,8 +39,9 @@ class _FakeSimulationResponse:
 def _make_fake_create_simulation(captured: list):
     """Devolve um fake de create_simulation que grava os args em captured."""
     async def fake_create_simulation(store, snapshot_id, monthly_budget):
-        captured.append({"store": store, "snapshot_id": snapshot_id, "monthly_budget": monthly_budget})
-        return _FakeSimulationResponse()
+        resp = _FakeSimulationResponse()
+        captured.append({"store": store, "snapshot_id": snapshot_id, "monthly_budget": monthly_budget, "response": resp})
+        return resp
     return fake_create_simulation
 
 
@@ -75,6 +80,8 @@ def test_run_simulation_returns_model_dump(monkeypatch):
 
     assert isinstance(result, dict)
     assert result["snapshot_id"] == SNAPSHOT_ID
+    # model_dump deve ter sido chamado com mode="json"
+    assert captured[0]["response"].last_mode == "json"
 
 
 def test_run_simulation_passes_monthly_budget(monkeypatch):
@@ -125,12 +132,12 @@ def test_run_simulation_passes_store(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_run_simulation_invalid_snapshot_id_raises(monkeypatch):
-    """snapshot_id que não é UUID válido deve levantar ValueError (ou similar)."""
+    """snapshot_id que não é UUID válido deve levantar ValueError."""
     captured: list = []
     monkeypatch.setattr(tools_module, "create_simulation", _make_fake_create_simulation(captured))
     monkeypatch.setattr(tools_module, "get_store", lambda: _FakeStore())
 
-    with pytest.raises((ValueError, Exception)):
+    with pytest.raises(ValueError):
         asyncio.run(
             run_simulation.ainvoke({"snapshot_id": "not-a-uuid", "monthly_budget": 1500.0})
         )
