@@ -127,9 +127,51 @@ O que **não** existe nesta conta: Open Finance e Serasa reais, IBM API Connect,
 
 ---
 
+## Visão × implementado
+
+O que a visão de produto (seções seguintes) descreve e o que este repositório entrega hoje.
+
+| Área | Visão | Implementado | Status |
+|---|---|---|---|
+| Interface | watsonx Assistant no App BB, WhatsApp e Internet Banking | API FastAPI e a página [`/demo`](demo/index.html) | Substituído |
+| Orquestração | Agente Orquestrador multiagente (ex.: AutoGen) | Endpoints REST em sequência: `/consent` → `/debts` → `/simulation` → `/recommendation` | Próximo passo |
+| Agente Analista | Ingere dados e prioriza dívidas pelo CET | Agente 1 ([`src/agents/agent1/`](src/agents/agent1/)): `AgentExecutor` LangChain com Granite, prioriza pelo CET | Implementado |
+| Agente Conselheiro | Traduz cenários para linguagem simples | Agente 2 ([`recommendation_agent.py`](src/agents/recommendation_agent.py)): o Granite redige a explicação; o cenário é escolhido por regra determinística ([ADR 0001](docs/adr/0001-recomendacao-por-regra-deterministica.md)) e [`explanation_guard.py`](src/agents/explanation_guard.py) bloqueia números que não vêm da simulação | Implementado, com desvio documentado |
+| Agente Negociador | Negocia descontos com plataformas de acordo | Não existe | Próximo passo |
+| Motor de simulação | CET e amortização | [`engine.py`](src/simulation/engine.py): 3 cenários com plano mês a mês; empacotado como AI Service do watsonx.ai ([`ai_service.py`](src/simulation/ai_service.py)), mas roda local enquanto `WATSONX_SIMULATION_URL` estiver vazio | Implementado |
+| LLM | watsonx.ai nos quatro agentes | Granite no watsonx.ai nos dois agentes implementados | Parcial |
+| Gateway | IBM API Connect + DataPower (mTLS, rate limit) | Contrato em [`openapi/openapi.yaml`](openapi/openapi.yaml); FAPI, mTLS e `429` só especificados (pendências da Sub-Tarefa 1 no [`PLANO.md`](PLANO.md)) | Serviço ausente na conta |
+| Dados | watsonx.data (lakehouse) | IBM Cloudant e cópia da auditoria no Cloud Object Storage | Substituído |
+| Fontes externas | Open Finance, Serasa, Core BB | Open Finance e Serasa em sandbox (dados fictícios); taxas de mercado reais da API SGS do Banco Central | Sandbox |
+| Governança | watsonx.governance: viés, explicabilidade, OpenPages | [`governance.py`](src/services/governance.py) persiste o trace de cada recomendação (prompt, saída, modelo, regra, hashes) no Cloudant | Próximo passo |
+| LGPD | Anonimização entre watsonx.data e watsonx.ai | Pseudonimização HMAC-SHA256, cofre de CPF com AES-256-GCM e envelope encryption, guarda de PII antes do LLM e da auditoria, trilha fail-closed, retenção e apagamento, direitos do titular por CPF ([`src/privacy/`](src/privacy/)) | Implementado no código |
+| Chaves | — | `EnvKeyProvider` com versionamento, chaves em variáveis de ambiente | Simplificado |
+| Alertas | Acompanhamento mensal via watsonx Assistant | Não existe | Próximo passo |
+
+### Próximos passos
+
+| Item | O que falta | Bloqueio |
+|---|---|---|
+| watsonx Orchestrate como orquestrador e interface conversacional | Publicar o motor de simulação e a regra de recomendação como tools e criar o agente; ou importar o `openapi.yaml` como tools | Para chamar a API, o Orchestrate precisa de uma URL pública; o grupo do hackathon tem só `Viewer` de plataforma no Code Engine e não pode criar projeto |
+| watsonx.governance | Enviar o trace que [`governance.py`](src/services/governance.py) já monta para o payload logging da instância | A instância do hackathon é OpenScale; com o papel `Writer`, o data mart responde `AIOSC9204E: Not authorized`. Falta um administrador configurar data mart, service provider e subscription |
+| Motor de simulação no watsonx.ai | Fazer o deploy do AI Service e preencher `WATSONX_SIMULATION_URL` | — |
+| Agente Negociador | Negociação de descontos com teto aprovado pelo cliente | — |
+| Acompanhamento mensal | Alertas proativos ao cliente | — |
+| Gateway e token do titular | FAPI, mTLS, introspecção, rate limit | IBM API Connect ausente na conta |
+
+### Fontes de dados
+
+| Fonte | Uso | Natureza |
+|---|---|---|
+| [API SGS do Banco Central](https://dadosabertos.bcb.gov.br/) | Taxas médias de juros PF por produto, usadas para estimar o CET de dívidas que só aparecem no Serasa ([`scripts/update_market_rates.py`](scripts/update_market_rates.py) → `market_rates.json`) | Dado público real |
+| Open Finance Brasil | Contratos de crédito do cliente | Sandbox, dados fictícios |
+| Serasa | Relatório de dívidas do CPF | Sandbox, dados fictícios |
+
+---
+
 ## Visão de produto
 
-As seções abaixo descrevem a visão completa do produto. O escopo implementado e os desvios registrados estão no [`PLANO.md`](PLANO.md).
+As seções abaixo descrevem a visão completa do produto. O que está implementado está na tabela [Visão × implementado](#visão--implementado).
 
 ## Arquitetura da Solução
 
@@ -209,12 +251,15 @@ As seções abaixo descrevem a visão completa do produto. O escopo implementado
 
 ## Papel do IBM Bob no Ciclo de Vida
 
-| Fase | Contribuição |
+O IBM Bob IDE foi a ferramenta de desenvolvimento do projeto. Cada tarefa, com custo e contexto, está registrada em [`bob_sessions/`](bob_sessions/).
+
+| Fase | Uso registrado nas sessões |
 |---|---|
-| **Arquitetura** | Diagramas de sequência do sistema multiagente; mapeamento de fluxos de autenticação mútua (mTLS) para o ecossistema Open Finance. |
-| **Código e Integração** | Geração de scripts Python/Node.js para consumo das APIs do Serasa e Open Finance via API Connect; motor de simulação (CET e amortização); testes unitários automatizados. |
-| **Segurança e Conformidade** | Revisão de prompts e código-fonte contra injeção de prompt; análise das rotinas de ofuscação e anonimização de dados entre watsonx.data e watsonx.ai; aderência à LGPD. |
-| **Documentação Contínua** | ADRs, esquemas OpenAPI (Swagger), mapas de fluxo de dados — mantidos em sincronia com o código produzido. |
+| **Arquitetura e planejamento** | Feedback da documentação inicial e da arquitetura sobre o ecossistema IBM; plano de ação do M4 dividido em fases |
+| **Implementação** | Consentimento Open Finance (M1); camada de dados e LGPD (M4): pseudonimização, cofre de identidade, guarda de PII, auditoria, retenção e pontos de integração com M1 e M2 |
+| **Testes** | Testes ponta a ponta do M4 contra a cloud real; testes unitários de armazenamento, cliente de simulação, IAM, AI Service e tools do Agente 2 |
+| **Revisão e correção** | Revisão do PR do M3; correções de review em lotes; revisão LGPD de `src/privacy/` ([`docs/revisao-bob-privacy.md`](docs/revisao-bob-privacy.md)) e correção dos achados |
+| **Documentação** | Docs `m4-*` (ROPA, RIPD, mapeamento de dados, retenção, chaves e IAM) |
 
 ---
 
