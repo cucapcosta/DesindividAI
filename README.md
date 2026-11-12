@@ -2,6 +2,8 @@
 
 > Assistente de inteligência financeira para desendividamento, construído sobre o ecossistema IBM watsonx.
 
+Vídeo de demonstração (3 min, narrado): [`docs/video/desendividai-demo.mp4`](docs/video/desendividai-demo.mp4) · Resumos das sessões do IBM Bob: [`bob_sessions/`](bob_sessions/)
+
 ---
 
 ## Visão Geral

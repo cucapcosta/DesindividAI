@@ -70,7 +70,7 @@ class CloudantRepository:
                 db=self._snapshots_db, doc_id=snapshot_id
             ).get_result()
         except ApiException as exc:
-            if exc.code == 404:
+            if exc.status_code == 404:
                 return None
             raise
 

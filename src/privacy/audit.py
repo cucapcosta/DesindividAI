@@ -155,6 +155,8 @@ _RESERVED_FIELDS: frozenset[str] = frozenset({
     "event_type", "pseudonym_id", "actor",
 })
 
+_MAX_SANITIZE_ITERATIONS: int = 20
+
 
 # ---------------------------------------------------------------------------
 # Repositório de auditoria
@@ -169,8 +171,7 @@ class InMemoryAuditRepository:
     """Repositório em memória — apenas para testes (sem rede)."""
 
     def __init__(self) -> None:
-        self._store: list[dict] = {}  # type: ignore[assignment]
-        self._store = []
+        self._store: list[dict] = []
 
     def put(self, doc: dict) -> None:
         # Simulação de inserção simples: substitui documento com o mesmo _id em memória.
@@ -406,9 +407,13 @@ class AuditLogger:
           - O registro original NÃO é gravado em nenhum destino.
           - Um evento substituto `audit.pii_blocked` é gravado com
             {"blocked_event_type", "violation_path"}.
-          - Se a violação era em pseudonym_id ou actor, esses campos são
-            substituídos por None / "redacted" antes de gravar o substituto.
+          - Se a violação era em pseudonym_id ou actor (ou sub-paths como
+            "pseudonym_id[0]" ou "actor.cpf"), esses campos são substituídos
+            por None / "redacted" antes de gravar o substituto.
           - O trace_id desse evento substituto é retornado.
+          - Se o sanitizador não convergir em _MAX_SANITIZE_ITERATIONS tentativas,
+            um registro mínimo é gravado (fail-closed); nesse caso "violation_path"
+            pode estar ausente se o próprio path contiver PII.
 
         Ordem de gravação: Cloudant → COS → governance.
         Falha em qualquer destino: logger.error estruturado (sem PII) + continua.
@@ -466,19 +471,52 @@ class AuditLogger:
                 "violation_path": pii_exc.path,
             }
             # Iteratively sanitize pseudonym_id / actor until blocked_record
-            # passes the PII guard.
-            while True:
+            # passes the PII guard.  Match by prefix so that structured values
+            # (e.g. pseudonym_id=["529..."] → path "pseudonym_id[0]") are also
+            # handled correctly.
+            def _path_is_pseudonym_id(p: str) -> bool:
+                return p == "pseudonym_id" or p.startswith("pseudonym_id.") or p.startswith("pseudonym_id[")
+
+            def _path_is_actor(p: str) -> bool:
+                return p == "actor" or p.startswith("actor.") or p.startswith("actor[")
+
+            for _ in range(_MAX_SANITIZE_ITERATIONS):
                 try:
                     assert_no_pii(blocked_record)
                     break
                 except PIIViolation as inner_exc:
-                    if inner_exc.path == "pseudonym_id":
+                    if _path_is_pseudonym_id(inner_exc.path):
                         blocked_record["pseudonym_id"] = None
-                    elif inner_exc.path == "actor":
+                    elif _path_is_actor(inner_exc.path):
                         blocked_record["actor"] = "redacted"
                     else:
                         # Unexpected path in blocked_record — remove the field
                         blocked_record.pop(inner_exc.path, None)
+            else:
+                # O sanitizador não convergiu: grava só os campos fixos. O bloqueio
+                # continua registrado na trilha, sem nenhum valor vindo do chamador.
+                logger.error(
+                    "audit.pii_blocked: sanitizador não convergiu; gravando registro mínimo",
+                    extra={"event_type": event_type},
+                )
+                # Include violation_path only if the value is itself safe.
+                minimal: dict = {
+                    "_id": blocked_trace_id,
+                    "type": "audit_event",
+                    "trace_id": blocked_trace_id,
+                    "recorded_at": blocked_record["recorded_at"],
+                    "event_type": "audit.pii_blocked",
+                    "pseudonym_id": None,
+                    "actor": "redacted",
+                    "blocked_event_type": event_type,
+                }
+                try:
+                    candidate = {**minimal, "violation_path": pii_exc.path}
+                    assert_no_pii(candidate)
+                    minimal = candidate
+                except PIIViolation:
+                    pass
+                blocked_record = minimal
             self._dispatch(blocked_record)
             return blocked_trace_id
 

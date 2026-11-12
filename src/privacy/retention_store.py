@@ -271,13 +271,13 @@ class CloudantRetentionStore:
                 )
                 rev = fetched.get("_rev", "")
             except ApiException as exc:
-                if exc.code == 404:
+                if exc.status_code == 404:
                     return
                 raise
         try:
             _with_429_retry(lambda: self._client.delete_document(db=db, doc_id=doc_id, rev=rev))
         except ApiException as exc:
-            if exc.code == 404:
+            if exc.status_code == 404:
                 return
             raise
 
@@ -347,7 +347,7 @@ def ensure_databases(client) -> None:
             _with_429_retry(lambda d=db: client.put_database(db=d).get_result())
             logger.info("ensure_databases: banco criado: %s", db)
         except ApiException as exc:
-            if exc.code == 412:
+            if exc.status_code == 412:
                 logger.debug("ensure_databases: banco já existe: %s", db)
             else:
                 raise
