@@ -255,7 +255,7 @@ O IBM Bob IDE foi a ferramenta de desenvolvimento do projeto. Cada tarefa, com c
 
 | Fase | Uso registrado nas sessões |
 |---|---|
-| **Arquitetura e planejamento** | Feedback da documentação inicial e da arquitetura sobre o ecossistema IBM; plano de ação do M4 dividido em fases |
+| **Arquitetura e planejamento** | Feedback da documentação inicial e da arquitetura sobre o ecossistema IBM; reescrita da Parte B do plano de ação do M4 |
 | **Implementação** | Consentimento Open Finance (M1); camada de dados e LGPD (M4): pseudonimização, cofre de identidade, guarda de PII, auditoria, retenção e pontos de integração com M1 e M2 |
 | **Testes** | Testes ponta a ponta do M4 contra a cloud real; testes unitários de armazenamento, cliente de simulação, IAM, AI Service e tools do Agente 2 |
 | **Revisão e correção** | Revisão do PR do M3; correções de review em lotes; revisão LGPD de `src/privacy/` ([`docs/revisao-bob-privacy.md`](docs/revisao-bob-privacy.md)) e correção dos achados |
