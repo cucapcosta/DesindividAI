@@ -3,12 +3,17 @@ uvicorn[standard]>=0.29.0
 pydantic>=2.7.0
 python-dotenv>=1.0.0
 httpx>=0.27.0
+pyjwt[crypto]>=2.8.0   # M1 — valida o token IAM do canal (src/core/channel_auth.py)
 
-# Agente 1 (M2) — LangChain 1.x + watsonx.ai
+# Agentes 1 e 2 (M2/M3) — LangChain 1.x + watsonx.ai
 langchain>=1.0.0
 langchain-classic>=1.0.0   # AgentExecutor (movido do langchain 1.x)
 langchain-ibm>=1.0.0
 ibmcloudant>=0.9.0
+
+# M4 — Criptografia e COS
+cryptography>=42.0.0
+ibm-cos-sdk>=2.13.0
 
 # Testes
 pytest>=8.0.0

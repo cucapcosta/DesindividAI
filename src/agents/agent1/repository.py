@@ -10,11 +10,12 @@ O repositório em memória existe só para testes (injetado explicitamente).
 
 from __future__ import annotations
 
-import os
 from functools import lru_cache
 from typing import Optional, Protocol
 
-from .config import CLOUDANT_VARS, require_env
+from src.core.cloudant import build_cloudant_client  # noqa: F401  (re-exportado para compatibilidade)
+from src.core.config import consents_db, snapshots_db
+
 
 class Repository(Protocol):
     def get_consent(self, consent_id: str) -> Optional[dict]: ...
@@ -38,12 +39,8 @@ class InMemoryRepository:
 
 
 class CloudantRepository:
-    def __init__(self, url: str, apikey: str, consents_db: str, snapshots_db: str):
-        from ibm_cloud_sdk_core.authenticators import IAMAuthenticator
-        from ibmcloudant.cloudant_v1 import CloudantV1
-
-        self._client = CloudantV1(authenticator=IAMAuthenticator(apikey))
-        self._client.set_service_url(url)
+    def __init__(self, client, consents_db: str, snapshots_db: str):
+        self._client = client
         self._consents_db = consents_db
         self._snapshots_db = snapshots_db
 
@@ -73,17 +70,13 @@ class CloudantRepository:
                 db=self._snapshots_db, doc_id=snapshot_id
             ).get_result()
         except ApiException as exc:
-            if exc.code == 404:
+            if exc.status_code == 404:
                 return None
             raise
 
 
 @lru_cache(maxsize=1)
 def get_repository() -> Repository:
-    require_env(*CLOUDANT_VARS)
     return CloudantRepository(
-        url=os.environ["CLOUDANT_URL"],
-        apikey=os.environ["CLOUDANT_APIKEY"],
-        consents_db=os.getenv("CLOUDANT_DB_CONSENTS", "consent_registry"),
-        snapshots_db=os.getenv("CLOUDANT_DB_SNAPSHOTS", "financial_snapshots"),
+        client=build_cloudant_client(), consents_db=consents_db(), snapshots_db=snapshots_db()
     )

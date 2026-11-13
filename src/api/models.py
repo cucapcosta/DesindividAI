@@ -32,6 +32,25 @@ class ProductType(str, Enum):
     MORTGAGE = "MORTGAGE"
 
 
+# Nome em português de cada produto, para texto voltado ao cliente (nunca expor o código do enum).
+PRODUCT_LABELS_PT: dict[ProductType, str] = {
+    ProductType.CREDIT_CARD: "cartão de crédito",
+    ProductType.PERSONAL_LOAN: "empréstimo pessoal",
+    ProductType.PAYROLL_LOAN: "crédito consignado",
+    ProductType.OVERDRAFT: "cheque especial",
+    ProductType.VEHICLE_LOAN: "financiamento de veículo",
+    ProductType.MORTGAGE: "financiamento imobiliário",
+}
+
+
+def product_label_pt(value: object) -> str:
+    """Nome em português do produto; valor desconhecido vira 'dívida'."""
+    try:
+        return PRODUCT_LABELS_PT[ProductType(value)]
+    except ValueError:
+        return "dívida"
+
+
 class ScenarioId(str, Enum):
     AGGRESSIVE = "aggressive"
     CONSOLIDATION = "consolidation"
@@ -48,9 +67,9 @@ class LanguageLevel(str, Enum):
 # ---------------------------------------------------------------------------
 
 class ConsentRequest(BaseModel):
-    cpf: str = Field(..., pattern=r"^\d{11}$", example="01234567890")
-    institutions: List[str] = Field(..., min_length=1, example=["bb", "itau"])
-    scopes: List[str] = Field(..., min_length=1, example=["debts:read"])
+    cpf: str = Field(..., pattern=r"^[0-9]{11}$", json_schema_extra={"example": "01234567890"})
+    institutions: List[str] = Field(..., min_length=1, max_length=20, json_schema_extra={"example": ["bb", "itau"]})
+    scopes: List[str] = Field(..., min_length=1, json_schema_extra={"example": ["debts:read"]})
     expiration_days: int = Field(default=90, ge=1, le=365)
 
 
@@ -60,6 +79,17 @@ class ConsentResponse(BaseModel):
     redirect_url: str
     expires_at: str
     created_at: str
+
+
+class ConsentStatusResponse(BaseModel):
+    consent_id: str
+    status: ConsentStatus
+    institutions: List[str]
+    scopes: List[str]
+    created_at: str
+    expires_at: str
+    authorised_at: Optional[str] = None
+    revoked_at: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +121,7 @@ class DebtListResponse(BaseModel):
 
 class SimulationRequest(BaseModel):
     snapshot_id: UUID
-    monthly_budget: float = Field(..., ge=0)
+    monthly_budget: float = Field(..., gt=0, le=1_000_000)
 
 
 class MonthlyPaymentItem(BaseModel):
@@ -112,6 +142,10 @@ class SimulationScenario(BaseModel):
     total_interest_paid: float
     total_savings_vs_minimum: float
     monthly_plan: List[MonthPlan]
+    # Campos do motor atual; ausentes em simulações antigas e em AI Services desatualizados.
+    paid_off: Optional[bool] = None
+    minimum_payments_total: Optional[float] = None
+    budget_below_minimums: Optional[bool] = None
 
 
 class SimulationResponse(BaseModel):

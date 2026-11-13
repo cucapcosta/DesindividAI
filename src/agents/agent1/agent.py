@@ -9,11 +9,11 @@ AgentExecutionError — um snapshot só existe se o agente o gerou.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Optional
 
+from src.core.config import WATSONX_VARS, env, require_env, watsonx_scope
+
 from . import tools
-from .config import WATSONX_VARS, require_env
 from .prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 from .repository import Repository, get_repository
 from .sources import (
@@ -39,10 +39,10 @@ def build_llm():
 
     require_env(*WATSONX_VARS)
     return ChatWatsonx(
-        model_id=os.getenv("WATSONX_MODEL_ID", DEFAULT_MODEL_ID),
-        url=os.environ["WATSONX_URL"],
-        project_id=os.environ["WATSONX_PROJECT_ID"],
-        apikey=os.environ["IBM_CLOUD_API_KEY"],
+        model_id=env("WATSONX_MODEL_ID", DEFAULT_MODEL_ID),
+        url=env("WATSONX_URL"),
+        apikey=env("IBM_CLOUD_API_KEY"),
+        **watsonx_scope(),
         # Temperatura 0: o agente só orquestra tools; queremos a mesma
         # sequência de chamadas para a mesma entrada (auditabilidade).
         params={"temperature": 0, "max_tokens": 512},
@@ -81,8 +81,30 @@ def run_agent1(
     open_finance: Optional[OpenFinanceClient] = None,
     serasa: Optional[SerasaClient] = None,
     llm=None,
+    audit=None,
 ) -> dict:
     """Executa o Agente 1 e devolve o snapshot persistido (fonte da resposta da API)."""
+    # M4: se audit não for injetado, tenta get_audit_logger(); falha → None + warning.
+    if audit is None:
+        from src.privacy.audit import get_audit_logger_or_none
+        audit = get_audit_logger_or_none()
+
+    # R-20: determinar a versão da chave que gerou o pseudonym_id.
+    # Preferência: consent["key_version"] > cofre (identity_vault) > None (fallback na tool).
+    pseudonym_key_version: Optional[str] = consent.get("key_version")
+    if pseudonym_key_version is None:
+        try:
+            from src.privacy.identity_vault import get_vault_repository
+            vault_doc = get_vault_repository().get(consent.get("pseudonym_id", ""))
+            if vault_doc is not None:
+                pseudonym_key_version = vault_doc.get("key_version")
+        except Exception as exc:
+            logger.warning(
+                "run_agent1: não foi possível obter key_version do cofre; "
+                "persist_snapshot usará a versão ativa. exc=%s",
+                type(exc).__name__,
+            )
+
     llm = llm or build_llm()
     ctx = RunContext(
         consent=consent,
@@ -91,6 +113,8 @@ def run_agent1(
         serasa=serasa or build_serasa_client(),
         # Registra o modelo que de fato rodou (o injetado, se houver).
         model_id=getattr(llm, "model_id", None),
+        audit=audit,
+        pseudonym_key_version=pseudonym_key_version,
     )
     _execute(ctx, llm)
     return ctx.snapshot

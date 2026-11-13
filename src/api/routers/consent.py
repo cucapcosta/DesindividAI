@@ -2,18 +2,19 @@
 Endpoints de consentimento Open Finance.
 Responsável: M1
 
-Implementar:
-    - Persistência em Cloudant (consent_registry)
-    - Integração com IBM API Connect Native OAuth Provider
-    - Geração do pseudonym_id (HMAC-SHA256) — ver docs/m1-consent-lifecycle.md
+Rotas finas — regras de negócio em src/services/consent_service.py.
+ServiceError levanta para o handler global em main.py.
+POST/GET/DELETE exigem o token IAM do canal (src/core/channel_auth.py); o callback não.
 """
 
 from uuid import UUID
 
-from fastapi import APIRouter, status
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, Query, status
 
-from src.api.models import ConsentRequest, ConsentResponse, ErrorResponse
+from src.api.models import ConsentRequest, ConsentResponse, ConsentStatusResponse, ErrorResponse
+from src.core.channel_auth import require_channel_token
+from src.services import consent_service
+from src.storage.store import DocumentStore, get_store
 
 router = APIRouter(prefix="/consent", tags=["Consent"])
 
@@ -23,46 +24,99 @@ router = APIRouter(prefix="/consent", tags=["Consent"])
     response_model=ConsentResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Criar consentimento Open Finance",
+    dependencies=[Depends(require_channel_token)],
     responses={
-        400: {"model": ErrorResponse},
-        401: {"model": ErrorResponse},
-        429: {"model": ErrorResponse},
+        400: {"model": ErrorResponse, "description": "INVALID_REQUEST | INVALID_CPF | INVALID_SCOPE"},
+        401: {"model": ErrorResponse, "description": "Token do canal ausente, inválido ou de canal não autorizado (UNAUTHORIZED)"},
+        429: {"model": ErrorResponse, "description": "Rate limit excedido"},
+        503: {"model": ErrorResponse, "description": "SERVICE_UNAVAILABLE | NOT_CONFIGURED"},
     },
 )
-async def create_consent(body: ConsentRequest) -> ConsentResponse:
+async def create_consent(
+    body: ConsentRequest,
+    store: DocumentStore = Depends(get_store),
+) -> ConsentResponse:
     """
-    Inicia o fluxo de consentimento OAuth2/Open Finance (FAPI 1.0).
+    Inicia o fluxo de consentimento OAuth2/Open Finance (FAPI 1.0 — modo sandbox).
     Retorna redirect_url para o cliente autorizar no portal da instituição.
-
-    TODO (M1):
-        1. Gerar pseudonym_id = HMAC-SHA256(cpf, chave_mestra)
-        2. Persistir documento em Cloudant → consent_registry
-           com status AWAITING_AUTHORISATION
-        3. Construir redirect_url apontando para o Authorization Server
-        4. Retornar ConsentResponse com consent_id e redirect_url
     """
-    raise NotImplementedError
+    return await consent_service.create_consent(store, body)
+
+
+# /callback deve ser declarado antes de /{consent_id} para o FastAPI não casar "callback" como UUID.
+@router.get(
+    "/callback",
+    response_model=ConsentStatusResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Callback OAuth: transiciona AWAITING_AUTHORISATION → AUTHORISED ou REJECTED",
+    responses={
+        400: {"model": ErrorResponse, "description": "INVALID_REQUEST"},
+        403: {"model": ErrorResponse, "description": "CONSENT_AUTHORISATION_EXPIRED | CONSENT_REJECTED"},
+        404: {"model": ErrorResponse, "description": "CONSENT_NOT_FOUND"},
+        409: {"model": ErrorResponse, "description": "CONSENT_INVALID_STATE"},
+        503: {"model": ErrorResponse, "description": "SERVICE_UNAVAILABLE"},
+    },
+)
+async def consent_callback(
+    state: str = Query(...),
+    code: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+    store: DocumentStore = Depends(get_store),
+) -> ConsentStatusResponse:
+    """
+    Recebe o retorno do Authorization Server com code (aprovado) ou error (negado).
+    No modo sandbox (OPEN_FINANCE_AUTH_SANDBOX=true) a transição ocorre automaticamente.
+
+    Limitação: a troca code→token (PKCE) e a introspecção são responsabilidade do IBM API
+    Connect. O backend valida apenas o state e persiste o novo status.
+    O state é de uso único: após autorização bem-sucedida, uma segunda chamada com o
+    mesmo state retorna 404 CONSENT_NOT_FOUND. O mesmo 404 vale para um state cujo
+    consentimento AWAITING vencido já foi apagado pela retenção do M4.
+    """
+    return await consent_service.authorise_callback(store, state, code, error)
+
+
+@router.get(
+    "/{consent_id}",
+    response_model=ConsentStatusResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Status do consentimento",
+    dependencies=[Depends(require_channel_token)],
+    responses={
+        400: {"model": ErrorResponse, "description": "INVALID_REQUEST"},
+        401: {"model": ErrorResponse, "description": "Token do canal ausente, inválido ou de canal não autorizado (UNAUTHORIZED)"},
+        404: {"model": ErrorResponse, "description": "CONSENT_NOT_FOUND"},
+        503: {"model": ErrorResponse, "description": "SERVICE_UNAVAILABLE"},
+    },
+)
+async def get_consent_status(
+    consent_id: UUID,
+    store: DocumentStore = Depends(get_store),
+) -> ConsentStatusResponse:
+    """Retorna o status atual do consentimento para o canal acompanhar."""
+    return await consent_service.get_consent_status(store, str(consent_id))
 
 
 @router.delete(
     "/{consent_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Revogar consentimento",
+    dependencies=[Depends(require_channel_token)],
     responses={
-        404: {"model": ErrorResponse},
-        401: {"model": ErrorResponse},
+        400: {"model": ErrorResponse, "description": "INVALID_REQUEST"},
+        401: {"model": ErrorResponse, "description": "Token do canal ausente, inválido ou de canal não autorizado (UNAUTHORIZED)"},
+        404: {"model": ErrorResponse, "description": "CONSENT_NOT_FOUND"},
+        409: {"model": ErrorResponse, "description": "CONSENT_INVALID_STATE (escritas concorrentes)"},
+        503: {"model": ErrorResponse, "description": "SERVICE_UNAVAILABLE"},
     },
 )
-async def revoke_consent(consent_id: UUID) -> None:
+async def revoke_consent(
+    consent_id: UUID,
+    store: DocumentStore = Depends(get_store),
+) -> None:
     """
-    Revoga o consentimento e invalida os tokens OAuth associados.
-    Conforme LGPD Art. 8º §5 — revogação sem ônus ao titular.
-
-    TODO (M1):
-        1. Buscar consent_id no Cloudant → consent_registry
-        2. Atualizar status → REVOKED, registrar revoked_at e reason
-        3. Chamar IBM API Connect OAuth Provider: POST /oauth/revoke
-        4. Publicar evento no IBM Cloud Logs para auditoria
-        5. Retornar 204 No Content
+    Revoga o consentimento conforme LGPD Art. 8º §5 — sem ônus ao titular.
+    AUTHORISED → REVOKED; AWAITING_AUTHORISATION (cancelado antes de autorizar) → REJECTED.
+    Não aciona /internal/erase: a limpeza segue a retenção do M4.
     """
-    raise NotImplementedError
+    await consent_service.revoke_consent(store, str(consent_id))

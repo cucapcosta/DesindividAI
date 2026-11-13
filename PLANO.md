@@ -88,10 +88,10 @@
 
 ### Sub-Tarefa 1 — Fluxo de Consentimento e Gateway REST
 **Responsável:** M1
-**Status:** [x] done
+**Status:** [x] done (design + implementação dos endpoints — branch `feat/m1-consentimento`)
 
 #### Intent
-Definir como o cliente autoriza o acesso aos seus dados financeiros via Open Finance e como esse consentimento é validado em cada chamada ao gateway.
+Definir como o cliente autoriza o acesso aos seus dados financeiros via Open Finance e como esse consentimento é validado em cada chamada ao gateway. Implementar os 4 endpoints de consentimento que estavam como stubs.
 
 #### Expected Outcomes
 - Contrato OpenAPI/Swagger documentando todos os endpoints da solução
@@ -106,12 +106,34 @@ Definir como o cliente autoriza o acesso aos seus dados financeiros via Open Fin
 - [x] Definir contrato OpenAPI 3.0 com schemas de request/response para cada endpoint
 - [x] Especificar política de rate limiting, autenticação e CORS no IBM API Connect
 - [x] Documentar ciclo de vida do consentimento (TTL, revogação, re-autorização)
+- [x] Implementar `POST /consent`, `GET /consent/callback`, `GET /consent/{id}`, `DELETE /consent/{id}`
 
-#### Entregáveis
+#### Entregáveis de design
 - [`openapi/openapi.yaml`](openapi/openapi.yaml) — Contrato OpenAPI 3.0 completo
 - [`docs/m1-consent-flow.md`](docs/m1-consent-flow.md) — Diagrama de sequência OAuth2 FAPI
 - [`docs/m1-api-connect-policies.md`](docs/m1-api-connect-policies.md) — Políticas API Connect
 - [`docs/m1-consent-lifecycle.md`](docs/m1-consent-lifecycle.md) — Ciclo de vida do consentimento
+
+#### Entregáveis de código
+- [`src/services/consent_service.py`](src/services/consent_service.py) — regras, validação, CPF no cofre de identidade do M4, eventos `consent.*` na trilha de auditoria do M4, transições com escrita condicional por `_rev`, cliente de revogação de token
+- [`src/api/routers/consent.py`](src/api/routers/consent.py) — 4 rotas implementadas (POST, GET /callback, GET /{id}, DELETE)
+- [`src/api/models.py`](src/api/models.py) — `ConsentStatusResponse`; `Field(example=…)` → `json_schema_extra`; `cpf` pattern ASCII-only
+- [`src/main.py`](src/main.py) — handler de `RequestValidationError` para `/consent` e `/consent/*` (400 sem ecoar CPF)
+- [`src/core/channel_auth.py`](src/core/channel_auth.py) — validação do token IAM do canal em POST/GET/DELETE `/consent` (sem API Connect)
+- [`src/storage/store.py`](src/storage/store.py) — `put(..., rev=...)`: escrita condicional (409 `CONFLICT` se outra escrita chegou antes); sem `rev`, comportamento anterior
+- [`tests/test_consent_api.py`](tests/test_consent_api.py) — 72 casos de teste (create, callback, status, revoke, concorrência, cofre e auditoria, integração M2/M3, lgpd, openapi contract)
+- [`.env.example`](.env.example) — bloco M1 (`OPEN_FINANCE_AUTH_SANDBOX`, `PUBLIC_BASE_URL`, `OPEN_FINANCE_AUTHORIZE_URL`, `OPEN_FINANCE_CLIENT_ID`, `OPEN_FINANCE_REDIRECT_URI`, `OAUTH_REVOKE_URL`)
+- [`scripts/cloud_setup.py`](scripts/cloud_setup.py) — índices `by-state-hash` e `by-consent-id` em `consent_registry`
+
+#### Pendências que continuam abertas
+| Item | Onde |
+|---|---|
+| FAPI completo: PKCE S256, request object JWT (PS256), mTLS/DPoP, troca `code → token` | API Connect (configuração) |
+| Introspecção do token e validação de escopo no gateway | API Connect |
+| Vincular titular do token a `snapshot_id`/`simulation_id` (IDOR registrado pelo M3) | API Connect + M3 |
+| Afinidade por `consent_id` no gateway (jobs `202` do `GET /debts` em memória) | API Connect |
+| Rate limit (`429`); token do titular (`openfinance_oauth2`) nos endpoints de dados | API Connect / Authorization Server |
+| Contrato exato do endpoint de revogação de token do IBM API Connect (B3); revogar também no erase LGPD e na expiração (regra c) | API Connect + M4 |
 
 #### Relevant Context
 - Regulação: Open Finance Brasil — [openfinancebrasil.org.br](https://openfinancebrasil.org.br)
@@ -149,7 +171,7 @@ Projetar o Agente 1 responsável por coletar dívidas via Open Finance e Serasa,
 - [`src/agents/agent1/`](src/agents/agent1/) — Implementação do Agente 1 (LangChain `AgentExecutor` + Granite via watsonx.ai)
 - [`src/privacy/pseudonymization.py`](src/privacy/pseudonymization.py) — HMAC-SHA256 compartilhado com M1/M4
 - [`src/api/routers/debts.py`](src/api/routers/debts.py) — `GET /debts` implementado
-- [`scripts/seed_test_consent.py`](scripts/seed_test_consent.py) — Cria/remove consentimento de teste no Cloudant (até o `POST /consent` do M1 existir)
+- [`scripts/seed_test_consent.py`](scripts/seed_test_consent.py) — Atalho de teste: cria/remove um consentimento AUTHORISED no Cloudant (o caminho normal é `POST /consent` + callback)
 - [`scripts/update_market_rates.py`](scripts/update_market_rates.py) — Atualiza as taxas médias PF do BCB usadas para estimar CET de dívidas só do Serasa
 - [`tests/`](tests/) — Testes de CET, priorização, pseudonimização, agente e endpoint
 
@@ -163,7 +185,7 @@ Projetar o Agente 1 responsável por coletar dívidas via Open Finance e Serasa,
 
 ### Sub-Tarefa 3 — Agente 2: Simulação de Cenários e Recomendação
 **Responsável:** M3
-**Status:** [ ] pending
+**Status:** [x] done
 
 #### Intent
 Projetar o Agente 2 responsável por simular cenários de quitação e gerar a recomendação final em linguagem simples, usando o Motor de Simulação como AI Service no watsonx.ai.
@@ -176,17 +198,26 @@ Projetar o Agente 2 responsável por simular cenários de quitação e gerar a r
 - Orquestração LangChain entre Agente 1 → Agente 2 especificada
 
 #### Todo List
-- [ ] Definir interface entre Agente 1 e Agente 2 (schema do snapshot como input)
-- [ ] Especificar os 3 cenários do Motor de Simulação:
+- [x] Definir interface entre Agente 1 e Agente 2 (schema do snapshot como input)
+- [x] Especificar os 3 cenários do Motor de Simulação:
   - **Agressivo:** máxima quitação com orçamento disponível, maior CET primeiro
   - **Consolidação:** portabilidade de dívidas caras para linha BB com CET menor
   - **Mínimo viável:** apenas pagamento mínimo + quitação da dívida mais cara
-- [ ] Definir inputs/outputs do Motor de Simulação (API contract do AI Service)
-- [ ] Especificar deploy do Motor como AI Service no watsonx.ai (endpoint REST)
-- [ ] Definir tool `run_simulation` do Agente 2 que chama o AI Service
-- [ ] Projetar prompt template do Agente 2 para geração de recomendação em linguagem simples
-- [ ] Definir schema JSON de resposta final: `scenarios[]`, `recommended_scenario`, `explanation`
-- [ ] Especificar como o Agente 2 é invocado após conclusão do Agente 1 (LangChain chain)
+- [x] Definir inputs/outputs do Motor de Simulação (API contract do AI Service)
+- [x] Especificar deploy do Motor como AI Service no watsonx.ai (endpoint REST)
+- [x] Definir tool `run_simulation` do Agente 2 que chama o AI Service
+- [x] Projetar prompt template do Agente 2 para geração de recomendação em linguagem simples
+- [x] Definir schema JSON de resposta final: `scenarios[]`, `recommended_scenario`, `explanation`
+- [x] Especificar como o Agente 2 é invocado após conclusão do Agente 1 (LangChain chain)
+
+#### Entregáveis
+- [`src/simulation/engine.py`](src/simulation/engine.py) — Motor de Simulação (3 cenários), com [`ai_service.py`](src/simulation/ai_service.py) e [`client.py`](src/simulation/client.py)
+- [`src/agents/recommendation_agent.py`](src/agents/recommendation_agent.py) — Agente 2 (LCEL + Granite) e tool `run_simulation`
+- `POST /simulation` e `POST /recommendation` implementados; testes em `tests/`
+- [`docs/m3-simulation-engine.md`](docs/m3-simulation-engine.md) — contrato, cenários e premissas
+- [`docs/m3-agent2-recommendation.md`](docs/m3-agent2-recommendation.md) — prompt, chain, governança
+
+> Desvios: o cenário recomendado é escolhido por regra determinística (o LLM só explica); o deploy do AI Service no watsonx.ai e o envio do trace ao watsonx.governance ainda não foram executados.
 
 #### Relevant Context
 - AI Services watsonx.ai: [Deploying AI services](https://dataplatform.cloud.ibm.com/docs/content/wsj/analyze-data/ai-services-direct-coding-overview.html)
@@ -197,37 +228,73 @@ Projetar o Agente 2 responsável por simular cenários de quitação e gerar a r
 
 ### Sub-Tarefa 4 — Dados, Pseudonimização, HSM e Governança LGPD
 **Responsável:** M4
-**Status:** [ ] pending
+**Status:** Parte A e Parte B concluídas
 
 #### Intent
 Projetar a camada de dados garantindo que informações pessoais financeiras sejam pseudonimizadas antes de qualquer persistência, com chave de re-identificação segregada em HSM, e que toda operação seja auditável para conformidade com a LGPD.
 
 #### Expected Outcomes
 - Estratégia de pseudonimização definida e documentada
-- Arquitetura do MongoDB com separação de coleções sensíveis e pseudonimizadas
-- Fluxo de gestão da chave de re-identificação no IBM Cloud Secrets Manager + HSM
-- Política de retenção e deleção de dados (direito ao esquecimento — LGPD Art. 18)
-- Configuração do watsonx.governance para rastreamento de decisões dos agentes
+- Arquitetura do Cloudant com separação de coleções sensíveis e pseudonimizadas
+- Fluxo de gestão da chave de re-identificação (hackathon: env + `KeyProvider`; produção: Secrets Manager + HSM, Trusted Profile)
+- Política de retenção e deleção de dados via job de expurgo idempotente (direito ao esquecimento — LGPD Art. 18)
+- Trilha de auditoria append-only pela aplicação em `audit_trail` + COS (`audit/`) (o código só insere; não há update/delete; para proteção plena em produção: COS com Object Lock/WORM, hash chain e credencial exclusiva de escrita)
 - Mapeamento de dados pessoais (ROPA — Record of Processing Activities)
 
 #### Todo List
-- [ ] Mapear todos os campos pessoais/sensíveis processados (CPF, saldo, dívidas, renda)
-- [ ] Definir algoritmo de pseudonimização: HMAC-SHA256 com chave mestra no HSM
-- [ ] Projetar separação no MongoDB:
+- [x] Mapear todos os campos pessoais/sensíveis processados (CPF, saldo, dívidas, renda)
+- [x] Definir algoritmo de pseudonimização: HMAC-SHA256 com chave mestra via `KeyProvider`
+- [x] Projetar separação no Cloudant:
   - Coleção `financial_snapshots` — apenas dados pseudonimizados
   - Coleção `consent_registry` — registro de consentimentos (sem dados financeiros)
-- [ ] Especificar fluxo de acesso à chave HSM: qual serviço acessa, quando, com qual role IAM
-- [ ] Definir política de retenção: TTL por tipo de dado, processo de deleção segura
-- [ ] Mapear como o watsonx.governance registra cada decisão dos agentes (trace de auditoria)
-- [ ] Documentar ROPA (mapeamento de tratamento de dados pessoais) conforme LGPD
-- [ ] Definir alertas de IBM Cloud Logs para acessos anômalos aos dados sensíveis
+  - Coleção `identity_vault` — CPF cifrado com DEK por titular + envelope KEK
+  - Coleção `audit_trail` — eventos e traces (sem expurgo por padrão; prazo configurável em `AUDIT_RETENTION_DAYS`)
+- [x] Especificar fluxo de acesso à chave: `EnvKeyProvider` (hackathon); produção deve implementar um KeyProvider sobre o Secrets Manager com role IAM `SecretsReader`
+- [x] Definir política de retenção: job de expurgo idempotente (`src/privacy/retention.py`) sobre `expires_at` / `awaiting_expires_at`
+- [x] Registrar cada operação sobre dados do titular na trilha de auditoria (`src/privacy/audit.py`); produção deve implementar um GovernanceSink para o watsonx.governance (plano)
+- [x] Documentar ROPA (mapeamento de tratamento de dados pessoais) conforme LGPD
+- [x] Definir alertas de acesso anômalo — especificados em `docs/m4-auditoria-governanca.md` (plano / produção)
+- [x] Ligar `resolve_for_serasa` ao cliente Serasa real (Parte B — `HttpSerasaClient` real usa `resolver` injetável; CPF apenas no corpo do POST)
+- [x] Retenção e erase cobrem `decision_traces` (regra a2, campo `decisions_deleted`) — Parte B
+- [x] Guarda de PII e auditoria no Agente 2 (`agent2.simulation_created`, `agent2.recommendation_generated`, hashes `prompt_sha256`/`output_sha256`) — Parte B
+- [x] `src/privacy/audit_bridge.py` (ponte async→sync, tolerante) — Parte B
+- [x] Retry com backoff exponencial para 429 do Cloudant Lite (`_with_429_retry`) — Parte B
+- [x] `vault.reveal` ligado em produção (corrigido `_default_audit` tolerante) — Parte B
+- [x] Job de retenção agendado na própria API (`src/privacy/retention_scheduler.py`, `RETENTION_SCHEDULE_ENABLED`) — revisão M4
+- [x] Apagamento e exportação do titular por CPF em todas as versões da chave (`POST /internal/erase`, `POST /internal/subject/export`; LGPD Art. 18 I, II, V, VI e VII) — revisão M4
+- [x] Cofre: `purpose` amarrado ao serviço e consentimento ativo exigido para `SERASA_QUERY` (falha fechada) — revisão M4
+- [x] Prazo configurável da trilha de auditoria (`AUDIT_RETENTION_DAYS`, regra f); **prazo a definir pelo controlador** — revisão M4
+- [x] 401 no `/internal/*` registrado como `internal.auth_failed` (log JSON) — revisão M4
+- [x] ROPA corrigido (Art. 18 por inciso e Art. 20) e RIPD em rascunho (`docs/m4-ripd.md`) — revisão M4
+
+#### Entregáveis
+- [`src/privacy/key_provider.py`](src/privacy/key_provider.py) — `KeyProvider`, `EnvKeyProvider`
+- [`src/privacy/pseudonymization.py`](src/privacy/pseudonymization.py) — HMAC-SHA256 + `current_key_version()` + `pseudonymize_cpf_with_version()`
+- [`src/privacy/identity_vault.py`](src/privacy/identity_vault.py) — cofre AES-256-GCM com DEK por titular; `store`, `reveal` (auditado), `shred`, `resolve_for_serasa`
+- [`src/privacy/pii_guard.py`](src/privacy/pii_guard.py) — `assert_no_pii()` recursivo; detecta CPF em 4 formatos (0 falsos positivos em 5.000 textos financeiros)
+- [`src/privacy/audit.py`](src/privacy/audit.py) — `record_event()`, `AuditRepository`, cópia COS, `GovernanceSink`
+- [`src/privacy/audit_bridge.py`](src/privacy/audit_bridge.py) — ponte async→sync para o M3 (Parte B)
+- [`src/privacy/retention.py`](src/privacy/retention.py) — `run_retention()`, `ensure_indexes()`, `ensure_databases()`; CLI `python -m src.privacy.retention [--dry-run] [--ensure]`; regra a2 para `decision_traces` (Parte B)
+- [`src/privacy/retention_store.py`](src/privacy/retention_store.py) — repositórios de retenção; retry 429 (`_with_429_retry`); `iter_decisions`, `delete_decision` (Parte B)
+- [`src/privacy/erasure.py`](src/privacy/erasure.py) — lógica de apagamento LGPD Art. 18; `decisions_deleted` (Parte B); `erase_subject_by_cpf` (todas as versões da chave)
+- [`src/privacy/subject_access.py`](src/privacy/subject_access.py) — exportação dos dados do titular (acesso e portabilidade)
+- [`src/privacy/retention_scheduler.py`](src/privacy/retention_scheduler.py) — agendador do job de retenção no lifespan da API
+- [`src/api/routers/internal.py`](src/api/routers/internal.py) — `POST /internal/erase` (CPF), `POST /internal/erase/{pseudonym_id}`, `POST /internal/subject/export`, `POST /internal/retention/run`
+- [`tests/m4/`](tests/m4/) — testes unitários e de integração da camada de privacidade
+- [`docs/m4-mapeamento-dados.md`](docs/m4-mapeamento-dados.md) — mapeamento de todos os campos pessoais/financeiros (inclui `decision_traces`)
+- [`docs/m4-ropa.md`](docs/m4-ropa.md) — ROPA LGPD
+- [`docs/m4-ripd.md`](docs/m4-ripd.md) — RIPD (Art. 38), rascunho técnico para revisão do DPO
+- [`docs/m4-retencao-e-delecao.md`](docs/m4-retencao-e-delecao.md) — política de retenção e deleção
+- [`docs/m4-chaves-e-iam.md`](docs/m4-chaves-e-iam.md) — gestão de chaves e IAM
+- [`docs/m4-auditoria-governanca.md`](docs/m4-auditoria-governanca.md) — auditoria e governança
+- `TEST_FINAL.md` — relatório de testes final (gerado pelo orquestrador)
 
 #### Relevant Context
 - IBM Cloud Secrets Manager: `docs_ibm_cloud_secrets_manager`
 - watsonx.governance: `docs_ibm_watsonx` (seção governance/AI Factsheets)
 - LGPD: Lei nº 13.709/2018 — especialmente Art. 18 (direitos do titular) e Art. 46 (segurança)
 - IBM Cloud IAM: `docs_ibm_cloud_iam` — trusted profiles para acesso ao HSM
-- MongoDB TTL indexes para expiração automática de documentos
+- Cloudant sem TTL nativo — job de expurgo substitui os índices TTL do MongoDB
 
 ---
 
@@ -240,10 +307,17 @@ Projetar a camada de dados garantindo que informações pessoais financeiras sej
 | Armazenamento (produção) | IBM Cloud Databases for MongoDB | NoSQL flexível para snapshots financeiros semi-estruturados |
 | Armazenamento (hackathon) | **Cloudant** (substituto) | MongoDB indisponível na conta do hackathon; Cloudant é document-store compatível |
 | Secrets (produção) | IBM Cloud Secrets Manager + HSM | Pseudonimização determinística com chave segregada em hardware |
-| Secrets (hackathon) | COS + envelope encryption | Secrets Manager indisponível na conta do hackathon |
+| Secrets (hackathon) | **Env + KeyProvider; envelope encryption com DEK por titular** | Secrets Manager indisponível na conta do hackathon; chaves via variáveis de ambiente atrás da interface `KeyProvider`; CPF cifrado com AES-256-GCM e DEK aleatória por titular, envolvida pela KEK |
 | Pseudonimização | HMAC-SHA256 + chave mestra | Pseudonimização determinística (permite correlação interna) |
-| Gateway | IBM API Connect | Padrão IBM, suporte a FAPI (Financial-grade API), políticas OAuth2 nativas |
+| Retenção no Cloudant | Job de expurgo idempotente (`src/privacy/retention.py`) | Cloudant não tem TTL nativo; job substitui os índices TTL do MongoDB previstos no M1 |
+| Gateway (produção) | IBM API Connect | Padrão IBM, suporte a FAPI (Financial-grade API), políticas OAuth2 nativas |
+| Gateway (hackathon) | **Não provisionado** — contrato em `openapi/openapi.yaml`, políticas em `docs/m1-api-connect-policies.md` | API Connect fora da conta do hackathon. O backend valida o token IAM do canal nas rotas `/consent` (`src/core/channel_auth.py`) e exige consentimento em `/debts`, `/simulation` e `/recommendation` (`REQUIRE_CONSENT=true` por padrão). O token do titular nos endpoints de dados depende de um Authorization Server, indisponível na conta |
 | Governança | watsonx.governance | Rastreabilidade de decisões de IA exigida por regulação financeira |
+| Governança (hackathon) | **watsonx.governance ainda não integrado** | O `GovernanceSink` padrão é `NoopGovernanceSink` e nada é enviado. A instância `watsonx-Hackathon GOV` está provisionada: é pendência de implementação (trace montado pelo M3), não limitação da conta |
+| Retenção periódica (hackathon) | **Agendador asyncio no lifespan da API** | Cloudant sem TTL e conta sem Code Engine; o job é idempotente, então várias réplicas podem rodá-lo. Em produção, job agendado único |
+| Pedidos do titular | **Por CPF, em todas as versões da chave de pseudonimização** | Após uma rotação o mesmo CPF tem um pseudônimo por versão; pedir por um só deixaria dados para trás. As chaves antigas não podem ser descartadas |
+| Prazo da trilha de auditoria | **Configurável (`AUDIT_RETENTION_DAYS`), sem expurgo por padrão** | A trilha é dado pseudonimizado mesmo após o apagamento; o prazo é decisão jurídica do controlador |
+| Observabilidade (hackathon) | **Logs JSON no stdout + trilha em Cloudant/COS** | IBM Cloud Logs e Activity Tracker indisponíveis na conta; eventos de auditoria saem como JSON no stdout (`desendividai.audit`); alertas de acesso anômalo especificados, mas não ativos nesta conta |
 | Motor de simulação | AI Service Python no watsonx.ai | Lógica financeira pura, sem dependência de LLM, reutilizável como endpoint REST |
 | Canal de engajamento | Fora do escopo | API genérica OpenAPI — qualquer canal pode integrar |
 | Acompanhamento mensal | Fora do escopo | Reduz complexidade da v1 |
